@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
 
+tkdnd_datas, tkdnd_binaries, tkdnd_hidden = collect_all('tkinterdnd2')
 
 a = Analysis(
     ['PXSort.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=tkdnd_binaries,
+    datas=tkdnd_datas,
+    hiddenimports=tkdnd_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -14,6 +16,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -29,7 +32,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
