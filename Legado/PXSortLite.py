@@ -9,11 +9,14 @@ from tkinter import messagebox
 
 
 APP_NAME = "PXSort Lite"
-SEP = "\\\\"
+SEP = "\\\\"  # duas barras
 
 VALID_SIZES = {
+    # Adulto
     "PP", "P", "M", "G", "GG", "XG", "XGG",
+    # Babylook
     "BLPP", "BLP", "BLM", "BLG", "BLGG",
+    # Infantil com A
     "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
 }
 
@@ -21,7 +24,7 @@ VALID_SIZES = {
 @dataclass(frozen=True)
 class Item:
     name: str
-    number: str
+    number: str  # pode ser ""
 
 
 def _clean_token(s: str) -> str:
@@ -37,7 +40,7 @@ def _normalize(text: str) -> str:
 
 
 def _is_number(tok: str) -> bool:
-    return tok.isdigit()
+    return tok.isdigit()  # preserva 01
 
 
 def parse_line(line: str) -> Optional[Tuple[str, Item]]:
@@ -50,6 +53,7 @@ def parse_line(line: str) -> Optional[Tuple[str, Item]]:
     if not parts:
         return None
 
+    # acha tamanho em qualquer posição
     size_idx = None
     size_val = None
     for i, p in enumerate(parts):
@@ -66,6 +70,7 @@ def parse_line(line: str) -> Optional[Tuple[str, Item]]:
     if not remaining:
         return None
 
+    # número = último token numérico
     number = ""
     number_idx = None
     for i in range(len(remaining) - 1, -1, -1):
@@ -93,6 +98,11 @@ def sort_key(it: Item) -> tuple[str, str]:
 
 
 def process_text(text: str) -> tuple[str, List[str]]:
+    """
+    Retorna:
+      output_str: texto final agrupado por tamanho
+      ignored: linhas ignoradas
+    """
     buckets: Dict[str, List[Item]] = {}
     ignored: List[str] = []
 
@@ -105,22 +115,29 @@ def process_text(text: str) -> tuple[str, List[str]]:
         size, item = parsed
         buckets.setdefault(size, []).append(item)
 
+    # ordena cada tamanho
     for s in list(buckets.keys()):
         buckets[s] = sorted(buckets[s], key=sort_key)
 
+    # monta saída
     out_lines: List[str] = []
     for size in sorted(buckets.keys()):
         out_lines.append(f"[{size}]")
         for it in buckets[size]:
             out_lines.append(f"{it.name}{SEP}{it.number}")
-        out_lines.append("")
+        out_lines.append("")  # linha em branco entre tamanhos
 
-    return "\n".join(out_lines).strip(), ignored
+    output_str = "\n".join(out_lines).strip()
+    return output_str, ignored
 
 
-class AppFrame(tk.Frame):
-    def __init__(self, parent) -> None:
-        super().__init__(parent)
+class App(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.title(APP_NAME)
+        self.geometry("1000x600")
+        self.minsize(900, 520)
 
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
@@ -146,6 +163,7 @@ class AppFrame(tk.Frame):
         self.out = tk.Text(right, wrap="word")
         self.out.pack(fill="both", expand=True, pady=(6, 0))
 
+        # exemplo
         self.inp.insert(
             "1.0",
             "M, João, 10\n"
@@ -162,21 +180,23 @@ class AppFrame(tk.Frame):
             return
 
         output, ignored = process_text(raw)
+
         self.out.delete("1.0", "end")
         self.out.insert("1.0", output)
 
         if ignored:
-            messagebox.showinfo(APP_NAME, f"Linhas ignoradas (sem tamanho reconhecido): {len(ignored)}")
+            messagebox.showinfo(
+                APP_NAME,
+                f"Processado com sucesso.\n\nLinhas ignoradas (sem tamanho reconhecido): {len(ignored)}"
+            )
 
     def copy_output(self) -> None:
         text = self.out.get("1.0", "end").strip()
         if not text:
             messagebox.showwarning(APP_NAME, "Não há saída para copiar.")
             return
-        root = self.winfo_toplevel()
-        root.clipboard_clear()
-        root.clipboard_append(text)
-        root.update()
+        self.clipboard_clear()
+        self.clipboard_append(text)
         messagebox.showinfo(APP_NAME, "Saída copiada para a área de transferência.")
 
     def clear_all(self) -> None:
@@ -184,20 +204,8 @@ class AppFrame(tk.Frame):
         self.out.delete("1.0", "end")
 
 
-def build_ui(parent):
-    return AppFrame(parent)
-
-
 def main() -> None:
-    root = tk.Tk()
-    root.title(APP_NAME)
-    root.geometry("1000x600")
-    root.minsize(900, 520)
-
-    ui = build_ui(root)
-    ui.pack(fill="both", expand=True)
-
-    root.mainloop()
+    App().mainloop()
 
 
 if __name__ == "__main__":

@@ -21,8 +21,11 @@ CONFIG_FILE = "pxsort_config.json"
 SEP = "\\\\"  # duas barras
 
 VALID_SIZES = {
+    # Adulto
     "PP", "P", "M", "G", "GG", "XG", "XGG",
+    # Babylook
     "BLPP", "BLP", "BLM", "BLG", "BLGG",
+    # Infantil com A
     "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
 }
 
@@ -30,9 +33,12 @@ VALID_SIZES = {
 @dataclass(frozen=True)
 class Item:
     name: str
-    number: str
+    number: str  # pode ser ""
 
 
+# -----------------------------
+# Config (igual padrão PX)
+# -----------------------------
 def config_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home())
     return Path(base) / APP_NAME
@@ -58,6 +64,9 @@ def save_config(cfg: dict) -> None:
     p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# -----------------------------
+# Parse
+# -----------------------------
 def _clean_token(s: str) -> str:
     t = s.strip()
     if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
@@ -71,7 +80,7 @@ def _normalize_text(text: str) -> str:
 
 
 def _looks_like_number(token: str) -> bool:
-    return token.isdigit()
+    return token.isdigit()  # preserva "01"
 
 
 def parse_line(line: str) -> Optional[Tuple[str, Item]]:
@@ -84,6 +93,7 @@ def parse_line(line: str) -> Optional[Tuple[str, Item]]:
     if not parts:
         return None
 
+    # achar tamanho (qualquer posição)
     size_idx = None
     size_val = None
     for i, p in enumerate(parts):
@@ -100,6 +110,7 @@ def parse_line(line: str) -> Optional[Tuple[str, Item]]:
     if not remaining:
         return None
 
+    # número = último token numérico
     number = ""
     number_idx = None
     for i in range(len(remaining) - 1, -1, -1):
@@ -167,9 +178,16 @@ def write_zip(
     return counts
 
 
-class AppFrame(tk.Frame):
-    def __init__(self, parent) -> None:
-        super().__init__(parent)
+# -----------------------------
+# App (igual estilo PXList)
+# -----------------------------
+class App(TkinterDnD.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.title(APP_NAME)
+        self.geometry("900x620")
+        self.minsize(820, 520)
 
         self.cfg = load_config()
 
@@ -204,6 +222,7 @@ class AppFrame(tk.Frame):
         self.txt = tk.Text(mid, wrap="word", height=18)
         self.txt.pack(fill="both", expand=True, pady=(6, 0))
 
+        # DnD igual ao PXList
         self.txt.drop_target_register(DND_FILES)
         self.txt.dnd_bind("<<Drop>>", self.on_drop)
 
@@ -214,6 +233,7 @@ class AppFrame(tk.Frame):
         tk.Button(btns, text="Limpar", command=self.clear).pack(side="left", padx=6)
         tk.Button(btns, text="Gerar ZIP", command=self.export_zip).pack(side="right")
 
+        # Exemplo
         self.txt.insert(
             "1.0",
             "M, João, 10\n"
@@ -328,20 +348,9 @@ class AppFrame(tk.Frame):
         messagebox.showinfo(APP_NAME, msg)
 
 
-def build_ui(parent):
-    return AppFrame(parent)
-
-
 def main() -> None:
-    root = TkinterDnD.Tk()
-    root.title(APP_NAME)
-    root.geometry("900x620")
-    root.minsize(820, 520)
-
-    ui = build_ui(root)
-    ui.pack(fill="both", expand=True)
-
-    root.mainloop()
+    app = App()
+    app.mainloop()
 
 
 if __name__ == "__main__":
