@@ -31,6 +31,7 @@ class JocastaHub(RootBase):
         self.nb.pack(fill="both", expand=True)
 
         self._add_tab("PXList", "PXList")
+        self._add_tab("PXListLite", "PXListLite")
         self._add_tab("PXSort", "PXSort")
         self._add_tab("PXSortLite", "PXSortLite")
         self._add_tab("Jarvis", "Jarvis")
