@@ -1,35 +1,23 @@
 import os
 import sys
 import json
+import re
 import requests
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, filedialog
-from tkinter import font as tkfont
 
-# ---- Drag & Drop (opcional) ----
+# Drag & Drop (opcional)
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
     DND_AVAILABLE = True
 except Exception:
     DND_AVAILABLE = False
 
-import random
 
-APP_TITLES = [
-    "Mano Jarvis — já resolvo essas parada aí",
-    "Jarvis Malandro — deixa comigo que eu arrumo",
-    "Ô loco bicho, é o Jarvis arrumando seus arquivos!",
-    "Jarvis — transformando txt véio em json bonitão",
-    "Mano Jarvis — JSON no grau, CSV na mão",
-    "Jarvis raiz — sem bug, só gambi",
-    "Jarvis — clipa esse CSV e vai pro abraço",
-    "Jarvis — hoje é dia de resolver treta de arquivo",
-    "Jarvis — mais rápido que CTRL+C + CTRL+V",
-    "Jarvis — eu sou inevitável... e formatador também",
-    "Jarvis — os txt pira, os json chora",
-]
-APP_TITLE = random.choice(APP_TITLES)
+APP_NAME = "Jarvis"
+APP_TITLE = "Jarvis"
+DEFAULT_JSON_SUBFOLDER = "JSON"
 
 
 def resource_path(rel_path: str) -> str:
@@ -50,14 +38,14 @@ FIELD_LABELS = {
     "Nickname": "Apelido",
     "BloodType": "Tipo Sanguíneo",
 }
-FIELD_ORDER = ["Name","Number","ShortSleeve","LongSleeve","Short","Pants","Tanktop","Vest","Nickname","BloodType"]
-MANDATORY_FIELDS = {"Name","Number"}
+FIELD_ORDER = ["Name", "Number", "ShortSleeve", "LongSleeve", "Short", "Pants", "Tanktop", "Vest", "Nickname", "BloodType"]
+MANDATORY_FIELDS = {"Name", "Number"}
 
 
 def normalize_str(x):
     if x is None:
         return ""
-    return str(x).replace("\r","").replace("\n"," ").strip()
+    return str(x).replace("\r", "").replace("\n", " ").strip()
 
 
 def decide_effective_fields(orders):
@@ -66,20 +54,23 @@ def decide_effective_fields(orders):
         for key in FIELD_ORDER:
             if key in MANDATORY_FIELDS:
                 continue
-            if normalize_str(entry.get(key,"")) != "":
+            if normalize_str(entry.get(key, "")) != "":
                 present.add(key)
     return [k for k in FIELD_ORDER if (k in MANDATORY_FIELDS) or (k in present)]
 
 
-import re
 def format_lines(data):
     orders = data.get("orders", [])
     if not isinstance(orders, list):
         raise ValueError("Campo 'orders' inválido (não é lista).")
+
     eff = decide_effective_fields(orders)
     lines = []
+
     for e in orders:
-        row_values = [normalize_str(e.get(k,"")) for k in eff]
+        row_values = [normalize_str(e.get(k, "")) for k in eff]
+
+        # Expande "qtd-tamanho" (ex: 2-M)
         expanded_rows = []
         for idx, val in enumerate(row_values):
             m = re.match(r"^(\d+)-(.+)$", val)
@@ -93,7 +84,9 @@ def format_lines(data):
                 break
         else:
             expanded_rows.append(",".join(row_values))
+
         lines.extend(expanded_rows)
+
     return lines, eff
 
 
@@ -103,31 +96,35 @@ def copy_to_clipboard(root, text):
     root.update()
 
 
-def do_convert_json_data(root, data: dict, origem: str, status_widget=None):
+def do_convert_json_data(root, data: dict, origem: str, status_setter=None):
     lines, fields = format_lines(data)
     out = "\n".join(lines)
+
     copy_to_clipboard(root, out)
+
     msg = [
         f"Origem: {origem}",
         f"Linhas geradas: {len(lines)}",
-        "Colunas usadas: " + ", ".join(FIELD_LABELS.get(f,f) for f in fields),
+        "Colunas usadas: " + ", ".join(FIELD_LABELS.get(f, f) for f in fields),
         "✅ Texto copiado para a área de transferência."
     ]
-    if status_widget:
-        status_widget.config(state="normal"); status_widget.delete("1.0","end")
-        status_widget.insert("end", out + "\n\n" + "\n".join(msg))
-        status_widget.config(state="disabled")
+    if status_setter:
+        status_setter(out + "\n\n" + "\n".join(msg))
+
     messagebox.showinfo("JSON → Clipboard", "\n".join(msg))
 
 
 def baixar_por_linhas(linhas, pasta_saida: str):
-    headers = {"User-Agent": "Jarvis/1.0 (+https://local.app)"}
+    headers = {"User-Agent": "Jarvis/1.0 (+local)"}
     os.makedirs(pasta_saida, exist_ok=True)
-    total, erros = 0, []
+
+    total = 0
+    erros = []
+
     for i, linha in enumerate(linhas):
         s = linha.strip()
         if s.startswith("JSON: "):
-            url = s.replace("JSON: ","").strip()
+            url = s.replace("JSON: ", "").strip()
             try:
                 r = requests.get(url, headers=headers, timeout=20)
                 r.raise_for_status()
@@ -135,26 +132,30 @@ def baixar_por_linhas(linhas, pasta_saida: str):
                     dados = r.json()
                 except Exception as je:
                     raise ValueError(f"Resposta não é JSON válido: {je}")
-                nome = str(dados.get("title", f"pedido_{i+1}")).replace(" ","_").upper()
-                with open(os.path.join(pasta_saida, f"{nome}.json"), "w", encoding="utf-8") as fo:
+
+                nome = str(dados.get("title", f"pedido_{i+1}")).replace(" ", "_").upper()
+                out_path = os.path.join(pasta_saida, f"{nome}.json")
+                with open(out_path, "w", encoding="utf-8") as fo:
                     json.dump(dados, fo, ensure_ascii=False, indent=4)
+
                 total += 1
             except Exception as e:
                 erros.append(f"{url}\n{e}")
+
     return total, erros
 
 
-def exibir_resultado_baixa(total, erros, status_widget=None, destino="JSON"):
+def exibir_resultado_baixa(total, erros, status_setter=None, destino="JSON"):
     msg = f"{total} arquivo(s) salvos com sucesso na pasta '{destino}'!"
     if erros:
-        msg += f"\n\n{len(erros)} erro(s) ocorreram.\nVeja detalhes no console."
+        msg += f"\n\n{len(erros)} erro(s) ocorreram. (Detalhes no console)"
         print("Erros ao baixar JSONs:")
         for e in erros:
             print("-", e)
-    if status_widget:
-        status_widget.config(state="normal"); status_widget.delete("1.0","end")
-        status_widget.insert("end", msg)
-        status_widget.config(state="disabled")
+
+    if status_setter:
+        status_setter(msg)
+
     messagebox.showinfo("TXT → JSON", msg)
 
 
@@ -165,232 +166,135 @@ def _clean_drop_path(raw: str) -> Path:
     return Path(raw.strip('"'))
 
 
-def handle_file(root, file_path: str, status_widget=None):
+def handle_file(root, file_path: str, status_setter=None):
     try:
         p = _clean_drop_path(file_path)
         if not p.exists() or not p.is_file():
             raise FileNotFoundError("Arquivo não encontrado.")
+
         ext = p.suffix.lower()
+
         if ext == ".json":
             with p.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            do_convert_json_data(root, data, p.name, status_widget)
+            do_convert_json_data(root, data, p.name, status_setter)
+
         elif ext == ".txt":
-            pasta = os.path.join(str(p.parent), "JSON")
+            pasta = os.path.join(str(p.parent), DEFAULT_JSON_SUBFOLDER)
             with p.open("r", encoding="utf-8") as f:
                 linhas = f.readlines()
             total, erros = baixar_por_linhas(linhas, pasta)
-            exibir_resultado_baixa(total, erros, status_widget, destino="JSON")
+            exibir_resultado_baixa(total, erros, status_setter, destino=DEFAULT_JSON_SUBFOLDER)
+
         else:
             raise ValueError("Formato não suportado. Use .txt ou .json.")
+
     except Exception as e:
-        if status_widget:
-            status_widget.config(state="normal"); status_widget.delete("1.0","end")
-            status_widget.insert("end", f"Erro: {e}")
-            status_widget.config(state="disabled")
+        if status_setter:
+            status_setter(f"Erro: {e}")
         messagebox.showerror("Erro", str(e))
 
 
-def _status(widget, text):
-    if widget:
-        widget.config(state="normal"); widget.delete("1.0","end")
-        widget.insert("end", text)
-        widget.config(state="disabled")
-
-
-def auto_process_pasted(root, raw_text: str, status_widget=None):
+def auto_process_pasted(root, raw_text: str, status_setter=None):
     text = raw_text.strip()
     if not text:
-        messagebox.showwarning("Aviso", "Cole algum conteúdo no campo de texto.")
+        messagebox.showwarning(APP_NAME, "Cole algum conteúdo no campo de texto.")
         return
+
+    # JSON colado
     if text[0] in "{[":
         try:
             data = json.loads(text)
         except Exception as e:
             messagebox.showerror("Erro", f"Não consegui interpretar o texto como JSON:\n{e}")
             return
-        do_convert_json_data(root, data, "Conteúdo colado", status_widget)
+        do_convert_json_data(root, data, "Conteúdo colado", status_setter)
         return
 
+    # TXT colado
     target_dir = filedialog.askdirectory(title="Escolha a pasta onde será criada a subpasta 'JSON'")
     if not target_dir:
         return
-    pasta_saida = os.path.join(target_dir, "JSON")
+
+    pasta_saida = os.path.join(target_dir, DEFAULT_JSON_SUBFOLDER)
     linhas = text.splitlines()
     total, erros = baixar_por_linhas(linhas, pasta_saida)
-    exibir_resultado_baixa(total, erros, status_widget, destino="JSON")
-
-
-THEMES = {
-    "dark": {
-        "BG": "#0b1220", "PANEL": "#111827", "ACCENT": "#43b7ff", "ACCENT2": "#2563eb",
-        "TEXT": "#e6f0ff", "MUTED": "#93a4bd", "BORDER": "#1f2937", "ENTRY": "#0f172a",
-        "SEL": "#1e3a8a"
-    },
-    "light": {
-        "BG": "#f5f7fb", "PANEL": "#ffffff", "ACCENT": "#2563eb", "ACCENT2": "#1d4ed8",
-        "TEXT": "#0b1220", "MUTED": "#4b5563", "BORDER": "#d1d5db", "ENTRY": "#ffffff",
-        "SEL": "#93c5fd"
-    }
-}
-CURRENT_THEME = {"name": "dark"}
-
-
-def theme_colors():
-    return THEMES[CURRENT_THEME["name"]]
-
-
-def apply_base_fonts(root):
-    try:
-        base_font = tkfont.Font(root, family="Segoe UI", size=10)
-    except Exception:
-        base_font = tkfont.nametofont("TkDefaultFont")
-        base_font.configure(size=10)
-    root.option_add("*Font", base_font)
-
-
-def style_text_widget(w: tk.Text):
-    C = theme_colors()
-    w.configure(
-        bg=C["ENTRY"], fg=C["TEXT"], insertbackground=C["ACCENT"],
-        selectbackground=C["SEL"], selectforeground=C["TEXT"],
-        relief="solid", bd=1, highlightthickness=0, padx=6, pady=6,
-        wrap="word"
-    )
-
-
-def style_box_label(lbl: tk.Label):
-    C = theme_colors()
-    lbl.configure(
-        bg=C["PANEL"], fg=C["TEXT"], bd=1, relief="solid",
-        padx=10, pady=8, justify="center", wraplength=1200
-    )
-
-
-def style_button_primary(btn: tk.Button):
-    C = theme_colors()
-    btn.configure(
-        bg=C["ACCENT2"], fg=theme_colors()["TEXT"],
-        activebackground=C["ACCENT2"], activeforeground=theme_colors()["TEXT"],
-        relief="flat", padx=14, pady=6, bd=0
-    )
-
-
-def style_button_outline(btn: tk.Button):
-    C = theme_colors()
-    btn.configure(
-        bg=C["PANEL"], fg=C["TEXT"],
-        activebackground=C["PANEL"], activeforeground=C["TEXT"],
-        relief="solid", bd=1, highlightthickness=0,
-        padx=12, pady=6, highlightbackground=C["BORDER"]
-    )
-
-
-def restyle_all(refs):
-    C = theme_colors()
-    refs["outer"].configure(bg=C["BG"])
-    refs["bottom"].configure(bg=C["BG"])
-    refs["right_btns"].configure(bg=C["BG"])
-    style_box_label(refs["instr"])
-    refs["title_lbl"].configure(bg=C["BG"], fg=C["ACCENT"])
-    style_text_widget(refs["text_box"])
-    style_text_widget(refs["status"])
-    style_button_outline(refs["btn_clear"])
-    style_button_outline(refs["btn_select"])
-    style_button_primary(refs["btn_process"])
-
-
-def toggle_theme(refs, btn_toggle):
-    CURRENT_THEME["name"] = "light" if CURRENT_THEME["name"] == "dark" else "dark"
-    restyle_all(refs)
-    btn_toggle.configure(text=f"Tema: {'Claro' if CURRENT_THEME['name']=='light' else 'Escuro'}")
+    exibir_resultado_baixa(total, erros, status_setter, destino=DEFAULT_JSON_SUBFOLDER)
 
 
 def build_ui(parent):
-    # root real (Hub ou standalone)
     root = parent.winfo_toplevel()
 
     outer = tk.Frame(parent)
-    outer.pack(fill="both", expand=True, padx=12, pady=12)
+    outer.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # Instruções
-    instr = tk.Label(
-        outer,
-        text=("Arraste e solte um arquivo .txt ou .json — ou clique em 'Selecionar arquivo…'.\n\n"
-              "• TXT → baixa os JSONs para a pasta /JSON/ ao lado do TXT (ou na pasta escolhida quando colado)\n"
-              "• JSON → copia as linhas CSV para a área de transferência"),
-        justify="center"
-    )
-    instr.pack(fill="x", pady=(0, 8))
+    # Topo: instrução + botões (padrão PX)
+    top = tk.Frame(outer)
+    top.pack(fill="x")
 
-    # Título
-    try:
-        title_font = tkfont.Font(root, family="Segoe UI Semibold", size=16)
-    except Exception:
-        title_font = tkfont.Font(root, family="Segoe UI", size=16, weight="bold")
+    tk.Label(
+        top,
+        text="Jarvis — cole um TXT com linhas 'JSON: <url>' ou abra um .txt/.json",
+        font=("Segoe UI", 11, "bold"),
+    ).pack(side="left")
 
-    title_lbl = tk.Label(outer, text="Cole o texto aqui ↓", font=title_font)
-    title_lbl.pack(anchor="w", pady=(2, 4))
+    btns = tk.Frame(top)
+    btns.pack(side="right")
 
-    text_box = tk.Text(outer)
-    text_box.pack(fill="both", expand=True, pady=(0, 8))
+    # Centro: entrada
+    mid = tk.Frame(outer)
+    mid.pack(fill="both", expand=True, pady=(10, 10))
 
-    status = tk.Text(outer, state="disabled", height=10)
-    status.pack(fill="both", expand=True, pady=(0, 8))
+    tk.Label(mid, text="Entrada (cole aqui) — ou selecione um arquivo:").pack(anchor="w")
+    text_box = tk.Text(mid, wrap="word", height=10)
+    text_box.pack(fill="both", expand=False, pady=(6, 10))
 
-    bottom = tk.Frame(outer)
-    bottom.pack(fill="x")
-    bottom.columnconfigure(0, weight=1)
+    tk.Label(mid, text="Saída / status:").pack(anchor="w")
+    status = tk.Text(mid, wrap="word", height=10, state="disabled")
+    status.pack(fill="both", expand=True, pady=(6, 0))
 
-    btn_clear = tk.Button(bottom, text="Limpar área de texto",
-                          command=lambda: (text_box.delete("1.0", "end"), _status(status, "")))
-    btn_clear.grid(row=0, column=0, sticky="w")
+    def status_set(text: str):
+        status.config(state="normal")
+        status.delete("1.0", "end")
+        status.insert("1.0", text)
+        status.config(state="disabled")
 
-    btn_toggle = tk.Button(bottom, text="Tema: Escuro")
-    btn_toggle.grid(row=0, column=1, padx=10)
-
-    right_btns = tk.Frame(bottom)
-    right_btns.grid(row=0, column=2, sticky="e")
-
-    btn_select = tk.Button(
-        right_btns,
-        text="Selecionar arquivo...",
-        command=lambda: (
-            (lambda p: handle_file(root, p, status) if p else None)(
-                filedialog.askopenfilename(
-                    title="Selecione .txt ou .json",
-                    filetypes=[("TXT/JSON", "*.txt *.json"), ("TXT", "*.txt"), ("JSON", "*.json")]
-                )
-            )
+    def select_file():
+        p = filedialog.askopenfilename(
+            title="Selecione .txt ou .json",
+            filetypes=[("TXT/JSON", "*.txt *.json"), ("TXT", "*.txt"), ("JSON", "*.json")]
         )
+        if p:
+            handle_file(root, p, status_set)
+
+    def process_paste():
+        auto_process_pasted(root, text_box.get("1.0", "end"), status_set)
+
+    def clear_all():
+        text_box.delete("1.0", "end")
+        status_set("")
+
+    tk.Button(btns, text="Selecionar arquivo...", command=select_file).pack(side="left", padx=(0, 6))
+    tk.Button(btns, text="Processar", command=process_paste).pack(side="left", padx=(0, 6))
+    tk.Button(btns, text="Limpar", command=clear_all).pack(side="left")
+
+    # Área DnD (opcional) — visual padrão simples
+    drop = tk.Label(
+        outer,
+        text="SOLTE AQUI (.TXT ou .JSON)",
+        relief="ridge",
+        bd=2,
+        height=2,
+        font=("Segoe UI", 12, "bold"),
     )
-    btn_select.pack(side="left", padx=(0, 8))
+    drop.pack(fill="x", pady=(10, 0))
 
-    btn_process = tk.Button(
-        right_btns,
-        text="Processar",
-        command=lambda: auto_process_pasted(root, text_box.get("1.0", "end"), status)
-    )
-    btn_process.pack(side="left")
-
-    refs = {
-        "outer": outer, "bottom": bottom, "right_btns": right_btns,
-        "instr": instr, "title_lbl": title_lbl,
-        "text_box": text_box, "status": status,
-        "btn_clear": btn_clear, "btn_select": btn_select, "btn_process": btn_process
-    }
-
-    # Tema inicial
-    restyle_all(refs)
-    btn_toggle.configure(text=f"Tema: {'Claro' if CURRENT_THEME['name']=='light' else 'Escuro'}")
-    btn_toggle.configure(command=lambda: toggle_theme(refs, btn_toggle))
-
-    # DnD (no Hub funciona quando o root do Hub for TkinterDnD.Tk)
     if DND_AVAILABLE:
-        instr.drop_target_register(DND_FILES)
-        instr.dnd_bind("<<Drop>>", lambda e: handle_file(root, e.data, status))
+        drop.drop_target_register(DND_FILES)
+        drop.dnd_bind("<<Drop>>", lambda e: handle_file(root, e.data, status_set))
     else:
-        _status(status, "Dica: instale 'tkinterdnd2' para arrastar-e-soltar.")
+        # não força erro, só informa
+        status_set("Dica: instale 'tkinterdnd2' para habilitar arrastar-e-soltar.")
 
     return outer
 
@@ -399,15 +303,13 @@ def main():
     Root = TkinterDnD.Tk if DND_AVAILABLE else tk.Tk
     root = Root()
     root.title(APP_TITLE)
-    root.geometry("1060x760")
-    root.minsize(880, 600)
-    root.resizable(True, True)
+    root.geometry("980x680")
+    root.minsize(900, 600)
+
     try:
         root.iconbitmap(resource_path("jarvis.ico"))
     except Exception:
         pass
-
-    apply_base_fonts(root)
 
     ui = build_ui(root)
     ui.pack(fill="both", expand=True)
