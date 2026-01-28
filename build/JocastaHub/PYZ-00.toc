@@ -2,6 +2,7 @@
  [('Jarvis', 'C:\\Projetos\\ProjetoJocasta\\Jarvis.py', 'PYMODULE'),
   ('PXList', 'C:\\Projetos\\ProjetoJocasta\\PXList.py', 'PYMODULE'),
   ('PXListLite', 'C:\\Projetos\\ProjetoJocasta\\PXListLite.py', 'PYMODULE'),
+  ('PXListPlus', 'C:\\Projetos\\ProjetoJocasta\\PXListPlus.py', 'PYMODULE'),
   ('PXSort', 'C:\\Projetos\\ProjetoJocasta\\PXSort.py', 'PYMODULE'),
   ('PXSortLite', 'C:\\Projetos\\ProjetoJocasta\\PXSortLite.py', 'PYMODULE'),
   ('PXTotaList', 'C:\\Projetos\\ProjetoJocasta\\PXTotaList.py', 'PYMODULE'),
