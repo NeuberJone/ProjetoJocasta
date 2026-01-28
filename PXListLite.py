@@ -247,6 +247,12 @@ class PXListLiteFrame(tk.Frame):
             self.txt_out.delete("1.0", "end")
             self.txt_out.insert("1.0", out)
             #messagebox.showinfo(APP_NAME, "OK! Lista organizada.")
+
+            # ✅ Copia automaticamente, sem mensagem
+            win = self.txt_out.winfo_toplevel()
+            win.clipboard_clear()
+            win.clipboard_append(out)
+            win.update()
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e))
 
@@ -259,7 +265,7 @@ class PXListLiteFrame(tk.Frame):
         root.clipboard_clear()
         root.clipboard_append(text)
         root.update()
-        messagebox.showinfo(APP_NAME, "Saída copiada para a área de transferência.")
+        #messagebox.showinfo(APP_NAME, "Saída copiada para a área de transferência.")
 
     def clear_all(self) -> None:
         self.txt_in.delete("1.0", "end")
