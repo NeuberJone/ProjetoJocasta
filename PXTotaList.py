@@ -9,10 +9,12 @@ from typing import List, Tuple
 
 APP_NAME = "PXTotaList"
 
-# Mesmas regras do Lite (posicional)
 VALID_SIZES = {
+    # Adulto
     "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG",
+    # Babylook (BL + adulto)
     "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG",
+    # Infantil (A)
     "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A", "10A", "11A", "12A", "14A", "16A",
 }
 
@@ -49,21 +51,58 @@ def _is_size_value(tok: str) -> bool:
 class Row:
     name: str
     number: str
-    pieces: Tuple[str, ...]  # até 6 (posicionais)
+    pieces: Tuple[str, ...]  # sempre 6 internamente
     nickname: str
     blood: str
 
 
 def parse_line_positional(line: str, line_no: int) -> Row | None:
+    """
+    Mesmo comportamento do PXListLite.
+
+    Entrada POSICIONAL por vírgula + extras automáticos:
+      col1: NOME
+      col2: NÚMERO
+      col3..col8: 1ª..6ª peça (posicional; pode ter vazios no meio)
+      Qualquer string NÃO-tamanho que apareça DEPOIS da última peça válida vira:
+        - 1ª string extra => Apelido
+        - 2ª string extra => Tipo Sanguíneo
+
+    Caso especial:
+      - Se a linha tiver APENAS 1 token (sem vírgulas) e for tamanho válido (ex: GG),
+        então vira 1ª peça, com name="" e number="".
+
+    Regras:
+      - Se aparecer string NÃO-tamanho antes/depois no MEIO das peças (antes da última peça válida) => ERRO
+      - Vazio permitido só como nada entre vírgulas (,,)
+      - "" (aspas) proibido
+    """
     raw = (line or "").rstrip("\n").replace("\ufeff", "")
     if not raw.strip():
         return None
 
-    parts = [p for p in raw.split(",")]
-    parts = [_clean_token(p) for p in parts]
-
+    parts = [_clean_token(p) for p in raw.split(",")]
     for tok in parts:
         _forbid_quotes(line_no, tok)
+
+    # ✅ Caso especial: 1 token só (ex: "GG")
+    if len(parts) == 1:
+        only = _clean_token(parts[0])
+        if only and _is_size_value(only):
+            return Row(
+                name="",
+                number="",
+                pieces=(_upper(only), "", "", "", "", ""),
+                nickname="",
+                blood=""
+            )
+        return Row(
+            name=_upper(only),
+            number="",
+            pieces=("", "", "", "", "", ""),
+            nickname="",
+            blood=""
+        )
 
     while len(parts) < 2:
         parts.append("")
@@ -71,26 +110,46 @@ def parse_line_positional(line: str, line_no: int) -> Row | None:
     name = _upper(parts[0])
     number = _clean_token(parts[1])
 
-    piece_cols = parts[2:8]
-    while len(piece_cols) < 6:
-        piece_cols.append("")
+    rest = parts[2:]
 
-    pieces_norm: List[str] = []
-    for i, val in enumerate(piece_cols, start=1):
-        v = _clean_token(val)
-        if not v:
-            pieces_norm.append("")
-            continue
-        if not _is_size_value(v):
-            raise ValueError(f"Linha {line_no}: valor inválido na {i}ª peça: {v!r}")
-        pieces_norm.append(_upper(v))
+    while len(rest) < 6:
+        rest.append("")
 
-    nickname = _upper(parts[8]) if len(parts) >= 9 and parts[8] else ""
-    blood = _upper(parts[9]) if len(parts) >= 10 and parts[9] else ""
+    # última peça válida (1..6)
+    last_piece_pos = 0
+    for i in range(6):
+        v = _clean_token(rest[i])
+        if v and _is_size_value(v):
+            last_piece_pos = i + 1
 
-    if len(parts) > 10:
-        extra = ",".join(parts[10:])
-        raise ValueError(f"Linha {line_no}: colunas extras não suportadas: {extra!r}")
+    pieces_norm = [""] * 6
+    extras: List[str] = []
+
+    for i in range(6):
+        v = _clean_token(rest[i])
+        pos = i + 1
+
+        if pos <= last_piece_pos:
+            if not v:
+                pieces_norm[i] = ""
+            else:
+                if not _is_size_value(v):
+                    raise ValueError(f"Linha {line_no}: valor inválido na {pos}ª peça: {v!r}")
+                pieces_norm[i] = _upper(v)
+        else:
+            if v:
+                extras.append(_upper(v))
+
+    if len(rest) > 6:
+        for v in rest[6:]:
+            vv = _clean_token(v)
+            if vv:
+                extras.append(_upper(vv))
+
+    nickname = extras[0] if len(extras) >= 1 else ""
+    blood = extras[1] if len(extras) >= 2 else ""
+    if len(extras) > 2:
+        raise ValueError(f"Linha {line_no}: extras demais após as peças (máx 2: apelido e tipo).")
 
     return Row(
         name=name,
@@ -102,6 +161,14 @@ def parse_line_positional(line: str, line_no: int) -> Row | None:
 
 
 def build_output_dynamic(rows: List[Row]) -> str:
+    """
+    Saída dinâmica:
+      NOME,NUMERO,1ª..kª PEÇA,(APELIDO?),(TIPO?).
+
+    k = última coluna de peça com tamanho em qualquer linha.
+    APELIDO só aparece se alguém tiver apelido.
+    TIPO só aparece se alguém tiver tipo sanguíneo.
+    """
     if not rows:
         return ""
 
@@ -138,13 +205,11 @@ def process_text(text: str) -> str:
         if row:
             rows.append(row)
 
+    # padrão: ordena por (nome, número)
     rows.sort(key=lambda r: (r.name, r.number))
     return build_output_dynamic(rows)
 
 
-# -----------------------------
-# UI (Lite) + suporte a Hub
-# -----------------------------
 class PXTotaListFrame(tk.Frame):
     def __init__(self, parent) -> None:
         super().__init__(parent)
@@ -154,7 +219,7 @@ class PXTotaListFrame(tk.Frame):
 
         tk.Label(
             top,
-            text="PXTotaList — posicional (NOME, NÚMERO, 1ª..6ª peça, apelido, tipo) — saída dinâmica",
+            text="PXTotaList — posicional (NOME, NÚMERO, 1ª..6ª peça) + extras (apelido/tipo) — saída dinâmica",
             font=("Segoe UI", 12, "bold"),
         ).pack(side="left")
 
@@ -181,15 +246,6 @@ class PXTotaListFrame(tk.Frame):
         tk.Label(right, text="Saída (dinâmica):").pack(anchor="w")
         self.txt_out = tk.Text(right, wrap="none")
         self.txt_out.pack(fill="both", expand=True, pady=(6, 0))
-
-        self.txt_in.insert(
-            "1.0",
-            "GPT,10,,,,G,\n"
-            "JOÃO,5,G,M,,,\n"
-            "JUACA,,PP,,,,\n"
-            "JÃO,10,,,PP,,\n"
-            "MANEL,,PP,GG,,,\n"
-        )
 
     def on_process(self) -> None:
         raw = self.txt_in.get("1.0", "end").strip("\n")
