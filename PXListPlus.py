@@ -142,11 +142,9 @@ def is_size_token(tok: str) -> bool:
     if not t:
         return False
 
-    # size sozinho
     if is_adult_size(t) or is_child_size(t) or is_babylook_size(t):
         return True
 
-    # qty-size
     m = QTY_SIZE_RE.match(t)
     if not m:
         return False
@@ -177,7 +175,6 @@ def normalize_size_token(tok: str, line_no: int) -> str:
             raise ValueError(f"Linha {line_no}: tamanho inválido em {tok!r}.")
         return f"{qty}-{size}"
 
-    # tamanho sozinho => qty=1
     size = t
     if not (is_adult_size(size) or is_child_size(size) or is_babylook_size(size)):
         raise ValueError(f"Linha {line_no}: tamanho inválido em {tok!r}.")
@@ -187,7 +184,7 @@ def normalize_size_token(tok: str, line_no: int) -> str:
 def detect_gender_from_sizes(sizes_normalized: list[str], line_no: int) -> str:
     """
     Gender:
-      - C se existir qualquer tamanho infantil (..A entre 2A..12A)
+      - C se existir qualquer tamanho infantil (2A..12A)
       - FE se existir qualquer tamanho com BL
       - MA caso contrário
     Erro:
@@ -197,7 +194,6 @@ def detect_gender_from_sizes(sizes_normalized: list[str], line_no: int) -> str:
     has_bl = False
 
     for s in sizes_normalized:
-        # s no formato QTY-SIZE
         try:
             _qty, _size = s.split("-", 1)
         except ValueError:
@@ -210,7 +206,7 @@ def detect_gender_from_sizes(sizes_normalized: list[str], line_no: int) -> str:
             has_bl = True
 
     if has_child and has_bl:
-        raise ValueError(f"Linha {line_no}: divergência de dados (infantil + babylook na mesma linha).")
+        raise ValueError(f"Linha {line_no}: divergência (infantil + babylook na mesma linha).")
 
     if has_child:
         return "C"
@@ -226,17 +222,15 @@ def parse_line_dynamic(line: str, line_no: int) -> tuple[str, str, list[str], st
     """
     Linha por vírgulas (dinâmico):
       - Primeiro token STRING vira Name
-      - Primeiro token que tem dígito vira Number (mantém exatamente, apenas trim)
+      - Primeiro token que tem dígito vira Number (mantém)
       - Tokens que parecem tamanho viram lista de tamanhos (até 6)
       - Outras strings restantes viram: Nickname (primeira) e BloodType (segunda)
-    Regras:
-      - Não aceitar aspas ("" etc.)
     """
     raw = line.strip().replace("\ufeff", "")
     if not raw:
         raise ValueError(f"Linha {line_no}: vazia.")
 
-    parts = [clean_token(p) for p in raw.split(",")]  # preserva vazios (",,")
+    parts = [clean_token(p) for p in raw.split(",")]
     for tok in parts:
         forbid_quotes(line_no, tok)
 
@@ -256,12 +250,10 @@ def parse_line_dynamic(line: str, line_no: int) -> tuple[str, str, list[str], st
             sizes.append(normalize_size_token(up, line_no))
             continue
 
-        # número: primeiro token que contém pelo menos 1 dígito
         if (not number) and any(ch.isdigit() for ch in tok):
-            number = normalize_spaces(tok)  # mantém como veio (pode ser 7X1)
+            number = normalize_spaces(tok)  # mantém como veio
             continue
 
-        # strings
         if not name:
             name = normalize_name(tok)
         else:
@@ -310,19 +302,26 @@ def write_json(orders: list[dict], output_dir: str) -> str:
 
 
 # =========================
-# UI - Checkboxes com ordem
+# UI - Checkboxes com ordem + limite
 # =========================
 class OrderedCheckboxes(tk.Frame):
     """
     Lista de checkboxes onde a ordem de marcação define a sequência.
+    Suporta limite de seleção (ex.: precisa marcar exatamente N).
     """
     def __init__(self, parent):
         super().__init__(parent)
+
         self._selected_keys: list[str] = []
         self._vars: dict[str, tk.IntVar] = {}
         self._labels: dict[str, tk.StringVar] = {}
+        self._limit: int | None = None
 
-        title = tk.Label(self, text="Selecione as peças (a ORDEM que marcar define o mapeamento):", font=("Segoe UI", 10, "bold"))
+        title = tk.Label(
+            self,
+            text="Selecione as peças (a ORDEM que marcar define o mapeamento):",
+            font=("Segoe UI", 10, "bold")
+        )
         title.pack(anchor="w", pady=(0, 6))
 
         for key, pt_name in GARMENTS:
@@ -345,26 +344,33 @@ class OrderedCheckboxes(tk.Frame):
 
         note = tk.Label(
             self,
-            text="Ex.: Se marcar (1) Calça, (2) Camiseta curta, (3) Bermuda, então TAM1→Calça, TAM2→Curta, TAM3→Bermuda.",
+            text="Dica: a ordem (1)(2)(3) define: TAM1→(1), TAM2→(2), TAM3→(3), ...",
             font=("Segoe UI", 9),
             fg="#444"
         )
         note.pack(anchor="w", pady=(8, 0))
 
+    def set_limit(self, limit: int | None):
+        self._limit = limit
+
     def _relabel(self):
-        # Atualiza textos com (ordem) quando marcado
         order_map = {k: i + 1 for i, k in enumerate(self._selected_keys)}
         for key, pt_name in GARMENTS:
-            base_name = pt_name
             if key in order_map:
-                self._labels[key].set(f"{base_name} ({order_map[key]})")
+                self._labels[key].set(f"{pt_name} ({order_map[key]})")
             else:
-                self._labels[key].set(base_name)
+                self._labels[key].set(pt_name)
 
     def _on_toggle(self, key: str):
         checked = bool(self._vars[key].get())
 
         if checked:
+            if self._limit is not None and len(self._selected_keys) >= self._limit:
+                # desfaz e avisa
+                self._vars[key].set(0)
+                messagebox.showerror(APP_NAME, f"Todas as peças necessárias já foram selecionadas ({self._limit}).")
+                return
+
             if key not in self._selected_keys:
                 self._selected_keys.append(key)
         else:
@@ -384,35 +390,37 @@ class OrderedCheckboxes(tk.Frame):
 
 
 # =========================
-# App
+# HUB Frame (build_ui)
 # =========================
-class PXListPlusApp:
-    def __init__(self):
+class PXListPlusFrame(tk.Frame):
+    """
+    Frame para rodar dentro do Hub (Projeto Jocasta).
+    O Hub chama build_ui(parent) e coloca o Frame dentro de uma aba.
+    """
+    def __init__(self, parent):
+        super().__init__(parent)
+
         self.cfg = load_config()
+        self.required_count: int | None = None
+        self.input_dirty = False
 
-        self.app = TkinterDnD.Tk()
-        self.app.title(APP_NAME)
-        self.app.geometry("820x640")
-        self.app.resizable(False, False)
-
-        # Ícone opcional (se existir pxlist.ico na pasta)
-        try:
-            self.app.iconbitmap(resource_path("pxlist.ico"))
-        except Exception:
-            pass
-
-        root = tk.Frame(self.app, padx=14, pady=14)
+        root = tk.Frame(self, padx=14, pady=14)
         root.pack(fill="both", expand=True)
 
-        tk.Label(root, text="PXListPlus — gera JSON com mapeamento por ordem de seleção", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        tk.Label(
+            root,
+            text="PXListPlus — gera JSON com mapeamento por ordem de seleção",
+            font=("Segoe UI", 14, "bold")
+        ).pack(anchor="w")
 
         tk.Label(
             root,
             text=(
                 "Entrada (dinâmica, por vírgulas): Nome, Número, TAMs..., Apelido(opcional), Tipo Sanguíneo(opcional)\n"
-                "Tamanho aceita: QTY-TAMANHO (ex: 3-G, 5-12A, 2-BLP) ou TAMANHO sozinho (ex: G, 12A, BLP => vira 1-TAM).\n"
-                "Validação: 0 peças marcadas = erro. Nº de TAMs deve ser IGUAL ao nº de peças marcadas (mais ou menos = erro).\n"
-                "Qualquer erro em qualquer linha bloqueia a geração (não cria arquivo)."
+                "Tamanho: QTY-TAMANHO (ex: 3-G, 5-12A, 2-BLP) ou TAMANHO sozinho (ex: G, 12A, BLP => vira 1-TAM).\n"
+                "Fluxo recomendado: 1) Verificar  2) Marcar as peças (na ordem)  3) Gerar JSON.\n"
+                "Validação: 0 peças marcadas = erro. TAMs por linha deve ser IGUAL ao nº de peças marcadas (mais ou menos = erro).\n"
+                "Qualquer erro bloqueia a geração (não cria arquivo)."
             ),
             font=("Segoe UI", 9)
         ).pack(anchor="w", pady=(6, 10))
@@ -429,18 +437,43 @@ class PXListPlusApp:
 
         # Checkboxes
         self.ck = OrderedCheckboxes(root)
-        self.ck.pack(fill="x", pady=(0, 10))
+        self.ck.pack(fill="x", pady=(0, 8))
 
-        # Entrada manual
+        # Mapeamento (ordem atual)
+        self.mapping_var = tk.StringVar(value="Mapeamento: — (marque as peças para ver a ordem)")
+        tk.Label(root, textvariable=self.mapping_var, font=("Segoe UI", 9), fg="#333").pack(anchor="w", pady=(0, 10))
+
+        # Entrada
         tk.Label(root, text="Cole a lista abaixo (uma pessoa por linha):", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        self.txt_in = tk.Text(root, height=12, wrap="none", font=("Consolas", 10))
-        self.txt_in.pack(fill="x", pady=(6, 10))
+        self.txt_in = tk.Text(root, height=10, wrap="none", font=("Consolas", 10))
+        self.txt_in.pack(fill="x", pady=(6, 8))
+        self.txt_in.bind("<KeyRelease>", self.on_input_changed)
 
+        # Botões
         btn_row = tk.Frame(root)
         btn_row.pack(fill="x", pady=(0, 10))
 
-        tk.Button(btn_row, text="Gerar JSON", command=self.generate_json).pack(side="right")
-        tk.Button(btn_row, text="Limpar", command=self.clear_all).pack(side="right", padx=6)
+        tk.Button(btn_row, text="Verificar", command=self.verify_input).pack(side="right")
+        tk.Button(btn_row, text="Gerar JSON", command=self.generate_json).pack(side="right", padx=6)
+        tk.Button(btn_row, text="Limpar seleção", command=self.clear_selection).pack(side="right", padx=6)
+        tk.Button(btn_row, text="Limpar tudo", command=self.clear_all).pack(side="right", padx=6)
+
+        # Prévia
+        self.preview_var = tk.StringVar(value="🔎 Clique em 'Verificar' para analisar a entrada.")
+        tk.Label(root, textvariable=self.preview_var, font=("Segoe UI", 9), fg="#333").pack(anchor="w", pady=(0, 6))
+
+        self.txt_preview = tk.Text(root, height=6, wrap="none", font=("Consolas", 9))
+        self.txt_preview.pack(fill="x", pady=(0, 10))
+
+        # Erros (copiável)
+        err_head = tk.Frame(root)
+        err_head.pack(fill="x", pady=(0, 6))
+
+        tk.Label(err_head, text="Erros / avisos:", font=("Segoe UI", 10, "bold")).pack(side="left")
+        tk.Button(err_head, text="Copiar erros", command=self.copy_errors).pack(side="right")
+
+        self.txt_errors = tk.Text(root, height=5, wrap="word", font=("Consolas", 9))
+        self.txt_errors.pack(fill="both", expand=False, pady=(0, 10))
 
         # Drag & Drop
         self.drop_area = tk.Label(
@@ -450,13 +483,58 @@ class PXListPlusApp:
             relief="ridge",
             bd=2,
             width=32,
-            height=3
+            height=2
         )
-        self.drop_area.pack(pady=8)
+        self.drop_area.pack(pady=6)
 
         self.drop_area.drop_target_register(DND_FILES)
         self.drop_area.dnd_bind("<<Drop>>", self.on_drop)
 
+        # Atualiza mapeamento periodicamente (porque checkbox callback não chama frame diretamente)
+        self.after(150, self.refresh_mapping_label)
+
+    # ---------- UI Helpers ----------
+    def refresh_mapping_label(self):
+        sel = self.ck.get_selected_in_order()
+        if not sel:
+            self.mapping_var.set("Mapeamento: — (marque as peças para ver a ordem)")
+        else:
+            # 1→NomePT | 2→NomePT ...
+            pt_map = {k: pt for k, pt in GARMENTS}
+            parts = [f"{i+1}→{pt_map[k]}" for i, k in enumerate(sel)]
+            self.mapping_var.set("Mapeamento: " + " | ".join(parts))
+
+        self.after(150, self.refresh_mapping_label)
+
+    def set_errors_text(self, text: str):
+        self.txt_errors.delete("1.0", "end")
+        self.txt_errors.insert("1.0", text or "")
+
+    def copy_errors(self):
+        text = self.txt_errors.get("1.0", "end").strip()
+        if not text:
+            messagebox.showwarning(APP_NAME, "Não há erros para copiar.")
+            return
+        win = self.winfo_toplevel()
+        win.clipboard_clear()
+        win.clipboard_append(text)
+        win.update()
+
+    def mark_dirty(self):
+        # invalida verificação anterior
+        self.input_dirty = True
+        self.required_count = None
+        self.ck.set_limit(None)
+        self.preview_var.set("⚠️ Entrada alterada. Clique em 'Verificar' novamente.")
+        # não apaga prévia automaticamente (ajuda o usuário comparar), mas você pode apagar se quiser:
+        # self.txt_preview.delete("1.0", "end")
+
+    def on_input_changed(self, _evt=None):
+        # Só marca sujo quando tem alteração real (evento é frequente; simples e suficiente)
+        if not self.input_dirty:
+            self.mark_dirty()
+
+    # ---------- Actions ----------
     def pick_output_folder(self):
         folder = filedialog.askdirectory(title=f"{APP_NAME} - Escolha a pasta para salvar o JSON")
         if not folder:
@@ -466,9 +544,20 @@ class PXListPlusApp:
         save_config(self.cfg)
         self.status_var.set(f"📁 Pasta de saída: {folder}")
 
+    def clear_selection(self):
+        self.ck.clear()
+        # seleção limpa não muda a entrada, então não marca dirty
+        self.mapping_var.set("Mapeamento: — (marque as peças para ver a ordem)")
+
     def clear_all(self):
         self.txt_in.delete("1.0", "end")
         self.ck.clear()
+        self.txt_preview.delete("1.0", "end")
+        self.set_errors_text("")
+        self.preview_var.set("🔎 Clique em 'Verificar' para analisar a entrada.")
+        self.required_count = None
+        self.ck.set_limit(None)
+        self.input_dirty = False
 
     def on_drop(self, event):
         try:
@@ -487,14 +576,149 @@ class PXListPlusApp:
             self.txt_in.delete("1.0", "end")
             self.txt_in.insert("1.0", content)
             self.status_var.set(f"📄 TXT carregado: {p.name}")
+
+            # Entrada mudou => marca dirty e auto-verifica
+            self.mark_dirty()
+            self.verify_input(auto=True)
+
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e))
             self.status_var.set(f"❌ Erro: {e}")
 
+    def verify_input(self, auto: bool = False):
+        raw = self.txt_in.get("1.0", "end").strip("\n")
+        if not raw.strip():
+            if not auto:
+                messagebox.showwarning(APP_NAME, "Cole uma lista na entrada (ou solte um .txt).")
+            self.preview_var.set("⚠️ Sem entrada para verificar.")
+            self.txt_preview.delete("1.0", "end")
+            self.set_errors_text("")
+            self.required_count = None
+            self.ck.set_limit(None)
+            self.input_dirty = False
+            return
+
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if not lines:
+            if not auto:
+                messagebox.showwarning(APP_NAME, "A lista está vazia.")
+            self.preview_var.set("⚠️ Lista vazia.")
+            self.txt_preview.delete("1.0", "end")
+            self.set_errors_text("")
+            self.required_count = None
+            self.ck.set_limit(None)
+            self.input_dirty = False
+            return
+
+        errors = []
+        parsed = []  # (name, number, sizes, nickname, blood)
+
+        for idx, line in enumerate(lines, start=1):
+            try:
+                name, number, sizes, nickname, blood = parse_line_dynamic(line, idx)
+
+                if not sizes:
+                    raise ValueError(f"Linha {idx}: nenhum tamanho encontrado.")
+
+                if len(sizes) > 6:
+                    raise ValueError(f"Linha {idx}: mais de 6 tamanhos ({len(sizes)}).")
+
+                # valida divergência de gênero (infantil+BL) já na verificação
+                _ = detect_gender_from_sizes(sizes, idx)
+
+                parsed.append((name, number, sizes, nickname, blood))
+            except Exception as e:
+                errors.append(f"{e}\n  Conteúdo: {line}")
+
+        if errors:
+            self.required_count = None
+            self.ck.set_limit(None)
+            self.txt_preview.delete("1.0", "end")
+
+            # escreve erros no painel + popup (quando não é auto, ou quando você quiser)
+            self.set_errors_text("\n\n".join(errors))
+            self.preview_var.set(f"❌ Erros: {len(errors)} | Verificação falhou")
+
+            # popup só quando usuário clicou (auto=False)
+            if not auto:
+                err_text = "\n\n".join(errors[:25])
+                more = ""
+                if len(errors) > 25:
+                    more = f"\n\n... e mais {len(errors) - 25} erro(s)."
+                messagebox.showerror(APP_NAME, f"Foram encontrados erros na entrada.\n\n{err_text}{more}")
+
+            self.input_dirty = False
+            return
+
+        # Regra do Plus: todas as linhas precisam ter o MESMO número de TAMs
+        counts = sorted({len(p[2]) for p in parsed})
+        if len(counts) != 1:
+            self.required_count = None
+            self.ck.set_limit(None)
+            self.txt_preview.delete("1.0", "end")
+
+            msg = (
+                "Entrada inconsistente: existem linhas com diferentes quantidades de tamanhos.\n"
+                f"Quantidades encontradas: {counts}\n\n"
+                "Como o PXListPlus exige igualdade exata, corrija a lista para todas terem a mesma quantidade."
+            )
+            self.set_errors_text(msg)
+            self.preview_var.set(f"❌ Quantidades diferentes de TAMs: {counts}")
+
+            if not auto:
+                messagebox.showerror(APP_NAME, msg)
+
+            self.input_dirty = False
+            return
+
+        required = counts[0]
+        self.required_count = required
+        self.ck.set_limit(required)
+        self.set_errors_text("")
+
+        # Se já tiver mais selecionadas que required, limpa a seleção
+        if len(self.ck.get_selected_in_order()) > required:
+            self.ck.clear()
+
+        # Prévia estilo Lite (nome, número, tams...)
+        preview_lines = []
+        for (name, number, sizes, _nickname, _blood) in parsed[:250]:
+            cols = [normalize_name(name), normalize_spaces(number)]
+            cols.extend(sizes)
+            preview_lines.append(",".join(cols))
+
+        self.txt_preview.delete("1.0", "end")
+        self.txt_preview.insert("1.0", "\n".join(preview_lines))
+
+        self.preview_var.set(
+            f"✅ Verificado: {len(parsed)} linha(s) válida(s) | "
+            f"Tamanhos por linha: {required} | "
+            f"Marque exatamente: {required} peça(s)."
+        )
+
+        self.input_dirty = False
+
     def generate_json(self):
+        # Se a entrada mudou depois da verificação, exige verificar de novo
+        if self.input_dirty or self.required_count is None:
+            # auto-verifica antes de bloquear
+            self.verify_input(auto=True)
+            if self.required_count is None:
+                messagebox.showwarning(APP_NAME, "Clique em 'Verificar' e corrija a entrada antes de gerar o JSON.")
+                return
+
         selected = self.ck.get_selected_in_order()
+
+        # Regras de validação de seleção
         if len(selected) == 0:
             messagebox.showerror(APP_NAME, "Erro: marque pelo menos 1 peça (a ordem define o mapeamento).")
+            return
+
+        if self.required_count is not None and len(selected) != self.required_count:
+            messagebox.showerror(
+                APP_NAME,
+                f"Erro: você deve marcar exatamente {self.required_count} peça(s). Marcadas: {len(selected)}."
+            )
             return
 
         raw = self.txt_in.get("1.0", "end").strip("\n")
@@ -514,18 +738,13 @@ class PXListPlusApp:
             try:
                 name, number, sizes, nickname, blood = parse_line_dynamic(line, idx)
 
-                if not name:
-                    # Nome pode ser vazio? você não proibiu no Plus.
-                    # Se quiser bloquear, troque por erro.
-                    name = ""
-
-                # validação do tamanho vs seleção
-                if len(sizes) != len(selected):
+                # exige igualdade exata
+                if len(sizes) != self.required_count:
                     raise ValueError(
-                        f"Linha {idx}: quantidade de TAMs ({len(sizes)}) diferente da quantidade de peças marcadas ({len(selected)})."
+                        f"Linha {idx}: quantidade de TAMs ({len(sizes)}) diferente do esperado ({self.required_count})."
                     )
 
-                # gênero (com validação divergência infantil + babylook)
+                # gênero + divergência
                 gender = detect_gender_from_sizes(sizes, idx)
 
                 # mapa das peças conforme ordem das checkboxes
@@ -533,13 +752,23 @@ class PXListPlusApp:
                 for i, garment_key in enumerate(selected):
                     garment_map[garment_key] = sizes[i]
 
-                orders.append(make_order(normalize_name(name), normalize_spaces(number), gender, normalize_name(nickname), normalize_spaces(blood), garment_map))
+                orders.append(
+                    make_order(
+                        normalize_name(name),
+                        normalize_spaces(number),
+                        gender,
+                        normalize_name(nickname),
+                        normalize_spaces(blood),
+                        garment_map
+                    )
+                )
 
             except Exception as e:
                 errors.append(f"{e}\n  Conteúdo: {line}")
 
         # bloqueia se tiver qualquer erro
         if errors:
+            self.set_errors_text("\n\n".join(errors))
             err_text = "\n\n".join(errors[:25])
             more = ""
             if len(errors) > 25:
@@ -552,12 +781,37 @@ class PXListPlusApp:
         ensure_dir(out_dir)
 
         out_path = write_json(orders, out_dir)
+        self.set_errors_text("")
         messagebox.showinfo(APP_NAME, f"JSON gerado:\n{out_path}\n\nRegistros: {len(orders)}")
         self.status_var.set(f"✅ Gerado: {out_path} | Registros: {len(orders)}")
 
-    def run(self):
-        self.app.mainloop()
+
+# =========================
+# Função exigida pelo Hub
+# =========================
+def build_ui(parent):
+    return PXListPlusFrame(parent)
+
+
+# =========================
+# Execução standalone
+# =========================
+def main():
+    app = TkinterDnD.Tk()
+    app.title(APP_NAME)
+    app.geometry("860x740")
+    app.resizable(False, False)
+
+    try:
+        app.iconbitmap(resource_path("pxlist.ico"))
+    except Exception:
+        pass
+
+    frame = PXListPlusFrame(app)
+    frame.pack(fill="both", expand=True)
+
+    app.mainloop()
 
 
 if __name__ == "__main__":
-    PXListPlusApp().run()
+    main()

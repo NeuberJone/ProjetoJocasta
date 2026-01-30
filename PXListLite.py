@@ -9,20 +9,17 @@ from typing import List, Tuple
 
 APP_NAME = "PXListLite"
 
-# -----------------------------
-# Regras de identificação
-# -----------------------------
 VALID_SIZES = {
     # Adulto
-    "PP", "P", "M", "G", "GG", "XG", "XGG",
-    # Babylook
-    "BLPP", "BLP", "BLM", "BLG", "BLGG",
-    # Infantil com A
-    "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
+    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG",
+    # Babylook (BL + adulto)
+    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG",
+    # Infantil (A)
+    "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A", "10A", "11A", "12A", "14A", "16A",
 }
 
-# aceita "2-M", "10-BLP", "3-4A" etc.
-QTY_SIZE_RE = re.compile(r"^\s*\d+\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
+QTY_SIZE_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
+FORBIDDEN_QUOTE_RE = re.compile(r"[\"']")
 
 
 def _clean_token(s: str) -> str:
@@ -33,175 +30,205 @@ def _upper(s: str) -> str:
     return _clean_token(s).upper()
 
 
-def _is_number(tok: str) -> bool:
-    t = _clean_token(tok)
-    return t.isdigit()  # preserva "01"
+def _forbid_quotes(line_no: int, tok: str) -> None:
+    if tok and FORBIDDEN_QUOTE_RE.search(tok):
+        raise ValueError(f"Linha {line_no}: não use aspas para vazio (\"\"), token: {tok!r}")
 
 
-def _is_size(tok: str) -> bool:
+def _is_size_value(tok: str) -> bool:
     t = _upper(tok)
     if not t:
         return False
     if t in VALID_SIZES:
         return True
     m = QTY_SIZE_RE.match(t)
-    return bool(m and _upper(m.group(1)) in VALID_SIZES)
+    if m and _upper(m.group(2)) in VALID_SIZES:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
-class ParsedRow:
+class Row:
     name: str
     number: str
-    tams: Tuple[str, ...]     # TAMs encontrados (1..4)
-    s2: str                  # STRING2 (opcional)
-    s3: str                  # STRING3 (opcional)
+    pieces: Tuple[str, ...]  # sempre 6 internamente
+    nickname: str
+    blood: str
 
 
-def parse_line(line: str) -> ParsedRow | None:
+def parse_line_positional(line: str, line_no: int) -> Row | None:
     """
-    Regra:
-    - separar por vírgula (preservando vazios como tokens vazios)
-    - classificar tokens em: STRING, NÚMERO, TAM
-    - 1ª STRING => NOME
-    - 1º NÚMERO => NÚMERO
-    - TAMs em ordem => TAM1..TAM4 (obrigatório ter pelo menos 1)
-    - demais STRINGS (que não são NOME) => STRING2, STRING3 em ordem
+    Entrada POSICIONAL por vírgula, mas com "extras" automáticos:
+      col1: NOME
+      col2: NÚMERO
+      col3..col8: 1ª..6ª peça (posicional; pode ter vazios no meio)
+      Qualquer string NÃO-tamanho que apareça DEPOIS da última peça válida vira:
+        - 1ª string extra => Apelido
+        - 2ª string extra => Tipo Sanguíneo
+
+    Caso especial:
+      - Se a linha tiver APENAS 1 token (sem vírgulas) e for tamanho válido (ex: GG),
+        então vira 1ª peça, com name="" e number="".
+
+    Regras:
+      - Se aparecer string NÃO-tamanho antes/depois no MEIO das peças (antes da última peça válida) => ERRO
+      - Vazio é permitido só como nada entre vírgulas (,,)
+      - "" (aspas) proibido
     """
-    raw = line.strip()
-    if not raw:
+    raw = (line or "").rstrip("\n").replace("\ufeff", "")
+    if not raw.strip():
         return None
 
-    parts = [_clean_token(p) for p in raw.split(",")]  # preserva vazios (",,")
-    # remove espaços, mas NÃO remove tokens vazios (importante pra estrutura)
-    # porém, para classificação, tokens vazios são ignorados.
-
-    name = ""
-    number = ""
-    tams: List[str] = []
-    extra_strings: List[str] = []
-
+    # Split preservando vazios
+    parts = [_clean_token(p) for p in raw.split(",")]
     for tok in parts:
-        t = _clean_token(tok)
-        if not t:
-            continue
+        _forbid_quotes(line_no, tok)
 
-        up = _upper(t)
+    # ✅ Caso especial: 1 token só (ex: "GG")
+    if len(parts) == 1:
+        only = _clean_token(parts[0])
+        if only and _is_size_value(only):
+            return Row(
+                name="",
+                number="",
+                pieces=(_upper(only), "", "", "", "", ""),
+                nickname="",
+                blood=""
+            )
+        # Se não for tamanho, trata como nome (comportamento antigo)
+        return Row(
+            name=_upper(only),
+            number="",
+            pieces=("", "", "", "", "", ""),
+            nickname="",
+            blood=""
+        )
 
-        if _is_size(up):
-            # mantém o formato original em caixa alta
-            tams.append(up)
-            continue
+    # garante pelo menos 2 colunas (nome, numero)
+    while len(parts) < 2:
+        parts.append("")
 
-        if _is_number(t) and not number:
-            number = up
-            continue
+    name = _upper(parts[0])
+    number = _clean_token(parts[1])
 
-        # string comum
-        if not name:
-            name = up
+    # resto a partir da 1ª peça
+    rest = parts[2:]
+
+    # garante pelo menos 6 posições de peça para analisar
+    while len(rest) < 6:
+        rest.append("")
+
+    # Descobre a última posição (1..6) que contém um TAMANHO válido
+    last_piece_pos = 0
+    for i in range(6):
+        v = _clean_token(rest[i])
+        if v and _is_size_value(v):
+            last_piece_pos = i + 1
+
+    pieces_norm = [""] * 6
+    extras: List[str] = []
+
+    for i in range(6):
+        v = _clean_token(rest[i])
+        pos = i + 1
+
+        if pos <= last_piece_pos:
+            if not v:
+                pieces_norm[i] = ""
+            else:
+                if not _is_size_value(v):
+                    raise ValueError(f"Linha {line_no}: valor inválido na {pos}ª peça: {v!r}")
+                pieces_norm[i] = _upper(v)
         else:
-            extra_strings.append(up)
+            # após a última peça válida: vira extra (apelido/tipo)
+            if v:
+                extras.append(_upper(v))
 
-    # obrigatórios: NOME, NÚMERO e TAM1 "existem", mas valor pode ser vazio.
-    # Aqui, seguindo sua regra mais recente: NOME pode vir vazio na lista, mas a coluna existe.
-    # Se não apareceu nenhuma STRING (name), aceitamos name="".
-    # Se não apareceu número, aceitamos number="".
-    if not tams:
-        raise ValueError(f"Sem TAM1 reconhecido: {raw}")
+    # Tokens além da 6ª peça também são extras
+    if len(rest) > 6:
+        for v in rest[6:]:
+            vv = _clean_token(v)
+            if vv:
+                extras.append(_upper(vv))
 
-    # limita a 4 TAMs
-    if len(tams) > 4:
-        raise ValueError(f"Mais de 4 TAMs na linha: {raw}")
+    nickname = extras[0] if len(extras) >= 1 else ""
+    blood = extras[1] if len(extras) >= 2 else ""
+    if len(extras) > 2:
+        raise ValueError(f"Linha {line_no}: extras demais após as peças (máx 2: apelido e tipo).")
 
-    s2 = extra_strings[0] if len(extra_strings) >= 1 else ""
-    s3 = extra_strings[1] if len(extra_strings) >= 2 else ""
-
-    return ParsedRow(
+    return Row(
         name=name,
-        number=number,
-        tams=tuple(tams),
-        s2=s2,
-        s3=s3,
+        number=_upper(number) if number else "",
+        pieces=tuple(pieces_norm),
+        nickname=nickname,
+        blood=blood,
     )
 
 
-def build_output(rows: List[ParsedRow]) -> str:
+def build_output_dynamic(rows: List[Row]) -> str:
     """
-    Ordem final dinâmica:
-    NOME,NÚMERO,TAM1..TAMk,STRING2,STRING3
-    - k = maior quantidade de TAMs encontrada em qualquer linha
-    - STRING2/3 entram logo após o último TAM existente (k)
-    - Só inclui coluna STRING2 se existir em qualquer linha
-    - Só inclui coluna STRING3 se existir em qualquer linha
+    Saída dinâmica:
+      NOME,NUMERO,1ª..kª PEÇA,(APELIDO?),(TIPO?).
+
+    k = última coluna de peça com tamanho em qualquer linha.
+    APELIDO só aparece se alguém tiver apelido.
+    TIPO só aparece se alguém tiver tipo sanguíneo.
     """
     if not rows:
         return ""
 
-    max_tams = max(len(r.tams) for r in rows)
-    has_s2 = any(r.s2 != "" for r in rows)
-    has_s3 = any(r.s3 != "" for r in rows)
+    # k = maior índice com peça preenchida em qualquer linha
+    k = 0
+    for r in rows:
+        for idx, val in enumerate(r.pieces, start=1):
+            if val:
+                k = max(k, idx)
+    if k == 0:
+        k = 1
 
-    # cabeçalho (opcional) – deixo fácil habilitar no futuro
-    # headers = ["NOME", "NÚMERO"] + [f"TAM{i}" for i in range(1, max_tams + 1)]
-    # if has_s2: headers.append("STRING2")
-    # if has_s3: headers.append("STRING3")
+    has_nick = any(r.nickname for r in rows)
+    has_blood = any(r.blood for r in rows)
 
     out_lines: List[str] = []
-
     for r in rows:
         cols: List[str] = [r.name, r.number]
-
-        # TAMs (preenche vazios para bater com max_tams)
-        tam_list = list(r.tams) + [""] * (max_tams - len(r.tams))
-        cols.extend(tam_list)
-
-        if has_s2:
-            cols.append(r.s2)
-        if has_s3:
-            cols.append(r.s3)
-
+        cols.extend(list(r.pieces[:k]))
+        if has_nick:
+            cols.append(r.nickname)
+        if has_blood:
+            cols.append(r.blood)
         out_lines.append(",".join(cols))
 
     return "\n".join(out_lines)
 
 
 def process_text(text: str) -> str:
-    parsed: List[ParsedRow] = []
-
-    for i, line in enumerate(text.splitlines(), start=1):
+    rows: List[Row] = []
+    for i, line in enumerate((text or "").splitlines(), start=1):
         if not line.strip():
             continue
-        try:
-            row = parse_line(line)
-            if row:
-                parsed.append(row)
-        except ValueError as e:
-            # Erro com contexto de linha (mais amigável)
-            raise ValueError(f"Linha {i}: {e}") from None
+        row = parse_line_positional(line, i)
+        if row:
+            rows.append(row)
 
-    # Ordena por NOME e depois por NÚMERO (ambos string)
-    parsed.sort(key=lambda r: (r.name, r.number))
-    return build_output(parsed)
+    # mantém padrão: ordena por (nome, número)
+    rows.sort(key=lambda r: (r.name, r.number))
+    return build_output_dynamic(rows)
 
 
-# -----------------------------
-# UI (Lite) + suporte a Hub
-# -----------------------------
 class PXListLiteFrame(tk.Frame):
     def __init__(self, parent) -> None:
         super().__init__(parent)
 
-        # Topo
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
 
         tk.Label(
             top,
-            text="PXList Lite — organiza e devolve o texto (CAIXA ALTA)",
+            text="PXList Lite — posicional (NOME, NÚMERO, 1ª..6ª peça) + extras (apelido/tipo) — saída dinâmica",
             font=("Segoe UI", 12, "bold"),
         ).pack(side="left")
 
-        # Botões
         btns = tk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -209,7 +236,6 @@ class PXListLiteFrame(tk.Frame):
         tk.Button(btns, text="Copiar saída", command=self.copy_output).pack(side="right", padx=6)
         tk.Button(btns, text="Limpar", command=self.clear_all).pack(side="right")
 
-        # Corpo (2 colunas)
         body = tk.Frame(self)
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
@@ -219,22 +245,13 @@ class PXListLiteFrame(tk.Frame):
         right = tk.Frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
-        tk.Label(left, text="Entrada (separado por vírgula):").pack(anchor="w")
+        tk.Label(left, text="Entrada (posicional por vírgula):").pack(anchor="w")
         self.txt_in = tk.Text(left, wrap="none")
         self.txt_in.pack(fill="both", expand=True, pady=(6, 0))
 
-        tk.Label(right, text="Saída (organizada):").pack(anchor="w")
+        tk.Label(right, text="Saída (dinâmica):").pack(anchor="w")
         self.txt_out = tk.Text(right, wrap="none")
         self.txt_out.pack(fill="both", expand=True, pady=(6, 0))
-
-        # Exemplo
-        self.txt_in.insert(
-            "1.0",
-            "G,JÃO,10\n"
-            "JOÃO,5,G,M\n"
-            "MANEL,PP\n"
-            "JUACA,JUSÉ,PP\n"
-        )
 
     def on_process(self) -> None:
         raw = self.txt_in.get("1.0", "end").strip("\n")
@@ -246,13 +263,13 @@ class PXListLiteFrame(tk.Frame):
             out = process_text(raw)
             self.txt_out.delete("1.0", "end")
             self.txt_out.insert("1.0", out)
-            #messagebox.showinfo(APP_NAME, "OK! Lista organizada.")
 
             # ✅ Copia automaticamente, sem mensagem
             win = self.txt_out.winfo_toplevel()
             win.clipboard_clear()
             win.clipboard_append(out)
             win.update()
+
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e))
 
@@ -265,7 +282,6 @@ class PXListLiteFrame(tk.Frame):
         root.clipboard_clear()
         root.clipboard_append(text)
         root.update()
-        #messagebox.showinfo(APP_NAME, "Saída copiada para a área de transferência.")
 
     def clear_all(self) -> None:
         self.txt_in.delete("1.0", "end")
@@ -273,12 +289,7 @@ class PXListLiteFrame(tk.Frame):
 
 
 def build_ui(parent):
-    """
-    Para o Hub:
-    - o Hub chama build_ui(parent) e adiciona o frame na aba.
-    """
-    frame = PXListLiteFrame(parent)
-    return frame
+    return PXListLiteFrame(parent)
 
 
 def main() -> None:
