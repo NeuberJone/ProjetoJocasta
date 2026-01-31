@@ -47,6 +47,20 @@ def _is_size_value(tok: str) -> bool:
     return False
 
 
+def _gender_of_size(size_token: str) -> str:
+    """
+    FE => contém BL
+    C  => infantil (termina com A e está em VALID_SIZES)
+    MA => demais
+    """
+    s = _upper(size_token)
+    if "BL" in s:
+        return "FE"
+    if s.endswith("A") and s in VALID_SIZES:
+        return "C"
+    return "MA"
+
+
 @dataclass(frozen=True)
 class Row:
     name: str
@@ -56,9 +70,9 @@ class Row:
     blood: str
 
 
-def parse_line_positional(line: str, line_no: int) -> Row | None:
+def parse_line_positional(line: str, line_no: int) -> list[Row]:
     """
-    Entrada POSICIONAL por vírgula, mas com "extras" automáticos:
+    Entrada POSICIONAL por vírgula + extras automáticos:
       col1: NOME
       col2: NÚMERO
       col3..col8: 1ª..6ª peça (posicional; pode ter vazios no meio)
@@ -70,51 +84,50 @@ def parse_line_positional(line: str, line_no: int) -> Row | None:
       - Se a linha tiver APENAS 1 token (sem vírgulas) e for tamanho válido (ex: GG),
         então vira 1ª peça, com name="" e number="".
 
+    NOVO:
+      - Se na mesma linha existirem gêneros diferentes (MA/FE/C), separa em múltiplas linhas
+        preservando a posição das peças.
+
     Regras:
-      - Se aparecer string NÃO-tamanho antes/depois no MEIO das peças (antes da última peça válida) => ERRO
-      - Vazio é permitido só como nada entre vírgulas (,,)
+      - Se aparecer string NÃO-tamanho no meio das peças (antes da última peça válida) => ERRO
+      - Vazio permitido só como nada entre vírgulas (,,)
       - "" (aspas) proibido
+      - Extras: no máximo 2 (apelido, tipo)
     """
     raw = (line or "").rstrip("\n").replace("\ufeff", "")
     if not raw.strip():
-        return None
+        return []
 
-    # Split preservando vazios
     parts = [_clean_token(p) for p in raw.split(",")]
     for tok in parts:
         _forbid_quotes(line_no, tok)
 
-    # ✅ Caso especial: 1 token só (ex: "GG")
+    # ✅ Caso especial: 1 token só (ex: "GG" ou "3-GG")
     if len(parts) == 1:
         only = _clean_token(parts[0])
         if only and _is_size_value(only):
-            return Row(
+            return [Row(
                 name="",
                 number="",
                 pieces=(_upper(only), "", "", "", "", ""),
                 nickname="",
                 blood=""
-            )
-        # Se não for tamanho, trata como nome (comportamento antigo)
-        return Row(
+            )]
+        return [Row(
             name=_upper(only),
             number="",
             pieces=("", "", "", "", "", ""),
             nickname="",
             blood=""
-        )
+        )]
 
-    # garante pelo menos 2 colunas (nome, numero)
     while len(parts) < 2:
         parts.append("")
 
     name = _upper(parts[0])
     number = _clean_token(parts[1])
 
-    # resto a partir da 1ª peça
     rest = parts[2:]
-
-    # garante pelo menos 6 posições de peça para analisar
     while len(rest) < 6:
         rest.append("")
 
@@ -140,11 +153,9 @@ def parse_line_positional(line: str, line_no: int) -> Row | None:
                     raise ValueError(f"Linha {line_no}: valor inválido na {pos}ª peça: {v!r}")
                 pieces_norm[i] = _upper(v)
         else:
-            # após a última peça válida: vira extra (apelido/tipo)
             if v:
                 extras.append(_upper(v))
 
-    # Tokens além da 6ª peça também são extras
     if len(rest) > 6:
         for v in rest[6:]:
             vv = _clean_token(v)
@@ -156,13 +167,46 @@ def parse_line_positional(line: str, line_no: int) -> Row | None:
     if len(extras) > 2:
         raise ValueError(f"Linha {line_no}: extras demais após as peças (máx 2: apelido e tipo).")
 
-    return Row(
-        name=name,
-        number=_upper(number) if number else "",
-        pieces=tuple(pieces_norm),
-        nickname=nickname,
-        blood=blood,
-    )
+    # ✅ NOVO: separar por gênero quando misturar (MA/FE/C)
+    filled_positions = [(idx, val) for idx, val in enumerate(pieces_norm) if val]
+    if not filled_positions:
+        return [Row(
+            name=name,
+            number=_upper(number) if number else "",
+            pieces=tuple(pieces_norm),
+            nickname=nickname,
+            blood=blood
+        )]
+
+    genders_present = set(_gender_of_size(val) for _, val in filled_positions)
+
+    if len(genders_present) == 1:
+        return [Row(
+            name=name,
+            number=_upper(number) if number else "",
+            pieces=tuple(pieces_norm),
+            nickname=nickname,
+            blood=blood
+        )]
+
+    out_rows: list[Row] = []
+    # Ordem fixa para ficar previsível
+    for g in ["MA", "FE", "C"]:
+        if g not in genders_present:
+            continue
+        p = [""] * 6
+        for idx, val in filled_positions:
+            if _gender_of_size(val) == g:
+                p[idx] = val
+        out_rows.append(Row(
+            name=name,
+            number=_upper(number) if number else "",
+            pieces=tuple(p),
+            nickname=nickname,
+            blood=blood
+        ))
+
+    return out_rows
 
 
 def build_output_dynamic(rows: List[Row]) -> str:
@@ -177,7 +221,6 @@ def build_output_dynamic(rows: List[Row]) -> str:
     if not rows:
         return ""
 
-    # k = maior índice com peça preenchida em qualquer linha
     k = 0
     for r in rows:
         for idx, val in enumerate(r.pieces, start=1):
@@ -207,11 +250,8 @@ def process_text(text: str) -> str:
     for i, line in enumerate((text or "").splitlines(), start=1):
         if not line.strip():
             continue
-        row = parse_line_positional(line, i)
-        if row:
-            rows.append(row)
+        rows.extend(parse_line_positional(line, i))
 
-    # mantém padrão: ordena por (nome, número)
     rows.sort(key=lambda r: (r.name, r.number))
     return build_output_dynamic(rows)
 
@@ -225,7 +265,7 @@ class PXListLiteFrame(tk.Frame):
 
         tk.Label(
             top,
-            text="PXList Lite — posicional (NOME, NÚMERO, 1ª..6ª peça) + extras (apelido/tipo) — saída dinâmica",
+            text="PXList Lite — posicional + extras (apelido/tipo) — saída dinâmica (separa gêneros)",
             font=("Segoe UI", 12, "bold"),
         ).pack(side="left")
 
