@@ -2,20 +2,21 @@ from __future__ import annotations
 
 import re
 import tkinter as tk
+import tkinter.ttk as ttk
 from dataclasses import dataclass
 from tkinter import messagebox
-from typing import List, Tuple
-
+from typing import List
 
 APP_NAME = "PXListLite"
 
 VALID_SIZES = {
     # Adulto
     "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG",
-    # Babylook (BL + adulto)
+    # Babylook
     "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG",
-    # Infantil (A)
-    "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A", "10A", "11A", "12A", "14A", "16A",
+    # Infantil
+    "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A",
+    "10A", "11A", "12A", "14A", "16A",
 }
 
 QTY_SIZE_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
@@ -32,7 +33,9 @@ def _upper(s: str) -> str:
 
 def _forbid_quotes(line_no: int, tok: str) -> None:
     if tok and FORBIDDEN_QUOTE_RE.search(tok):
-        raise ValueError(f"Linha {line_no}: não use aspas para vazio (\"\"), token: {tok!r}")
+        raise ValueError(
+            f"Linha {line_no}: não use aspas para vazio (\"\"), token: {tok!r}"
+        )
 
 
 def _is_size_value(tok: str) -> bool:
@@ -42,200 +45,143 @@ def _is_size_value(tok: str) -> bool:
     if t in VALID_SIZES:
         return True
     m = QTY_SIZE_RE.match(t)
-    if m and _upper(m.group(2)) in VALID_SIZES:
-        return True
+    return bool(m and _upper(m.group(2)) in VALID_SIZES)
+
+
+def detect_multi_piece_input(text: str) -> bool:
+    """
+    Detecta se a entrada parece conter MAIS DE UMA peça/tamanho em alguma linha.
+    Critério:
+      - Linha com vírgulas em que existam tamanhos em mais de um campo após o número
+      - Linha com mais de 1 tamanho válido entre os campos a partir do 3º
+    """
+    for line in (text or "").splitlines():
+        raw = line.strip().replace("\ufeff", "")
+        if not raw or raw.startswith("#"):
+            continue
+
+        parts = [_clean_token(p) for p in raw.split(",")]
+
+        # Caso "GG" sozinho não é multi-peça
+        if len(parts) == 1:
+            continue
+
+        size_count = 0
+        for tok in parts[2:]:
+            if _is_size_value(tok):
+                size_count += 1
+                if size_count >= 2:
+                    return True
+
     return False
-
-
-def _gender_of_size(size_token: str) -> str:
-    """
-    FE => contém BL
-    C  => infantil (termina com A e está em VALID_SIZES)
-    MA => demais
-    """
-    s = _upper(size_token)
-    if "BL" in s:
-        return "FE"
-    if s.endswith("A") and s in VALID_SIZES:
-        return "C"
-    return "MA"
 
 
 @dataclass(frozen=True)
 class Row:
     name: str
     number: str
-    pieces: Tuple[str, ...]  # sempre 6 internamente
+    size: str  # UMA peça apenas
     nickname: str
     blood: str
 
 
-def parse_line_positional(line: str, line_no: int) -> list[Row]:
+def parse_line_single_size(line: str, line_no: int) -> Row | None:
     """
-    Entrada POSICIONAL por vírgula + extras automáticos:
-      col1: NOME
-      col2: NÚMERO
-      col3..col8: 1ª..6ª peça (posicional; pode ter vazios no meio)
-      Qualquer string NÃO-tamanho que apareça DEPOIS da última peça válida vira:
-        - 1ª string extra => Apelido
-        - 2ª string extra => Tipo Sanguíneo
+    Modo 1 tamanho (1 peça):
 
-    Caso especial:
-      - Se a linha tiver APENAS 1 token (sem vírgulas) e for tamanho válido (ex: GG),
-        então vira 1ª peça, com name="" e number="".
-
-    NOVO:
-      - Se na mesma linha existirem gêneros diferentes (MA/FE/C), separa em múltiplas linhas
-        preservando a posição das peças.
+    Aceita:
+      1) "NOME, NUMERO, TAM"
+      2) "NOME, , TAM, APELIDO, SANGUE"
+      3) ", 10, G"
+      4) "GG"  (tamanho sozinho) -> name="" number="" size="GG"
 
     Regras:
-      - Se aparecer string NÃO-tamanho no meio das peças (antes da última peça válida) => ERRO
-      - Vazio permitido só como nada entre vírgulas (,,)
-      - "" (aspas) proibido
-      - Extras: no máximo 2 (apelido, tipo)
+      - TAMANHO é obrigatório
+      - Se encontrar mais de 1 tamanho na mesma linha => erro
+      - "" (aspas) é proibido como vazio
     """
     raw = (line or "").rstrip("\n").replace("\ufeff", "")
-    if not raw.strip():
-        return []
+    if not raw.strip() or raw.strip().startswith("#"):
+        return None
 
     parts = [_clean_token(p) for p in raw.split(",")]
     for tok in parts:
         _forbid_quotes(line_no, tok)
 
-    # ✅ Caso especial: 1 token só (ex: "GG" ou "3-GG")
+    # Caso especial: só um token (ex: "GG")
     if len(parts) == 1:
         only = _clean_token(parts[0])
         if only and _is_size_value(only):
-            return [Row(
-                name="",
-                number="",
-                pieces=(_upper(only), "", "", "", "", ""),
-                nickname="",
-                blood=""
-            )]
-        return [Row(
-            name=_upper(only),
-            number="",
-            pieces=("", "", "", "", "", ""),
-            nickname="",
-            blood=""
-        )]
+            return Row(name="", number="", size=_upper(only), nickname="", blood="")
+        raise ValueError(f"Linha {line_no}: tamanho obrigatório. Valor recebido: {only!r}")
 
-    while len(parts) < 2:
+    # Garante pelo menos 3 colunas: nome, numero, tamanho
+    while len(parts) < 3:
         parts.append("")
 
     name = _upper(parts[0])
     number = _clean_token(parts[1])
+    size_raw = _clean_token(parts[2])
 
-    rest = parts[2:]
-    while len(rest) < 6:
-        rest.append("")
+    if not size_raw:
+        raise ValueError(f"Linha {line_no}: tamanho vazio (não permitido).")
 
-    # Descobre a última posição (1..6) que contém um TAMANHO válido
-    last_piece_pos = 0
-    for i in range(6):
-        v = _clean_token(rest[i])
-        if v and _is_size_value(v):
-            last_piece_pos = i + 1
+    # Conta quantos tamanhos existem na linha (a partir do 3º campo em diante)
+    size_count = 0
+    for tok in parts[2:]:
+        if _is_size_value(tok):
+            size_count += 1
+    if size_count >= 2:
+        raise ValueError(
+            f"Linha {line_no}: foram encontrados {size_count} tamanhos. No Lite é permitido apenas 1."
+        )
 
-    pieces_norm = [""] * 6
-    extras: List[str] = []
+    size = _upper(size_raw)
+    if not _is_size_value(size):
+        raise ValueError(f"Linha {line_no}: tamanho inválido: {size_raw!r}")
 
-    for i in range(6):
-        v = _clean_token(rest[i])
-        pos = i + 1
-
-        if pos <= last_piece_pos:
-            if not v:
-                pieces_norm[i] = ""
-            else:
-                if not _is_size_value(v):
-                    raise ValueError(f"Linha {line_no}: valor inválido na {pos}ª peça: {v!r}")
-                pieces_norm[i] = _upper(v)
-        else:
-            if v:
-                extras.append(_upper(v))
-
-    if len(rest) > 6:
-        for v in rest[6:]:
+    # Extras após o tamanho: apelido e tipo (ignorando vazios)
+    extra_tokens: List[str] = []
+    if len(parts) > 3:
+        for v in parts[3:]:
             vv = _clean_token(v)
             if vv:
-                extras.append(_upper(vv))
+                extra_tokens.append(_upper(vv))
 
-    nickname = extras[0] if len(extras) >= 1 else ""
-    blood = extras[1] if len(extras) >= 2 else ""
-    if len(extras) > 2:
-        raise ValueError(f"Linha {line_no}: extras demais após as peças (máx 2: apelido e tipo).")
+    if len(extra_tokens) > 2:
+        raise ValueError(
+            f"Linha {line_no}: extras demais após o tamanho (máx 2: apelido e tipo)."
+        )
 
-    # ✅ NOVO: separar por gênero quando misturar (MA/FE/C)
-    filled_positions = [(idx, val) for idx, val in enumerate(pieces_norm) if val]
-    if not filled_positions:
-        return [Row(
-            name=name,
-            number=_upper(number) if number else "",
-            pieces=tuple(pieces_norm),
-            nickname=nickname,
-            blood=blood
-        )]
+    nickname = extra_tokens[0] if len(extra_tokens) >= 1 else ""
+    blood = extra_tokens[1] if len(extra_tokens) >= 2 else ""
 
-    genders_present = set(_gender_of_size(val) for _, val in filled_positions)
+    return Row(
+        name=name,
+        number=_upper(number) if number else "",
+        size=size,
+        nickname=nickname,
+        blood=blood,
+    )
 
-    if len(genders_present) == 1:
-        return [Row(
-            name=name,
-            number=_upper(number) if number else "",
-            pieces=tuple(pieces_norm),
-            nickname=nickname,
-            blood=blood
-        )]
 
-    out_rows: list[Row] = []
-    # Ordem fixa para ficar previsível
-    for g in ["MA", "FE", "C"]:
-        if g not in genders_present:
+def process_text(text: str) -> str:
+    rows: List[Row] = []
+    for i, line in enumerate((text or "").splitlines(), start=1):
+        if not line.strip():
             continue
-        p = [""] * 6
-        for idx, val in filled_positions:
-            if _gender_of_size(val) == g:
-                p[idx] = val
-        out_rows.append(Row(
-            name=name,
-            number=_upper(number) if number else "",
-            pieces=tuple(p),
-            nickname=nickname,
-            blood=blood
-        ))
+        r = parse_line_single_size(line, i)
+        if r:
+            rows.append(r)
 
-    return out_rows
-
-
-def build_output_dynamic(rows: List[Row]) -> str:
-    """
-    Saída dinâmica:
-      NOME,NUMERO,1ª..kª PEÇA,(APELIDO?),(TIPO?).
-
-    k = última coluna de peça com tamanho em qualquer linha.
-    APELIDO só aparece se alguém tiver apelido.
-    TIPO só aparece se alguém tiver tipo sanguíneo.
-    """
-    if not rows:
-        return ""
-
-    k = 0
-    for r in rows:
-        for idx, val in enumerate(r.pieces, start=1):
-            if val:
-                k = max(k, idx)
-    if k == 0:
-        k = 1
+    rows.sort(key=lambda r: (r.name, r.number))
 
     has_nick = any(r.nickname for r in rows)
     has_blood = any(r.blood for r in rows)
 
     out_lines: List[str] = []
     for r in rows:
-        cols: List[str] = [r.name, r.number]
-        cols.extend(list(r.pieces[:k]))
+        cols = [r.name, r.number, r.size]
         if has_nick:
             cols.append(r.nickname)
         if has_blood:
@@ -245,17 +191,83 @@ def build_output_dynamic(rows: List[Row]) -> str:
     return "\n".join(out_lines)
 
 
-def process_text(text: str) -> str:
-    rows: List[Row] = []
-    for i, line in enumerate((text or "").splitlines(), start=1):
-        if not line.strip():
-            continue
-        rows.extend(parse_line_positional(line, i))
+def open_totalist_with_input(parent: tk.Misc, raw_text: str) -> None:
+    """
+    Dentro do Hub: seleciona a aba PXTotaList e preenche a entrada.
+    Fora do Hub: fallback abre uma janela separada.
+    """
+    root = parent.winfo_toplevel()
 
-    rows.sort(key=lambda r: (r.name, r.number))
-    return build_output_dynamic(rows)
+    # 1) Hub: tenta achar o Notebook
+    nb = getattr(root, "nb", None)
+    if isinstance(nb, ttk.Notebook):
+        target_tab_id = None
+        for tab_id in nb.tabs():
+            try:
+                if nb.tab(tab_id, "text") == "PXTotaList":
+                    target_tab_id = tab_id
+                    break
+            except Exception:
+                continue
+
+        if target_tab_id:
+            nb.select(target_tab_id)
+
+            tab_widget = root.nametowidget(target_tab_id)
+
+            def _walk(w: tk.Widget):
+                yield w
+                for c in w.winfo_children():
+                    yield from _walk(c)
+
+            for w in _walk(tab_widget):
+                # Se o frame do PXTotaList guardar txt_in como atributo
+                if hasattr(w, "txt_in"):
+                    txt = getattr(w, "txt_in", None)
+                    if isinstance(txt, tk.Text):
+                        txt.delete("1.0", "end")
+                        txt.insert("1.0", raw_text)
+                        txt.focus_set()
+                        return
+
+            messagebox.showwarning(
+                APP_NAME,
+                "Mudei para a aba PXTotaList, mas não consegui preencher a entrada automaticamente."
+            )
+            return
+
+    # 2) Fallback: abre janela fora do Hub
+    try:
+        import PXTotaList  # type: ignore
+    except Exception as e:
+        messagebox.showerror(
+            APP_NAME,
+            "Não consegui abrir o PXTotaList.\n"
+            "Verifique se o arquivo 'PXTotaList.py' está na mesma pasta.\n\n"
+            f"Detalhe: {e}"
+        )
+        return
+
+    win = tk.Toplevel(root)
+    win.title("PXTotaList")
+
+    if hasattr(PXTotaList, "build_ui"):
+        frame = PXTotaList.build_ui(win)
+        frame.pack(fill="both", expand=True)
+
+        if hasattr(frame, "txt_in"):
+            txt = getattr(frame, "txt_in", None)
+            if isinstance(txt, tk.Text):
+                txt.delete("1.0", "end")
+                txt.insert("1.0", raw_text)
+                txt.focus_set()
+    else:
+        tk.Label(win, text="PXTotaList carregado, mas não encontrei build_ui(parent).").pack(padx=10, pady=10)
 
 
+# -----------------------------
+# UI + suporte ao Hub
+# -----------------------------
 class PXListLiteFrame(tk.Frame):
     def __init__(self, parent) -> None:
         super().__init__(parent)
@@ -265,7 +277,7 @@ class PXListLiteFrame(tk.Frame):
 
         tk.Label(
             top,
-            text="PXList Lite — posicional + extras (apelido/tipo) — saída dinâmica (separa gêneros)",
+            text="PXList Lite — 1 tamanho por linha (para manga curta no PXList)",
             font=("Segoe UI", 12, "bold"),
         ).pack(side="left")
 
@@ -285,13 +297,23 @@ class PXListLiteFrame(tk.Frame):
         right = tk.Frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
-        tk.Label(left, text="Entrada (posicional por vírgula):").pack(anchor="w")
+        tk.Label(left, text="Entrada: Nome, Número, Tamanho, (Apelido), (Tipo)").pack(anchor="w")
         self.txt_in = tk.Text(left, wrap="none")
         self.txt_in.pack(fill="both", expand=True, pady=(6, 0))
 
-        tk.Label(right, text="Saída (dinâmica):").pack(anchor="w")
+        tk.Label(right, text="Saída (copiada automaticamente):").pack(anchor="w")
         self.txt_out = tk.Text(right, wrap="none")
         self.txt_out.pack(fill="both", expand=True, pady=(6, 0))
+
+        self.txt_in.insert(
+            "1.0",
+            "GG\n"
+            "JOÃO,5,G\n"
+            "JUACA,,PP,JUSÉ\n"
+            "LUCAS,21,M,,O-\n"
+            "\n"
+            "# Se colar multi-peça (ex: JOAO,5,G,M) o Lite vai sugerir abrir o TotaList.\n"
+        )
 
     def on_process(self) -> None:
         raw = self.txt_in.get("1.0", "end").strip("\n")
@@ -299,12 +321,22 @@ class PXListLiteFrame(tk.Frame):
             messagebox.showwarning(APP_NAME, "Cole uma lista na entrada.")
             return
 
+        if detect_multi_piece_input(raw):
+            resp = messagebox.askyesno(
+                APP_NAME,
+                "Detectei mais de um tamanho/peça em pelo menos uma linha.\n\n"
+                "O PXListLite trabalha com APENAS 1 tamanho por linha.\n"
+                "Deseja mudar para o PXTotaList com essa mesma entrada?"
+            )
+            if resp:
+                open_totalist_with_input(self, raw)
+            return
+
         try:
             out = process_text(raw)
             self.txt_out.delete("1.0", "end")
             self.txt_out.insert("1.0", out)
 
-            # ✅ Copia automaticamente, sem mensagem
             win = self.txt_out.winfo_toplevel()
             win.clipboard_clear()
             win.clipboard_append(out)
