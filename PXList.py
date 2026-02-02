@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 from datetime import datetime
 from pathlib import Path
 
@@ -108,6 +108,132 @@ def extract_paths_from_drop(data: str) -> list[str]:
     return paths
 
 
+def _looks_like_size_token(tok: str) -> bool:
+    """
+    Heurística para detectar se um token parece um TAMANHO/PEÇA.
+    Aceita:
+      - QTY-TAM (ex: 3-G, 2-BLP, 5-12A)
+      - TAM sozinho (ex: G, BLP, 12A)
+    """
+    t = (tok or "").strip()
+    if not t:
+        return False
+    t = t.upper()
+
+    m = FIELD3_RE.fullmatch(t)
+    if m:
+        size = m.group(2).strip().upper()
+    else:
+        size = t
+
+    try:
+        _ = detect_gender_from_size(size)
+        return True
+    except Exception:
+        return False
+
+
+def detect_multi_piece_input(text: str) -> bool:
+    """
+    Detecta se o texto colado parece vir do TotaList (ou outra fonte) com MAIS DE UMA peça por linha.
+
+    Regras:
+      - Ignora linhas vazias e comentários (// ...)
+      - Se houver mais de 5 campos => com certeza não é Lite => multi-peça
+      - Se houver 4º/5º campo que pareça tamanho (ex: JOAO,5,G,M) => multi-peça
+    """
+    for line in (text or "").splitlines():
+        raw = line.strip().replace("\ufeff", "")
+        if not raw or raw.startswith("//"):
+            continue
+
+        parts = [p.strip() for p in raw.split(",")]
+
+        if len(parts) > 5:
+            return True
+
+        # Campos extras (apelido/tipo) no PXList: se algum deles parecer tamanho, é multi-peça.
+        if len(parts) >= 4:
+            for tok in parts[3:]:
+                if _looks_like_size_token(tok):
+                    return True
+
+    return False
+
+
+def open_listplus_with_input(parent: tk.Misc, raw_text: str) -> None:
+    """
+    Dentro do JocastaHub: muda para a aba PXListPlus e preenche a entrada.
+    Fora do Hub: abre uma janela separada do PXListPlus.
+    """
+    root = parent.winfo_toplevel()
+
+    # 1) Hub: tenta achar o Notebook em root.nb
+    nb = getattr(root, "nb", None)
+    if isinstance(nb, ttk.Notebook):
+        target_tab_id = None
+        for tab_id in nb.tabs():
+            try:
+                if nb.tab(tab_id, "text") == "PXListPlus":
+                    target_tab_id = tab_id
+                    break
+            except Exception:
+                continue
+
+        if target_tab_id:
+            nb.select(target_tab_id)
+
+            tab_widget = root.nametowidget(target_tab_id)
+
+            def _walk(w: tk.Widget):
+                yield w
+                for c in w.winfo_children():
+                    yield from _walk(c)
+
+            for w in _walk(tab_widget):
+                if hasattr(w, "txt_in"):
+                    txt = getattr(w, "txt_in", None)
+                    if isinstance(txt, tk.Text):
+                        txt.delete("1.0", "end")
+                        txt.insert("1.0", raw_text)
+                        txt.focus_set()
+                        return
+
+            messagebox.showwarning(
+                APP_NAME,
+                "Mudei para a aba PXListPlus, mas não consegui preencher a entrada automaticamente."
+            )
+            return
+
+    # 2) Fallback: abre janela fora do Hub
+    try:
+        import PXListPlus  # type: ignore
+    except Exception as e:
+        messagebox.showerror(
+            APP_NAME,
+            "Não consegui abrir o PXListPlus.\n"
+            "Verifique se o arquivo 'PXListPlus.py' está na mesma pasta.\n\n"
+            f"Detalhe: {e}"
+        )
+        return
+
+    win = tk.Toplevel(root)
+    win.title("PXListPlus")
+
+    if hasattr(PXListPlus, "build_ui"):
+        frame = PXListPlus.build_ui(win)
+        frame.pack(fill="both", expand=True)
+
+        if hasattr(frame, "txt_in"):
+            txt = getattr(frame, "txt_in", None)
+            if isinstance(txt, tk.Text):
+                txt.delete("1.0", "end")
+                txt.insert("1.0", raw_text)
+                txt.focus_set()
+    else:
+        tk.Label(win, text="PXListPlus carregado, mas não encontrei build_ui(parent).").pack(padx=10, pady=10)
+
+
 def detect_gender_from_size(size: str) -> str:
     """
     Regras:
@@ -188,10 +314,6 @@ def parse_line_fixed(line: str, line_no: int) -> tuple[dict, list[str]]:
     if qty <= 0:
         raise ValueError("Quantidade inválida no campo 3: deve ser maior que zero.")
 
-
-    if qty <= 0:
-        raise ValueError("Quantidade inválida no campo 3: deve ser maior que zero.")
-
     gender = detect_gender_from_size(size)
 
     order = {
@@ -215,23 +337,23 @@ def build_json_from_text_strict(text: str) -> tuple[dict, list[str], int]:
     """
     Estrito:
       - Qualquer erro em qualquer linha -> NÃO gera arquivo.
+      - Ignora comentários (// ...)
       - Retorna: (json_data, errors, total_orders)
     """
     orders = []
     errors = []
 
     lines = text.splitlines()
-
     for i, line in enumerate(lines, start=1):
         raw = line.strip()
-        if not raw:
+        if not raw or raw.startswith("//"):
             continue
 
         try:
             order, _warnings = parse_line_fixed(raw, i)
             orders.append(order)
         except Exception as e:
-            errors.append(f"Linha {i}: {raw}\n  -> {e}")
+            errors.append(f"Linha {i}: {raw}\n -> {e}")
 
     data = dict(BASE_JSON)
     data["orders"] = orders
@@ -252,6 +374,7 @@ def export_json(data: dict, out_dir: str) -> str:
 def build_ui(parent):
     cfg = load_config()
     output_dir_default = cfg.get("output_dir", DEFAULT_OUTPUT_DIR)
+
     output_dir_var = tk.StringVar(value=output_dir_default)
     status_var = tk.StringVar(value=f"📁 Pasta de saída: {output_dir_var.get()}")
 
@@ -278,6 +401,17 @@ def build_ui(parent):
             raw = text_box.get("1.0", "end").strip()
             if not raw:
                 messagebox.showwarning(APP_NAME, "Cole uma lista antes de gerar.")
+                return
+            # ✅ Se colarem algo com mais de uma peça por linha, redireciona para o PXListPlus
+            if detect_multi_piece_input(raw):
+                resp = messagebox.askyesno(
+                    APP_NAME,
+                    "Detectei mais de um tipo de peça/tamanho em pelo menos uma linha.\n\n"
+                    "O PXList gera JSON apenas para MANGA CURTA (ShortSleeve).\n"
+                    "Deseja mudar para o PXListPlus com essa mesma entrada?"
+                )
+                if resp:
+                    open_listplus_with_input(frame, raw)
                 return
 
             data, errors, total = build_json_from_text_strict(raw)
@@ -317,6 +451,7 @@ def build_ui(parent):
             p = Path(paths[0].strip().strip('"'))
             if not p.exists():
                 raise FileNotFoundError("Arquivo não encontrado.")
+
             if p.suffix.lower() != ".txt":
                 raise ValueError("Solte um arquivo .txt.")
 
@@ -329,7 +464,8 @@ def build_ui(parent):
             status_var.set(f"❌ Erro: {e}")
             messagebox.showerror(APP_NAME, str(e))
 
-    tk.Label(frame, text="PXList — cole a lista do PXListLite ou solte um .txt", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+    tk.Label(frame, text="PXList — cole a lista do PXListLite ou solte um .txt",
+             font=("Segoe UI", 14, "bold")).pack(anchor="w")
 
     tk.Label(
         frame,
@@ -337,7 +473,8 @@ def build_ui(parent):
              "1) Nome, 2) Número, 3) QTY-TAMANHO, 4) Apelido (opcional), 5) Tipo sanguíneo (opcional)\n"
              "Campo 3 é obrigatório e deve ser QTY-TAMANHO (ex: 1-G, 3-BLP, 5-12A).\n"
              "Gender: Infantil (2A..12A) => C | BL => FE | demais => MA.\n"
-             "Qualquer erro bloqueia a geração (não cria arquivo).",
+             "Qualquer erro bloqueia a geração (não cria arquivo).\n"
+             "Se detectar mais de uma peça por linha, o PXList sugere mudar para o PXListPlus.",
         font=("Segoe UI", 9)
     ).pack(anchor="w", pady=(6, 10))
 
