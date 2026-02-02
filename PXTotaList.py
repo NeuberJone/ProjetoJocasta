@@ -23,6 +23,23 @@ QTY_SIZE_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
 FORBIDDEN_QUOTE_RE = re.compile(r"[\"']")
 
 
+# =========================
+# Comment highlighting
+# =========================
+def highlight_comments(text_widget: tk.Text) -> None:
+    text_widget.tag_remove("comment", "1.0", "end")
+
+    lines = text_widget.get("1.0", "end").splitlines()
+    for idx, line in enumerate(lines, start=1):
+        if line.strip().startswith("//"):
+            start = f"{idx}.0"
+            end = f"{idx}.end"
+            text_widget.tag_add("comment", start, end)
+
+
+# =========================
+# Helpers
+# =========================
 def _clean_token(s: str) -> str:
     return (s or "").strip()
 
@@ -154,20 +171,14 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
                 if not _is_size_value(v):
                     raise ValueError(f"Linha {line_no}: valor inválido na {pos}ª peça: {v!r}")
                 pieces_norm[i] = _upper(v)
-        else:
-            # Depois da última peça válida, não é peça.
-            # Será tratado como extra POSICIONAL logo abaixo.
-            pass
 
-    # 3) Extras POSICIONAIS (apelido, sangue) = tudo que vem depois da última peça válida,
-    #    preservando vazios entre vírgulas.
+    # 3) Extras POSICIONAIS (apelido, sangue) após a última peça válida
     extra_area = rest[last_piece_pos:]  # tudo após a última peça válida
     extra_area = [_clean_token(x) for x in extra_area]
 
     e1 = extra_area[0] if len(extra_area) >= 1 else ""
     e2 = extra_area[1] if len(extra_area) >= 2 else ""
 
-    # Se houver mais colunas extras e alguma tiver conteúdo => erro
     if len(extra_area) > 2 and any(x.strip() for x in extra_area[2:]):
         raise ValueError(f"Linha {line_no}: extras demais após as peças (máx 2: apelido e tipo).")
 
@@ -187,7 +198,6 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
 
     genders_present = set(_gender_of_size(val) for _, val in filled_positions)
 
-    # Se só tem 1 gênero, mantém 1 linha
     if len(genders_present) == 1:
         return [Row(
             name=name,
@@ -197,7 +207,6 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
             blood=blood
         )]
 
-    # Se tem mais de 1 gênero, cria 1 Row por gênero, preservando POSIÇÃO
     out_rows: list[Row] = []
     for g in ["MA", "FE", "C"]:
         if g not in genders_present:
@@ -229,7 +238,6 @@ def build_output_dynamic(rows: List[Row]) -> str:
     if not rows:
         return ""
 
-    # k = última coluna de peça com algo
     k = 0
     for r in rows:
         for idx, val in enumerate(r.pieces, start=1):
@@ -257,7 +265,8 @@ def build_output_dynamic(rows: List[Row]) -> str:
 def process_text(text: str) -> str:
     rows: List[Row] = []
     for i, line in enumerate((text or "").splitlines(), start=1):
-        if not line.strip():
+        raw = line.strip()
+        if not raw or raw.startswith("//"):
             continue
         rows.extend(parse_line_positional(line, i))
 
@@ -305,6 +314,13 @@ class PXTotaListFrame(tk.Frame):
         self.txt_out = tk.Text(right, wrap="none")
         self.txt_out.pack(fill="both", expand=True, pady=(6, 0))
 
+        # Tag azul para comentários
+        self.txt_in.tag_configure("comment", foreground="#1f6fd2")
+
+        # Atualiza highlight ao digitar/colar
+        self.txt_in.bind("<KeyRelease>", lambda e: highlight_comments(self.txt_in))
+        self.txt_in.bind("<Control-v>", lambda e: self.after(1, highlight_comments, self.txt_in))
+
         # exemplo (opcional)
         self.txt_in.insert(
             "1.0",
@@ -312,7 +328,10 @@ class PXTotaListFrame(tk.Frame):
             "JOÃO,5,G,M\n"
             "JUACA,,PP,JUSÉ\n"
             "LUCAS,21,M,,O-\n"
+            "\n"
+            "// Comentários (linhas começando com //) são ignorados no processamento.\n"
         )
+        highlight_comments(self.txt_in)
 
     def on_process(self) -> None:
         raw = self.txt_in.get("1.0", "end").strip("\n")
@@ -325,7 +344,6 @@ class PXTotaListFrame(tk.Frame):
             self.txt_out.delete("1.0", "end")
             self.txt_out.insert("1.0", out)
 
-            # ✅ Copia automaticamente, sem mensagem
             win = self.txt_out.winfo_toplevel()
             win.clipboard_clear()
             win.clipboard_append(out)
@@ -347,6 +365,7 @@ class PXTotaListFrame(tk.Frame):
     def clear_all(self) -> None:
         self.txt_in.delete("1.0", "end")
         self.txt_out.delete("1.0", "end")
+        highlight_comments(self.txt_in)
 
 
 def build_ui(parent):
