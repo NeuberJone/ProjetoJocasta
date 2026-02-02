@@ -30,6 +30,8 @@ class JocastaHub(RootBase):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
+        self._add_tab("PXFlow", "PXFlow")
+        self._add_tab("PXComposer", "PXComposer")
         self._add_tab("PXList", "PXList")
         self._add_tab("PXTotaList", "PXTotaList")
         self._add_tab("PXListLite", "PXListLite")
