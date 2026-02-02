@@ -55,6 +55,7 @@ class JocastaHub(RootBase):
             ],
             "Impressão": [
                 ("PXPrint", "PXPrint"),
+                ("PXPrintLogs", "PXPrintLogs"),
             ],
             "Utilitários": [
                 ("Jarvis", "Jarvis"),
