@@ -67,6 +67,31 @@ class Row:
 
 
 def parse_line_positional(line: str, line_no: int) -> list[Row]:
+    """
+    Entrada POSICIONAL por vírgula:
+
+      col1: NOME
+      col2: NÚMERO
+      col3..col8: 1ª..6ª peça (posicional; pode ter vazios no meio)
+
+    Extras:
+      Qualquer coisa APÓS a última peça válida vira EXTRAS POSICIONAIS:
+        - 1º extra => Apelido
+        - 2º extra => Tipo sanguíneo
+      (vazios entre vírgulas são preservados, ex: ",,O-" => apelido vazio, sangue O-)
+
+    Caso especial:
+      - Se a linha tiver APENAS 1 token (sem vírgulas) e for tamanho válido (ex: GG),
+        então vira 1ª peça, com name="" e number="".
+
+    Regras:
+      - Se aparecer string NÃO-tamanho no meio das peças (antes da última peça válida) => ERRO
+      - Vazio permitido só como nada entre vírgulas (,,)
+      - "" (aspas) proibido
+      - Extras: no máximo 2 (apelido, tipo). Se houver mais colunas extras com conteúdo => erro.
+      - Se na mesma linha existirem gêneros diferentes (MA/FE/C), separa em múltiplas linhas
+        preservando a posição das peças.
+    """
     raw = (line or "").rstrip("\n").replace("\ufeff", "")
     if not raw.strip():
         return []
@@ -75,7 +100,7 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
     for tok in parts:
         _forbid_quotes(line_no, tok)
 
-    # ✅ Caso especial: 1 token só (ex: "GG")
+    # ✅ Caso especial: 1 token só (ex: "GG" ou "3-GG")
     if len(parts) == 1:
         only = _clean_token(parts[0])
         if only and _is_size_value(only):
@@ -100,20 +125,24 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
     name = _upper(parts[0])
     number = _clean_token(parts[1])
 
+    # Área após nome e número
     rest = parts[2:]
+
+    # Pelo menos 6 peças (posicional)
     while len(rest) < 6:
         rest.append("")
 
-    # última peça válida
+    # 1) Descobre a última posição (1..6) que contém um TAMANHO válido
     last_piece_pos = 0
     for i in range(6):
         v = _clean_token(rest[i])
         if v and _is_size_value(v):
             last_piece_pos = i + 1
 
+    # 2) Monta as 6 peças (posicionais). Antes/até a última peça válida:
+    #    - vazio ok
+    #    - não-tamanho => erro
     pieces_norm = [""] * 6
-    extras: List[str] = []
-
     for i in range(6):
         v = _clean_token(rest[i])
         pos = i + 1
@@ -126,21 +155,26 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
                     raise ValueError(f"Linha {line_no}: valor inválido na {pos}ª peça: {v!r}")
                 pieces_norm[i] = _upper(v)
         else:
-            if v:
-                extras.append(_upper(v))
+            # Depois da última peça válida, não é peça.
+            # Será tratado como extra POSICIONAL logo abaixo.
+            pass
 
-    if len(rest) > 6:
-        for v in rest[6:]:
-            vv = _clean_token(v)
-            if vv:
-                extras.append(_upper(vv))
+    # 3) Extras POSICIONAIS (apelido, sangue) = tudo que vem depois da última peça válida,
+    #    preservando vazios entre vírgulas.
+    extra_area = rest[last_piece_pos:]  # tudo após a última peça válida
+    extra_area = [_clean_token(x) for x in extra_area]
 
-    nickname = extras[0] if len(extras) >= 1 else ""
-    blood = extras[1] if len(extras) >= 2 else ""
-    if len(extras) > 2:
+    e1 = extra_area[0] if len(extra_area) >= 1 else ""
+    e2 = extra_area[1] if len(extra_area) >= 2 else ""
+
+    # Se houver mais colunas extras e alguma tiver conteúdo => erro
+    if len(extra_area) > 2 and any(x.strip() for x in extra_area[2:]):
         raise ValueError(f"Linha {line_no}: extras demais após as peças (máx 2: apelido e tipo).")
 
-    # ✅ Separa por gênero se misturar
+    nickname = _upper(e1) if e1 else ""
+    blood = _upper(e2) if e2 else ""
+
+    # 4) Separação por gênero se misturar
     filled_positions = [(idx, val) for idx, val in enumerate(pieces_norm) if val]
     if not filled_positions:
         return [Row(
@@ -152,6 +186,8 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
         )]
 
     genders_present = set(_gender_of_size(val) for _, val in filled_positions)
+
+    # Se só tem 1 gênero, mantém 1 linha
     if len(genders_present) == 1:
         return [Row(
             name=name,
@@ -161,6 +197,7 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
             blood=blood
         )]
 
+    # Se tem mais de 1 gênero, cria 1 Row por gênero, preservando POSIÇÃO
     out_rows: list[Row] = []
     for g in ["MA", "FE", "C"]:
         if g not in genders_present:
@@ -181,9 +218,18 @@ def parse_line_positional(line: str, line_no: int) -> list[Row]:
 
 
 def build_output_dynamic(rows: List[Row]) -> str:
+    """
+    Saída dinâmica:
+      NOME,NUMERO,1ª..kª PEÇA,(APELIDO?),(TIPO?).
+
+    k = última coluna de peça com tamanho em qualquer linha.
+    APELIDO só aparece se alguém tiver apelido OU se existir tipo sanguíneo (para manter alinhamento).
+    TIPO só aparece se alguém tiver tipo sanguíneo.
+    """
     if not rows:
         return ""
 
+    # k = última coluna de peça com algo
     k = 0
     for r in rows:
         for idx, val in enumerate(r.pieces, start=1):
@@ -192,8 +238,8 @@ def build_output_dynamic(rows: List[Row]) -> str:
     if k == 0:
         k = 1
 
-    has_nick = any(r.nickname for r in rows)
     has_blood = any(r.blood for r in rows)
+    has_nick = any(r.nickname for r in rows) or has_blood  # ✅ mantém alinhamento
 
     out_lines: List[str] = []
     for r in rows:
@@ -263,9 +309,9 @@ class PXTotaListFrame(tk.Frame):
         self.txt_in.insert(
             "1.0",
             "GG\n"
-            "ANA,10,BLP,M\n"
             "JOÃO,5,G,M\n"
-            "JUACA,,PP,,,JUSÉ\n"
+            "JUACA,,PP,JUSÉ\n"
+            "LUCAS,21,M,,O-\n"
         )
 
     def on_process(self) -> None:
