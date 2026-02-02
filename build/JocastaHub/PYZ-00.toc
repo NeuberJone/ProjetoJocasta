@@ -1,6 +1,7 @@
 ('C:\\Projetos\\ProjetoJocasta\\build\\JocastaHub\\PYZ-00.pyz',
  [('Jarvis', 'C:\\Projetos\\ProjetoJocasta\\Jarvis.py', 'PYMODULE'),
   ('PXComposer', 'C:\\Projetos\\ProjetoJocasta\\PXComposer.py', 'PYMODULE'),
+  ('PXDupe', 'C:\\Projetos\\ProjetoJocasta\\PXDupe.py', 'PYMODULE'),
   ('PXFlow', 'C:\\Projetos\\ProjetoJocasta\\PXFlow.py', 'PYMODULE'),
   ('PXList', 'C:\\Projetos\\ProjetoJocasta\\PXList.py', 'PYMODULE'),
   ('PXListLite', 'C:\\Projetos\\ProjetoJocasta\\PXListLite.py', 'PYMODULE'),

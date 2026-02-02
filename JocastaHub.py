@@ -38,6 +38,7 @@ class JocastaHub(RootBase):
         self._add_tab("PXListPlus", "PXListPlus")
         self._add_tab("PXSort", "PXSort")
         self._add_tab("PXSortLite", "PXSortLite")
+        self._add_tab("PXDupe", "PXDupe")
         self._add_tab("Jarvis", "Jarvis")
 
     def _add_tab(self, title: str, module_name: str) -> None:
