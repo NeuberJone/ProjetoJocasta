@@ -234,6 +234,7 @@
   ('PXList', 'C:\\Projetos\\ProjetoJocasta\\PXList.py', 'PYMODULE'),
   ('PXListLite', 'C:\\Projetos\\ProjetoJocasta\\PXListLite.py', 'PYMODULE'),
   ('PXListPlus', 'C:\\Projetos\\ProjetoJocasta\\PXListPlus.py', 'PYMODULE'),
+  ('PXOrderList', 'C:\\Projetos\\ProjetoJocasta\\PXOrderList.py', 'PYMODULE'),
   ('PXPrint', 'C:\\Projetos\\ProjetoJocasta\\PXPrint.py', 'PYMODULE'),
   ('PXPrintLogs', 'C:\\Projetos\\ProjetoJocasta\\PXPrintLogs.py', 'PYMODULE'),
   ('PXSort', 'C:\\Projetos\\ProjetoJocasta\\PXSort.py', 'PYMODULE'),

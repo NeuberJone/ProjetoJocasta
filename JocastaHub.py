@@ -58,6 +58,7 @@ class JocastaHub(RootBase):
                 ("PXPrintLogs", "PXPrintLogs"),
             ],
             "Utilitários": [
+                ("PXOrderList", "PXOrderList"),
                 ("Jarvis", "Jarvis"),
             ],
             "Legado": [
