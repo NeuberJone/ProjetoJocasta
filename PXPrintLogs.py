@@ -8,26 +8,19 @@
 # - Metragem REAL (m) = (HeightMM + VPositionMM) / 1000
 #
 # Exportação:
-# - PDF Resumido: tabela de blocos (Total com 2 casas + "m", Qtd jobs centralizada) + Total geral do rolo
+# - PDF Resumido: tabela de blocos (Total centralizado 2 casas + "m", Qtd jobs centralizada) + Total geral
 # - PDF Completo:
-#   1) Lista de jobs: EndTime | Arquivo (completo, quebra em linhas) | Tecido (completo, quebra em linhas) | Tamanho
+#   1) Lista de jobs: EndTime | Arquivo (completo + wrap) | Tecido (completo + wrap) | Tamanho
 #      + linha separadora quando mudar tecido (entre blocos)
 #   2) Separação
-#   3) Resumo igual ao Resumido + Total geral do rolo
+#   3) Resumo igual ao Resumido + Total geral
 #
 # Extras:
 # - Exporta por padrão em C:\Registro (configurável)
 # - Evita sobrescrever: sufixo FULL/SUMMARY no nome do PDF
-# - Botão "Atualizar nome" para atualizar o hhmmss do nome do rolo
+# - Botão "Atualizar nome" para atualizar hhmmss do nome do rolo
 # - Botão "Definir como padrão" para modo do PDF
 # - Import por botão ou Drag&Drop (apenas .txt)
-#
-# Dependências:
-# - reportlab
-# - tkinterdnd2 (opcional para DnD)
-#
-# Interface esperada pelo JocastaHub:
-#   def build_ui(parent): return widget
 # --------------------------------------------------------------------
 
 from __future__ import annotations
@@ -152,12 +145,6 @@ def _fabric_from_document(doc: str) -> str:
     return "DESCONHECIDO"
 
 def parse_log_txt(path: str) -> Optional[Job]:
-    """
-    Extrai de cada .txt:
-      - EndTime (do [General])
-      - Document (do [General])
-      - HeightMM e VPositionMM (do [1])
-    """
     try:
         txt = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
@@ -196,7 +183,7 @@ def parse_log_txt(path: str) -> Optional[Job]:
 
     height_mm = _f(item1.get("HeightMM", "0"))
     vpos_mm = _f(item1.get("VPositionMM", "0"))
-    real_mm = height_mm + vpos_mm  # regra do "real impresso"
+    real_mm = height_mm + vpos_mm
 
     fabric = _fabric_from_document(document)
 
@@ -266,16 +253,15 @@ def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, 
 
 def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
     """
-    Quebra o texto em várias linhas para caber em max_width.
-    Mantém palavras inteiras quando possível; quebra por caracteres se necessário.
+    Wrap por largura real (stringWidth).
     """
-    if pdfmetrics is None:
-        # fallback simples (não ideal, mas evita crash se pdfmetrics não carregou)
-        return [text]
-
     text = (text or "").strip()
     if not text:
         return [""]
+
+    if pdfmetrics is None:
+        # fallback simples (evita crash)
+        return [text]
 
     words = text.split()
     lines: List[str] = []
@@ -289,11 +275,10 @@ def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> L
             if current:
                 lines.append(current)
 
-            # palavra cabe inteira?
             if pdfmetrics.stringWidth(w, font_name, font_size) <= max_width:
                 current = w
             else:
-                # quebra na marra
+                # quebra por caracteres se uma palavra for maior que a coluna
                 chunk = ""
                 for ch in w:
                     test2 = chunk + ch
@@ -310,15 +295,7 @@ def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> L
 
     return lines
 
-def _draw_wrapped_cell(
-    c,
-    x: float,
-    y_top: float,
-    lines: List[str],
-    font_name: str,
-    font_size: int,
-    line_h: float,
-):
+def _draw_wrapped_cell(c, x: float, y_top: float, lines: List[str], font_name: str, font_size: int, line_h: float):
     c.setFont(font_name, font_size)
     yy = y_top
     for ln in lines:
@@ -338,30 +315,46 @@ def _pdf_draw_summary_table(
     mirrored: bool,
 ) -> float:
     """
-    Tabela resumo (igual ao modo resumido), com:
-    - Total (m): centralizado, 2 casas, com "m"
-    - Qtd jobs: centralizado
-    - Total geral do rolo no final
+    Resumo:
+    - Total (m) centralizado, 2 casas, com "m"
+    - Qtd jobs centralizado
+    - Total geral no final
     """
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y, "Resumo (ordem do rolo)")
-    y -= 16
-    c.setFont("Helvetica", 10)
-    c.line(40, y, page_w - 40, y)
-    y -= 18
+    # Larguras FIXAS (A4 com margem 40)
+    # total útil = 595 - 80 = 515
+    w_num   = 30
+    w_fab   = 180
+    w_total = 90
+    w_jobs  = 70
+    w_last  = 145   # soma = 515
 
-    cols = [("#", 30), ("Tecido", 160), ("Total (m)", 90), ("Qtd jobs", 70), ("Último fim", 140)]
-    c.setFont("Helvetica-Bold", 10)
-    x = 40
-    for title, w in cols:
-        c.drawString(x, y, title)
-        x += w
-    y -= 14
-    c.setFont("Helvetica", 10)
+    def _reprint_summary_header(y0: float) -> float:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y0, "Resumo (ordem do rolo)")
+        y0 -= 16
+        c.setFont("Helvetica", 10)
+        c.line(40, y0, page_w - 40, y0)
+        y0 -= 18
+
+        # Cabeçalho colunas
+        c.setFont("Helvetica-Bold", 10)
+        x = 40
+        c.drawString(x, y0, "#"); x += w_num
+        c.drawString(x, y0, "Tecido"); x += w_fab
+
+        # Centraliza também o TÍTULO dessas colunas
+        c.drawCentredString(x + (w_total / 2), y0, "Total (m)"); x += w_total
+        c.drawCentredString(x + (w_jobs / 2),  y0, "Qtd jobs");  x += w_jobs
+
+        c.drawString(x, y0, "Último fim")
+        y0 -= 14
+        c.setFont("Helvetica", 10)
+        return y0
+
+    y = _reprint_summary_header(y)
 
     for i, b in enumerate(blocks, start=1):
-        if _pdf_need_new_page(y, min_y=75):
-            # nova página + cabeçalho
+        if _pdf_need_new_page(y, min_y=85):
             if mirrored:
                 c.restoreState()
             c.showPage()
@@ -371,32 +364,17 @@ def _pdf_draw_summary_table(
 
             y = page_h - 40
             y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
-
-            # reimprime título e colunas
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(40, y, "Resumo (ordem do rolo)")
-            y -= 16
-            c.setFont("Helvetica", 10)
-            c.line(40, y, page_w - 40, y)
-            y -= 18
-
-            c.setFont("Helvetica-Bold", 10)
-            x = 40
-            for title, w in cols:
-                c.drawString(x, y, title)
-                x += w
-            y -= 14
-            c.setFont("Helvetica", 10)
+            y = _reprint_summary_header(y)
 
         x = 40
-        c.drawString(x, y, str(i)); x += 30
-        c.drawString(x, y, b.fabric); x += 160
+        c.drawString(x, y, str(i)); x += w_num
+        c.drawString(x, y, b.fabric); x += w_fab
 
-        c.drawCentredString(x + 45, y, f"{b.total_m:.2f} m")
-        x += 90
+        # Total centralizado (centro real da coluna)
+        c.drawCentredString(x + (w_total / 2), y, f"{b.total_m:.2f} m"); x += w_total
 
-        c.drawCentredString(x + 35, y, str(b.job_count))
-        x += 70
+        # Qtd jobs centralizado (centro real da coluna)
+        c.drawCentredString(x + (w_jobs / 2), y, str(b.job_count)); x += w_jobs
 
         c.drawString(x, y, b.newest_end.strftime("%d/%m/%Y %H:%M:%S"))
         y -= 14
@@ -452,7 +430,6 @@ def export_pdf(
             c.restoreState()
         c.showPage()
 
-    # primeira página
     y = page_h - 40
     _begin_page()
     y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
@@ -468,7 +445,6 @@ def export_pdf(
 
     # --------------------
     # COMPLETO
-    # 1) Jobs (com wrap em Arquivo e Tecido)
     # --------------------
     c.setFont("Helvetica-Bold", 12)
     c.drawString(40, y, "Jobs (último impresso primeiro)")
@@ -477,108 +453,93 @@ def export_pdf(
     c.line(40, y, page_w - 40, y)
     y -= 18
 
-    # Larguras (A4) — ajustadas para caber bem e permitir wrap
-    w_end = 120
-    w_doc = 300
-    w_fab = 120
-    w_size = 70
+    # Larguras FIXAS (A4 com margem 40) => 515 úteis
+    w_end  = 120
+    w_doc  = 260
+    w_fab  = 95
+    w_size = 40  # soma = 515
 
     font = "Helvetica"
     font_bold = "Helvetica-Bold"
     fs_head = 10
     fs_row = 10
-    line_h = 12
+    line_h =_hook = 12
 
-    # Cabeçalho das colunas
-    c.setFont(font_bold, fs_head)
-    xh = 40
-    c.drawString(xh, y, "EndTime"); xh += w_end
-    c.drawString(xh, y, "Arquivo"); xh += w_doc
-    c.drawString(xh, y, "Tecido");  xh += w_fab
-    c.drawString(xh, y, "Tamanho")
-    y -= 14
-    c.setFont(font, fs_row)
+    def _reprint_jobs_header(y0: float) -> float:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y0, "Jobs (último impresso primeiro)")
+        y0 -= 16
+        c.setFont("Helvetica", 10)
+        c.line(40, y0, page_w - 40, y0)
+        y0 -= 18
 
-    # imprime jobs por bloco para manter separador por mudança de tecido
+        c.setFont(font_bold, fs_head)
+        xh = 40
+        c.drawString(xh, y0, "EndTime"); xh += w_end
+        c.drawString(xh, y0, "Arquivo"); xh += w_doc
+        c.drawString(xh, y0, "Tecido");  xh += w_fab
+        c.drawString(xh, y0, "Tamanho")
+        y0 -= 14
+        c.setFont(font, fs_row)
+        return y0
+
+    # imprime cabeçalho das colunas na primeira página
+    y = _reprint_jobs_header(y)
+
     for bi, b in enumerate(blocks):
-        # separador visual entre blocos (mudou tecido)
+        # separador entre blocos (mudou tecido)
         if bi > 0:
-            if _pdf_need_new_page(y, min_y=80):
+            if _pdf_need_new_page(y, min_y=95):
                 _end_page()
                 _begin_page()
                 y = page_h - 40
                 y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
-
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(40, y, "Jobs (último impresso primeiro)")
-                y -= 16
-                c.setFont("Helvetica", 10)
-                c.line(40, y, page_w - 40, y)
-                y -= 18
-
-                c.setFont(font_bold, fs_head)
-                xh = 40
-                c.drawString(xh, y, "EndTime"); xh += w_end
-                c.drawString(xh, y, "Arquivo"); xh += w_doc
-                c.drawString(xh, y, "Tecido");  xh += w_fab
-                c.drawString(xh, y, "Tamanho")
-                y -= 14
-                c.setFont(font, fs_row)
+                y = _reprint_jobs_header(y)
 
             c.setLineWidth(1)
             c.line(40, y + 6, page_w - 40, y + 6)
-            y -= 6
+            y -= 8
 
-        # jobs (mais recente primeiro)
+        # jobs do bloco (mais recente primeiro)
         for j in sorted(b.jobs, key=lambda jj: jj.end_time, reverse=True):
             end_txt = j.end_time.strftime("%d/%m/%Y %H:%M:%S")
-            doc_txt = j.document  # COMPLETO (sem cortar)
-            fab_txt = j.fabric    # COMPLETO (sem cortar)
+            doc_txt = j.document  # COMPLETO (SEM "...")
+            fab_txt = j.fabric    # COMPLETO (SEM "...")
             size_txt = f"{j.real_m:.2f} m"
 
-            doc_lines = _wrap_text(doc_txt, w_doc - 8, font, fs_row)
-            fab_lines = _wrap_text(fab_txt, w_fab - 8, font, fs_row)
+            doc_lines = _wrap_text(doc_txt, w_doc - 6, font, fs_row)
+            fab_lines = _wrap_text(fab_txt, w_fab - 6, font, fs_row)
+
             row_lines = max(len(doc_lines), len(fab_lines), 1)
             row_h = row_lines * line_h
 
-            # quebra de página considerando a altura real da linha
-            if _pdf_need_new_page(y - row_h, min_y=80):
+            if _pdf_need_new_page(y - row_h, min_y=95):
                 _end_page()
                 _begin_page()
                 y = page_h - 40
                 y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
-
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(40, y, "Jobs (último impresso primeiro)")
-                y -= 16
-                c.setFont("Helvetica", 10)
-                c.line(40, y, page_w - 40, y)
-                y -= 18
-
-                c.setFont(font_bold, fs_head)
-                xh = 40
-                c.drawString(xh, y, "EndTime"); xh += w_end
-                c.drawString(xh, y, "Arquivo"); xh += w_doc
-                c.drawString(xh, y, "Tecido");  xh += w_fab
-                c.drawString(xh, y, "Tamanho")
-                y -= 14
-                c.setFont(font, fs_row)
+                y = _reprint_jobs_header(y)
 
             x0 = 40
             c.setFont(font, fs_row)
+
+            # EndTime (topo)
             c.drawString(x0, y, end_txt)
 
+            # Arquivo com wrap
             _draw_wrapped_cell(c, x0 + w_end, y, doc_lines, font, fs_row, line_h)
+
+            # Tecido com wrap
             _draw_wrapped_cell(c, x0 + w_end + w_doc, y, fab_lines, font, fs_row, line_h)
 
-            # tamanho no topo (direita)
-            c.drawRightString(x0 + w_end + w_doc + w_fab + w_size - 6, y, size_txt)
+            # Tamanho (direita)
+            c.drawRightString(x0 + w_end + w_doc + w_fab + w_size - 2, y, size_txt)
 
             y -= row_h
 
-    # 2) separação
+    # separação + resumo
     y -= 6
-    if _pdf_need_new_page(y, min_y=110):
+    if _pdf_need_new_page(y, min_y=120):
         _end_page()
         _begin_page()
         y = page_h - 40
@@ -588,7 +549,6 @@ def export_pdf(
     c.line(40, y, page_w - 40, y)
     y -= 22
 
-    # 3) resumo + total geral
     _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
 
     _end_page()
@@ -603,12 +563,10 @@ class PXPrintLogsUI(ttk.Frame):
         super().__init__(parent)
 
         self.cfg = load_cfg()
-
         self.machine: Optional[str] = None
         self.jobs: List[Job] = []
         self.blocks: List[Block] = []
 
-        # ---- Top bar ----
         top = ttk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
 
@@ -644,15 +602,23 @@ class PXPrintLogsUI(ttk.Frame):
         btns = ttk.Frame(top)
         btns.grid(row=2, column=4, columnspan=3, sticky="e", pady=(6, 0))
 
-        ttk.Button(btns, text="Importar logs", command=self.on_import_files).pack(side="left", padx=4)
-        ttk.Button(btns, text="Importar pasta", command=self.on_import_folder).pack(side="left", padx=4)
-        ttk.Button(btns, text="Limpar", command=self.on_clear).pack(side="left", padx=4)
+        # Linha 1: ações
+        row_actions = ttk.Frame(btns)
+        row_actions.pack(anchor="e", pady=(0, 4))
 
-        ttk.Button(btns, text="Exportar PDF Normal", command=lambda: self.on_export(which="normal")).pack(side="left", padx=8)
-        ttk.Button(btns, text="Exportar PDF Espelhado", command=lambda: self.on_export(which="mirror")).pack(side="left", padx=4)
-        ttk.Button(btns, text="Exportar Ambos", command=lambda: self.on_export(which="both")).pack(side="left", padx=4)
+        ttk.Button(row_actions, text="Importar logs", command=self.on_import_files).pack(side="left", padx=4)
+        ttk.Button(row_actions, text="Importar pasta", command=self.on_import_folder).pack(side="left", padx=4)
+        ttk.Button(row_actions, text="Limpar", command=self.on_clear).pack(side="left", padx=4)
 
-        # ---- Drag & Drop area ----
+        # Linha 2: exportação (fica mais largo e não corta)
+        row_export = ttk.Frame(btns)
+        row_export.pack(anchor="e")
+
+        ttk.Button(row_export, text="Exportar PDF Normal", command=lambda: self.on_export(which="normal")).pack(side="left", padx=4)
+        ttk.Button(row_export, text="Exportar PDF Espelhado", command=lambda: self.on_export(which="mirror")).pack(side="left", padx=4)
+        ttk.Button(row_export, text="Exportar Ambos", command=lambda: self.on_export(which="both")).pack(side="left", padx=4)
+
+
         drop_frame = ttk.LabelFrame(self, text="Arraste e solte logs .txt aqui")
         drop_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -668,7 +634,6 @@ class PXPrintLogsUI(ttk.Frame):
         else:
             self.drop_label.configure(text="Drag & Drop indisponível (tkinterdnd2 não carregou). Use o botão Importar.")
 
-        # ---- Details (selected block) ----
         details = ttk.LabelFrame(self, text="Detalhes do bloco selecionado")
         details.pack(fill="both", expand=False, padx=10, pady=(0, 10))
 
@@ -690,7 +655,6 @@ class PXPrintLogsUI(ttk.Frame):
         self.tree_jobs.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
         sbj.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
 
-        # ---- Blocks list ----
         blocks_box = ttk.LabelFrame(self, text="Ordem do rolo (último impresso primeiro)")
         blocks_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
@@ -716,9 +680,6 @@ class PXPrintLogsUI(ttk.Frame):
 
         self._ensure_export_dir()
 
-    # ----------------------
-    # Config actions
-    # ----------------------
     def _ensure_export_dir(self):
         export_dir = Path(self.cfg.get("export_dir", r"C:\Registro"))
         try:
@@ -741,9 +702,6 @@ class PXPrintLogsUI(ttk.Frame):
         save_cfg(self.cfg)
         messagebox.showinfo("Padrão salvo", "O modo de PDF foi definido como padrão.")
 
-    # ----------------------
-    # Machine picker
-    # ----------------------
     def ask_machine(self) -> Optional[str]:
         win = tk.Toplevel(self)
         win.title("Selecionar máquina")
@@ -756,7 +714,7 @@ class PXPrintLogsUI(ttk.Frame):
         var = tk.StringVar(value="M1")
         frm = ttk.Frame(win)
         frm.pack(padx=12, pady=6, anchor="w")
-        for m in ("M1", "M2", "Calandra"):
+        for m in ("M1", "M2"):
             ttk.Radiobutton(frm, text=m, value=m, variable=var).pack(anchor="w")
 
         out = {"val": None}
@@ -777,9 +735,6 @@ class PXPrintLogsUI(ttk.Frame):
         win.wait_window()
         return out["val"]
 
-    # ----------------------
-    # Roll name
-    # ----------------------
     def _auto_roll_name(self) -> str:
         m = self.machine or "M?"
         now = datetime.now()
@@ -798,9 +753,6 @@ class PXPrintLogsUI(ttk.Frame):
             self.var_roll.set(name)
         return _sanitize_filename(name)
 
-    # ----------------------
-    # Import
-    # ----------------------
     def on_drop_files(self, event):
         raw = getattr(event, "data", "") or ""
         files = self._split_dnd_files(raw)
@@ -893,9 +845,6 @@ class PXPrintLogsUI(ttk.Frame):
         self.var_detail_title.set("Selecione um tecido na lista abaixo...")
         self.status.configure(text="Limpo.")
 
-    # ----------------------
-    # UI updates
-    # ----------------------
     def refresh_blocks(self):
         self.tree_blocks.delete(*self.tree_blocks.get_children())
         for idx, b in enumerate(self.blocks, start=1):
@@ -946,9 +895,6 @@ class PXPrintLogsUI(ttk.Frame):
                 ),
             )
 
-    # ----------------------
-    # Export
-    # ----------------------
     def _get_export_dir(self) -> Path:
         export_dir = Path(self.cfg.get("export_dir", r"C:\Registro"))
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -963,11 +909,10 @@ class PXPrintLogsUI(ttk.Frame):
             return
 
         roll = self._get_roll_name()
-        mode = self.var_mode.get()  # "full" | "summary"
+        mode = self.var_mode.get()
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
 
         out_dir = self._get_export_dir()
-
         normal_path = str(out_dir / f"{roll}_{mode_tag}_NORMAL.pdf")
         mirror_path = str(out_dir / f"{roll}_{mode_tag}_ESPELHO.pdf")
 
