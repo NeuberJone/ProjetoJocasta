@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-# Root precisa ser TkinterDnD.Tk para os apps com drag&drop funcionarem dentro das abas
+# Root precisa ser TkinterDnD.Tk para drag & drop
 try:
     from tkinterdnd2 import TkinterDnD  # type: ignore
     RootBase = TkinterDnD.Tk
@@ -11,29 +14,51 @@ except Exception:
     RootBase = tk.Tk
 
 
+APP_NAME = "JocastaHub"
+
+
+# =========================
+# Config helpers
+# =========================
+def get_config_path() -> Path:
+    """
+    User-writable config path:
+      - Windows: %APPDATA%\\JocastaHub\\config.json
+      - Linux: ~/.config/JocastaHub/config.json
+    """
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return base / APP_NAME / "config.json"
+    return Path.home() / ".config" / APP_NAME / "config.json"
+
+
+def load_config() -> dict:
+    path = get_config_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(cfg: dict) -> None:
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def _safe_import(name: str):
-    """
-    Import seguro de módulos (retorna Exception em caso de erro).
-    """
     try:
         return __import__(name)
     except Exception as e:
         return e
 
 
+# =========================
+# Main App
+# =========================
 class JocastaHub(RootBase):
-    """
-    Hub por Fluxos de Trabalho:
-      - SISBolt
-      - Power Duplicate
-      - Impressão
-      - Utilitários
-      - Legado
-
-    Ao selecionar um fluxo, o Notebook é reconstruído mostrando somente
-    os módulos daquele fluxo.
-    """
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -41,10 +66,14 @@ class JocastaHub(RootBase):
         self.geometry("1100x720")
         self.minsize(980, 600)
 
+        # ---- config ----
+        self.config_data = load_config()
+
+        # ---- Notebook ----
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
-        # Define os fluxos e quais módulos aparecem em cada um
+        # ---- Fluxos de Trabalho ----
         self.FLOWS: dict[str, list[tuple[str, str]]] = {
             "SISBolt": [
                 ("PXFlow", "PXFlow"),
@@ -71,11 +100,14 @@ class JocastaHub(RootBase):
             ],
         }
 
-        # Menu principal (Fluxos de Trabalho)
+        # ---- Menu ----
         self._build_menu()
 
-        # Fluxo inicial
-        self.current_flow = "SISBolt"
+        # ---- Fluxo inicial ----
+        self.current_flow = self.config_data.get("default_flow", "SISBolt")
+        if self.current_flow not in self.FLOWS:
+            self.current_flow = "SISBolt"
+
         self.load_flow(self.current_flow)
 
     # =========================
@@ -87,7 +119,6 @@ class JocastaHub(RootBase):
         menu_fluxos = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Fluxos de Trabalho", menu=menu_fluxos)
 
-        # Um item por fluxo
         for flow_name in self.FLOWS.keys():
             menu_fluxos.add_command(
                 label=flow_name,
@@ -95,21 +126,31 @@ class JocastaHub(RootBase):
             )
 
         menu_fluxos.add_separator()
-        menu_fluxos.add_command(label="Recarregar fluxo atual", command=self.reload_current_flow)
 
-        # Menu Ajuda (opcional)
-        menu_ajuda = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Ajuda", menu=menu_ajuda)
-        menu_ajuda.add_command(
-            label="Sobre",
-            command=lambda: messagebox.showinfo(
-                "Projeto Jocasta",
-                "JocastaHub — Hub por Fluxos de Trabalho\n\n"
-                "Selecione um fluxo em 'Fluxos de Trabalho' para exibir apenas os módulos daquele grupo."
-            )
+        # ✅ NOVA OPÇÃO (acima de recarregar)
+        menu_fluxos.add_command(
+            label="Definir fluxo atual como padrão",
+            command=self.set_default_workflow
+        )
+
+        menu_fluxos.add_command(
+            label="Recarregar fluxo atual",
+            command=self.reload_current_flow
         )
 
         self.config(menu=menubar)
+
+    # =========================
+    # Workflow default
+    # =========================
+    def set_default_workflow(self) -> None:
+        self.config_data["default_flow"] = self.current_flow
+        save_config(self.config_data)
+
+        messagebox.showinfo(
+            "Projeto Jocasta",
+            f"Fluxo '{self.current_flow}' definido como padrão."
+        )
 
     # =========================
     # Fluxos
@@ -118,9 +159,6 @@ class JocastaHub(RootBase):
         self.load_flow(self.current_flow)
 
     def load_flow(self, flow_name: str) -> None:
-        """
-        Limpa todas as abas e recria somente as abas do fluxo selecionado.
-        """
         if flow_name not in self.FLOWS:
             messagebox.showerror("Projeto Jocasta", f"Fluxo desconhecido: {flow_name}")
             return
@@ -128,27 +166,21 @@ class JocastaHub(RootBase):
         self.current_flow = flow_name
         self._clear_tabs()
 
-        modules = self.FLOWS[flow_name]
-        for title, module_name in modules:
+        for title, module_name in self.FLOWS[flow_name]:
             self._add_tab(title, module_name)
 
-        # Atualiza o título com o fluxo atual
         self.title(f"Projeto Jocasta — {flow_name}")
 
     def _clear_tabs(self) -> None:
-        """
-        Remove todas as abas do Notebook.
-        """
         for tab_id in self.nb.tabs():
             self.nb.forget(tab_id)
 
     # =========================
-    # Tabs / Render
+    # Tabs
     # =========================
     def _add_tab(self, title: str, module_name: str) -> None:
         tab = ttk.Frame(self.nb)
         tab.pack(fill="both", expand=True)
-
         self.nb.add(tab, text=title)
 
         mod = _safe_import(module_name)

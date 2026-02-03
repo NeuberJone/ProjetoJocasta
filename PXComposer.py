@@ -12,7 +12,6 @@ from typing import List, Optional, Tuple
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-
 # =========================
 # PXComposer - Config
 # =========================
@@ -25,7 +24,7 @@ BASE_JSON = {
     "client_name": "",
     "orders": [],
     "unique_name_chars": "",
-    "unique_nickname_chars": ""
+    "unique_nickname_chars": "",
 }
 
 # Campos do JSON (peças)
@@ -52,7 +51,6 @@ VALID_SIZES = {
 # Tamanho com quantidade (QTY-TAM)
 QTY_SIZE_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
 FORBIDDEN_QUOTE_RE = re.compile(r"[\"']")
-
 
 # =========================
 # Config persistente (AppData)
@@ -132,17 +130,11 @@ def is_size_token(tok: str) -> bool:
 
 
 def parse_qty_and_size(tok: str) -> Tuple[int, str]:
-    """
-    Aceita:
-      - QTY-TAM (3-G, 2-BLP, 5-12A)
-      - TAM sozinho (G, BLP, 12A) -> qty=1
-    Retorna (qty, size)
-    """
     t = (tok or "").strip()
     if not t:
         raise ValueError("Tamanho vazio (não permitido).")
-
     t = t.upper()
+
     m = QTY_SIZE_RE.match(t)
     if m:
         qty = int(m.group(1))
@@ -159,22 +151,11 @@ def parse_qty_and_size(tok: str) -> Tuple[int, str]:
 
 
 def normalize_size_token(tok: str) -> str:
-    """
-    Normaliza qualquer tamanho para "QTY-SIZE".
-    Ex:
-      "G" -> "1-G"
-      "3-G" -> "3-G"
-    """
     qty, size = parse_qty_and_size(tok)
     return f"{qty}-{size}"
 
 
 def display_size_token(size_token: str) -> str:
-    """
-    Para a LISTA ORGANIZADA:
-      - Se for "1-TAM" -> mostra só "TAM"
-      - Se for "QTY-TAM" com QTY>1 -> mantém "QTY-TAM"
-    """
     st = (size_token or "").strip()
     if not st:
         return ""
@@ -189,21 +170,11 @@ def display_size_token(size_token: str) -> str:
 
 
 def gender_from_size(size: str) -> str:
-    """
-    Regras:
-      - Infantil (termina com A): Gender = C
-      - Babylook (contém BL): Gender = FE
-      - Senão: Gender = MA
-    Divergência:
-      - BL + A => erro
-    """
     s = (size or "").strip().upper()
     has_bl = "BL" in s
     ends_a = s.endswith("A")
-
     if has_bl and ends_a:
         raise ValueError("Divergência: tamanho contém 'BL' e termina com 'A' (infantil).")
-
     if ends_a:
         return "C"
     if has_bl:
@@ -211,40 +182,9 @@ def gender_from_size(size: str) -> str:
     return "MA"
 
 
-def detect_gender_from_size_token(size_token: str) -> str:
-    qty, size = parse_qty_and_size(size_token)
-    _ = qty
-    return gender_from_size(size)
-
-
 def gender_of_size_token(size_token: str) -> str:
-    qty, size = parse_qty_and_size(size_token)
-    _ = qty
+    _, size = parse_qty_and_size(size_token)
     return gender_from_size(size)
-
-
-def split_sizes_by_gender_preserve_order(sizes: List[str]) -> List[List[str]]:
-    """
-    Se houver mistura de gêneros, devolve várias listas (uma por gênero),
-    preservando a ordem de aparição dos gêneros.
-    """
-    if not sizes:
-        return []
-
-    order: List[str] = []
-    groups: dict[str, List[str]] = {}
-
-    for st in sizes:
-        g = gender_of_size_token(st)
-        if g not in groups:
-            groups[g] = []
-            order.append(g)
-        groups[g].append(st)
-
-    if len(order) <= 1:
-        return [sizes]
-
-    return [groups[g] for g in order]
 
 
 # =========================
@@ -254,7 +194,7 @@ def split_sizes_by_gender_preserve_order(sizes: List[str]) -> List[List[str]]:
 class Row:
     name: str
     number: str
-    sizes: List[str]     # lista compacta de size_tokens "QTY-SIZE"
+    pieces: List[str]   # ✅ agora é "slots" (preserva colunas)
     nickname: str
     blood: str
 
@@ -266,44 +206,95 @@ def parse_line_free(line: str, line_no: int) -> Optional[Tuple[str, str, List[st
     if raw.strip().startswith("//"):
         return None
 
+    # split preserva vazios entre vírgulas
     parts = [p.strip() for p in raw.split(",")]
     for tok in parts:
         forbid_quotes(line_no, tok)
-
-    # Se tiver só 1 token e ele for tamanho, aceita
-    if len(parts) == 1:
-        only = parts[0].strip()
-        if only and is_size_token(only):
-            return ("", "", [normalize_size_token(only)], [])
-        raise ValueError(f"Linha {line_no}: não encontrei tamanho válido. Valor: {only!r}")
 
     while len(parts) < 2:
         parts.append("")
 
     name = normalize_name(parts[0])
     number = normalize_text(parts[1])
-
     tail = parts[2:] if len(parts) >= 3 else []
 
-    sizes: List[str] = []
+    # ✅ PRESERVAR SLOTS ATÉ COMEÇAR EXTRAS
+    pieces_slots: List[str] = []
     extras: List[str] = []
 
+    extras_started = False
     for tok in tail:
         t = tok.strip()
-        if not t:
-            continue
-        if is_size_token(t):
-            sizes.append(normalize_size_token(t))
-        else:
-            extras.append(normalize_name(t))
 
-    if not sizes:
+        if extras_started:
+            if t:
+                extras.append(normalize_name(t))
+            continue
+
+        # ainda estamos na parte das peças
+        if not t:
+            pieces_slots.append("")
+            continue
+
+        if is_size_token(t):
+            pieces_slots.append(normalize_size_token(t))
+            continue
+
+        # primeiro token não-size => aqui começam extras (apelido / tipo)
+        extras_started = True
+        extras.append(normalize_name(t))
+
+    # se não encontrou nenhuma peça em nenhum slot
+    if not any(pieces_slots):
+        # caso especial: se tiver só 1 token e ele for tamanho
+        if len(parts) == 1 and is_size_token(parts[0].strip()):
+            return ("", "", [normalize_size_token(parts[0].strip())], [])
         raise ValueError(f"Linha {line_no}: não encontrei nenhum tamanho válido (peça).")
 
     if len(extras) > 2:
-        raise ValueError(f"Linha {line_no}: extras demais (máx 2: apelido e tipo). Recebido: {extras}")
+        raise ValueError(
+            f"Linha {line_no}: extras demais (máx 2: apelido e tipo).\nRecebido: {extras}"
+        )
 
-    return (name, number, sizes, extras)
+    return (name, number, pieces_slots, extras)
+
+
+def split_row_by_gender_preserve_slots(row: Row) -> List[Row]:
+    """
+    Se houver mistura de gêneros nos slots, devolve várias linhas,
+    mantendo a MESMA quantidade de colunas e preservando a coluna original.
+    """
+    # pega gêneros na ordem em que aparecem
+    order: List[str] = []
+    for st in row.pieces:
+        if not st:
+            continue
+        g = gender_of_size_token(st)
+        if g not in order:
+            order.append(g)
+
+    if len(order) <= 1:
+        return [row]
+
+    out: List[Row] = []
+    for g in order:
+        new_slots = []
+        for st in row.pieces:
+            if not st:
+                new_slots.append("")
+                continue
+            if gender_of_size_token(st) == g:
+                new_slots.append(st)
+            else:
+                new_slots.append("")
+        out.append(Row(
+            name=row.name,
+            number=row.number,
+            pieces=new_slots,
+            nickname=row.nickname,
+            blood=row.blood
+        ))
+    return out
 
 
 def organize_text(text: str) -> List[Row]:
@@ -319,20 +310,14 @@ def organize_text(text: str) -> List[Row]:
         if not parsed:
             continue
 
-        name, number, sizes, extras = parsed
+        name, number, pieces_slots, extras = parsed
         nickname = extras[0] if len(extras) >= 1 else ""
         blood = extras[1] if len(extras) >= 2 else ""
 
-        # ✅ separa por gênero se misturar MA/FE/C
-        size_groups = split_sizes_by_gender_preserve_order(sizes)
-        for g_sizes in size_groups:
-            rows.append(Row(
-                name=name,
-                number=number,
-                sizes=g_sizes,
-                nickname=nickname,
-                blood=blood
-            ))
+        base = Row(name=name, number=number, pieces=pieces_slots, nickname=nickname, blood=blood)
+
+        # ✅ separa por gênero sem perder slots
+        rows.extend(split_row_by_gender_preserve_slots(base))
 
     rows.sort(key=lambda r: (r.name, r.number))
     return rows
@@ -342,8 +327,7 @@ def rows_to_organized_csv(rows: List[Row]) -> Tuple[str, int, bool, bool]:
     if not rows:
         return ("", 0, False, False)
 
-    max_pieces = min(max(len(r.sizes) for r in rows), 6)
-
+    max_pieces = min(max(len(r.pieces) for r in rows), 6)
     has_nick = any(r.nickname for r in rows)
     has_blood = any(r.blood for r in rows)
     if has_blood:
@@ -354,10 +338,8 @@ def rows_to_organized_csv(rows: List[Row]) -> Tuple[str, int, bool, bool]:
         cols = [r.name, r.number]
 
         for idx in range(max_pieces):
-            if idx < len(r.sizes):
-                cols.append(display_size_token(r.sizes[idx]))
-            else:
-                cols.append("")
+            st = r.pieces[idx] if idx < len(r.pieces) else ""
+            cols.append(display_size_token(st) if st else "")
 
         if has_nick:
             cols.append(r.nickname)
@@ -374,10 +356,10 @@ def rows_to_organized_csv(rows: List[Row]) -> Tuple[str, int, bool, bool]:
 # =========================
 def validate_gender_consistency(row: Row) -> str:
     genders: List[str] = []
-    for st in row.sizes:
+    for st in row.pieces:
         if not st:
             continue
-        genders.append(detect_gender_from_size_token(st))
+        genders.append(gender_of_size_token(st))
 
     if not genders:
         raise ValueError("Linha sem tamanhos (peças) após organizar.")
@@ -403,6 +385,7 @@ def build_orders_from_rows(
         )
 
     orders: List[dict] = []
+
     for r in rows:
         gender = validate_gender_consistency(r)
 
@@ -417,12 +400,12 @@ def build_orders_from_rows(
             "Short": "",
             "Pants": "",
             "Tanktop": "",
-            "Vest": ""
+            "Vest": "",
         }
 
         for idx in range(max_pieces):
             field = selected_piece_fields_in_order[idx]
-            size_token = r.sizes[idx] if idx < len(r.sizes) else ""
+            size_token = r.pieces[idx] if idx < len(r.pieces) else ""
             item[field] = size_token if size_token else ""
 
         orders.append(item)
@@ -439,13 +422,10 @@ def build_json_preview(orders: List[dict]) -> str:
 def export_json(orders: List[dict], out_dir: str) -> str:
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     fp = os.path.join(out_dir, f"List-{stamp}.json")
-
     data = dict(BASE_JSON)
     data["orders"] = orders
-
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-
     return fp
 
 
@@ -463,7 +443,6 @@ class PXComposerFrame(tk.Frame):
         self._max_pieces: int = 0
         self._last_orders: List[dict] = []
         self._last_json_preview: str = ""
-
         self._selected_order: List[str] = []
         self._checkbox_vars: dict[str, tk.IntVar] = {}
 
@@ -473,7 +452,6 @@ class PXComposerFrame(tk.Frame):
         # Header
         header = tk.Frame(self)
         header.pack(fill="x", padx=10, pady=(10, 6))
-
         tk.Label(header, text="PXComposer", font=("Segoe UI", 16, "bold")).pack(side="left")
         tk.Button(header, text="Info", command=self.toggle_info).pack(side="right")
 
@@ -486,6 +464,7 @@ class PXComposerFrame(tk.Frame):
             "• Organizar: cria colunas dinâmicas até a maior linha (t1..tN).\n"
             "• Mapear: selecione exatamente N peças (na ordem marcada) para aplicar em t1..tN.\n"
             "• Se misturar gêneros (MA/FE/C) na mesma linha, o Composer separa em linhas diferentes.\n"
+            "• Agora o Composer preserva a coluna original quando separa por gênero.\n"
             "• Prévia JSON é idêntica ao arquivo que será salvo."
         )
         tk.Label(self.info_frame, text=info_txt, justify="left", font=("Segoe UI", 9)).pack(
@@ -495,18 +474,17 @@ class PXComposerFrame(tk.Frame):
         # Output dir
         out_row = tk.Frame(self)
         out_row.pack(fill="x", padx=10, pady=(0, 8))
-
         tk.Button(out_row, text="Pasta...", command=self.pick_output_folder).pack(side="left")
-        self.lbl_out = tk.Label(out_row, text=f"Pasta de saída: {self.output_dir_var.get()}", font=("Segoe UI", 9))
+        self.lbl_out = tk.Label(
+            out_row, text=f"Pasta de saída: {self.output_dir_var.get()}", font=("Segoe UI", 9)
+        )
         self.lbl_out.pack(side="right")
 
         # Main body
         body = tk.Frame(self)
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
         left = tk.Frame(body)
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
-
         right = tk.Frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
@@ -520,7 +498,6 @@ class PXComposerFrame(tk.Frame):
 
         tab_list = tk.Frame(self.nb)
         tab_json = tk.Frame(self.nb)
-
         self.nb.add(tab_list, text="Lista organizada")
         self.nb.add(tab_json, text="Prévia JSON")
 
@@ -536,7 +513,7 @@ class PXComposerFrame(tk.Frame):
         # Comentários azuis
         self.txt_in.tag_configure("comment", foreground="#1f6fd2")
         self.txt_in.bind("<KeyRelease>", lambda e: highlight_comments(self.txt_in))
-        self.txt_in.bind("<Control-v>", lambda e: self.after(1, highlight_comments, self.txt_in))
+        self.txt_in.bind("<ButtonRelease>", lambda e: self.after(1, highlight_comments, self.txt_in))
 
         # Drag & Drop
         self.txt_in.drop_target_register(DND_FILES)
@@ -549,7 +526,7 @@ class PXComposerFrame(tk.Frame):
         self.lbl_detect = tk.Label(
             map_frame,
             text="Peças detectadas: 0 | Selecione na ordem (t1 → 1ª marcada, t2 → 2ª marcada...)",
-            font=("Segoe UI", 9)
+            font=("Segoe UI", 9),
         )
         self.lbl_detect.pack(anchor="w", padx=10, pady=(6, 0))
 
@@ -559,12 +536,7 @@ class PXComposerFrame(tk.Frame):
         for label, key in PIECE_FIELDS:
             var = tk.IntVar(value=0)
             self._checkbox_vars[key] = var
-            cb = tk.Checkbutton(
-                checks,
-                text=label,
-                variable=var,
-                command=lambda k=key: self.on_toggle_piece(k)
-            )
+            cb = tk.Checkbutton(checks, text=label, variable=var, command=lambda k=key: self.on_toggle_piece(k))
             cb.pack(side="left", padx=(0, 10))
 
         self.disable_mapping()
@@ -572,14 +544,14 @@ class PXComposerFrame(tk.Frame):
         # Buttons
         btns = tk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 10))
-
         tk.Button(btns, text="Limpar", command=self.clear_all).pack(side="left")
         tk.Button(btns, text="Copiar lista", command=self.copy_list).pack(side="left", padx=6)
         tk.Button(btns, text="Copiar JSON", command=self.copy_json).pack(side="left", padx=6)
-
         tk.Button(btns, text="Gerar JSON", command=self.generate_json).pack(side="right")
         tk.Button(btns, text="Verificar/Mapear", command=self.verify_and_preview).pack(side="right", padx=6)
-        tk.Button(btns, text="Organizar", command=lambda: self.organize(copy_to_clipboard=True, preserve_selection=False)).pack(side="right", padx=6)
+        tk.Button(btns, text="Organizar", command=lambda: self.organize(copy_to_clipboard=True, preserve_selection=False)).pack(
+            side="right", padx=6
+        )
 
         # Status
         self.status_var = tk.StringVar(value="")
@@ -625,7 +597,7 @@ class PXComposerFrame(tk.Frame):
             cfg["output_dir"] = folder
             save_config(cfg)
             self.lbl_out.config(text=f"Pasta de saída: {folder}")
-            self.status_var.set(f"📁 Pasta de saída: {folder}")
+            self.status_var.set(f" Pasta de saída: {folder}")
 
     def ensure_output_dir(self) -> str:
         out = self.output_dir_var.get().strip() or DEFAULT_OUTPUT_DIR
@@ -646,7 +618,7 @@ class PXComposerFrame(tk.Frame):
             self.txt_in.delete("1.0", "end")
             self.txt_in.insert("1.0", content)
             highlight_comments(self.txt_in)
-            self.status_var.set(f"📄 TXT carregado: {p.name}")
+            self.status_var.set(f" TXT carregado: {p.name}")
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e))
             self.status_var.set(f"❌ Erro: {e}")
@@ -657,7 +629,9 @@ class PXComposerFrame(tk.Frame):
         self._selected_order = []
         for v in self._checkbox_vars.values():
             v.set(0)
-        self.lbl_detect.config(text="Peças detectadas: 0 | Selecione na ordem (t1 → 1ª marcada, t2 → 2ª marcada...)")
+        self.lbl_detect.config(
+            text="Peças detectadas: 0 | Selecione na ordem (t1 → 1ª marcada, t2 → 2ª marcada...)"
+        )
 
     def enable_mapping(self, max_pieces: int):
         self._max_pieces = max_pieces
@@ -675,7 +649,6 @@ class PXComposerFrame(tk.Frame):
             return
 
         is_checked = self._checkbox_vars[key].get() == 1
-
         if is_checked:
             if key in self._selected_order:
                 return
@@ -683,8 +656,7 @@ class PXComposerFrame(tk.Frame):
                 self._checkbox_vars[key].set(0)
                 messagebox.showwarning(
                     APP_NAME,
-                    "Todas as peças já foram selecionadas.\n"
-                    f"Peças detectadas: {self._max_pieces}."
+                    "Todas as peças já foram selecionadas.\n" f"Peças detectadas: {self._max_pieces}.",
                 )
                 return
             self._selected_order.append(key)
@@ -713,17 +685,17 @@ class PXComposerFrame(tk.Frame):
         root.clipboard_clear()
         root.clipboard_append(text)
         root.update()
-        self.status_var.set("📋 Lista organizada copiada.")
+        self.status_var.set(" Lista organizada copiada.")
 
     def copy_json(self):
         if not self._last_json_preview.strip():
-            messagebox.showwarning(APP_NAME, "Ainda não há prévia do JSON. Clique em Verificar/Mapear.")
+            messagebox.showwarning(APP_NAME, "Ainda não há prévia do JSON.\nClique em Verificar/Mapear.")
             return
         root = self.winfo_toplevel()
         root.clipboard_clear()
         root.clipboard_append(self._last_json_preview)
         root.update()
-        self.status_var.set("📋 JSON copiado.")
+        self.status_var.set(" JSON copiado.")
 
     def organize(self, copy_to_clipboard: bool = True, preserve_selection: bool = True) -> bool:
         raw = self.txt_in.get("1.0", "end").strip("\n")
@@ -739,7 +711,7 @@ class PXComposerFrame(tk.Frame):
                 root.clipboard_clear()
                 root.clipboard_append(organized_csv)
                 root.update()
-                self.status_var.set("📋 Lista organizada copiada (entrada não mudou).")
+                self.status_var.set(" Lista organizada copiada (entrada não mudou).")
             return True
 
         try:
@@ -766,11 +738,10 @@ class PXComposerFrame(tk.Frame):
                 root.clipboard_clear()
                 root.clipboard_append(organized_csv)
                 root.update()
-
-            self.status_var.set(
-                f"✅ Organizado: {len(rows)} linha(s) | peças detectadas: {max_pieces} | "
-                f"apelido: {'sim' if has_nick else 'não'} | TS: {'sim' if has_blood else 'não'} | lista copiada"
-            )
+                self.status_var.set(
+                    f"✅ Organizado: {len(rows)} linha(s) | peças detectadas: {max_pieces} | "
+                    f"apelido: {'sim' if has_nick else 'não'} | TS: {'sim' if has_blood else 'não'} | lista copiada"
+                )
             self.nb.select(0)
             return True
 
@@ -780,7 +751,6 @@ class PXComposerFrame(tk.Frame):
             return False
 
     def verify_and_preview(self):
-        # organiza antes (mas não apaga seleção se não mudou)
         ok = self.organize(copy_to_clipboard=True, preserve_selection=True)
         if not ok:
             return
@@ -797,7 +767,7 @@ class PXComposerFrame(tk.Frame):
             messagebox.showerror(
                 APP_NAME,
                 f"Você deve marcar exatamente {self._max_pieces} peça(s).\n"
-                f"Marcadas: {len(self._selected_order)}."
+                f"Marcadas: {len(self._selected_order)}.",
             )
             return
 
@@ -808,13 +778,10 @@ class PXComposerFrame(tk.Frame):
                 selected_piece_fields_in_order=self._selected_order,
             )
             preview = build_json_preview(orders)
-
             self._last_orders = orders
             self._set_json_preview(preview)
-
             self.status_var.set(f"✅ Verificado: {len(orders)} registro(s) | lista copiada | prévia JSON pronta.")
             self.nb.select(1)
-
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e))
             self.status_var.set(f"❌ Erro: {e}")
@@ -822,8 +789,8 @@ class PXComposerFrame(tk.Frame):
     def generate_json(self):
         if not self._last_orders:
             self.verify_and_preview()
-            if not self._last_orders:
-                return
+        if not self._last_orders:
+            return
 
         try:
             out_dir = self.ensure_output_dir()
@@ -845,10 +812,8 @@ def main() -> None:
     app.title(APP_NAME)
     app.geometry("1200x780")
     app.minsize(1000, 650)
-
     ui = build_ui(app)
     ui.pack(fill="both", expand=True)
-
     app.mainloop()
 
 
