@@ -14,9 +14,9 @@ APP_NAME = "PXOrderList"
 # -----------------------------
 VALID_SIZES = {
     # Adulto
-    "PP", "P", "M", "G", "GG", "XG", "XGG",
+    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG", "XLGG"
     # Babylook
-    "BLPP", "BLP", "BLM", "BLG", "BLGG",
+    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG"
     # Infantil com A
     "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
 }
@@ -187,7 +187,7 @@ def process_text(text: str) -> str:
 # -----------------------------
 # UI (Lite) + suporte a Hub
 # -----------------------------
-class PXListLiteFrame(tk.Frame):
+class PXOrderListFrame(tk.Frame):
     def __init__(self, parent) -> None:
         super().__init__(parent)
 
@@ -197,7 +197,7 @@ class PXListLiteFrame(tk.Frame):
 
         tk.Label(
             top,
-            text="PXList Lite — organiza e devolve o texto (CAIXA ALTA)",
+            text="PXOrderList — Organiza Lista",
             font=("Segoe UI", 12, "bold"),
         ).pack(side="left")
 
@@ -271,7 +271,7 @@ def build_ui(parent):
     Para o Hub:
     - o Hub chama build_ui(parent) e adiciona o frame na aba.
     """
-    frame = PXListLiteFrame(parent)
+    frame = PXOrderListFrame(parent)
     return frame
 
 
