@@ -1,289 +1,281 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import tkinter as tk
 from dataclasses import dataclass
-from tkinter import messagebox
+from datetime import datetime
+from pathlib import Path
+from tkinter import messagebox, filedialog
 from typing import List, Tuple
 
 
 APP_NAME = "PXOrderList"
+DEFAULT_OUTPUT_DIR = r"C:\Listas"
+
+# -----------------------------
+# JSON base (igual ao PXFlow)
+# -----------------------------
+BASE_JSON = {
+    "title": "List",
+    "order_number": 0,
+    "client_name": "",
+    "orders": [],
+    "unique_name_chars": "",
+    "unique_nickname_chars": ""
+}
 
 # -----------------------------
 # Regras de identificação
 # -----------------------------
 VALID_SIZES = {
-    # Adulto
-    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG", "XLGG"
-    # Babylook
-    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG"
-    # Infantil com A
+    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG", "XLGG",
+    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG",
     "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
 }
 
-# aceita "2-M", "10-BLP", "3-4A" etc.
-QTY_SIZE_RE = re.compile(r"^\s*\d+\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
+QTY_SIZE_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
 
 
-def _clean_token(s: str) -> str:
-    return (s or "").strip()
+# -----------------------------
+# Helpers
+# -----------------------------
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
 
-def _upper(s: str) -> str:
-    return _clean_token(s).upper()
-
-
-def _is_number(tok: str) -> bool:
-    t = _clean_token(tok)
-    return t.isdigit()  # preserva "01"
-
-
-def _is_size(tok: str) -> bool:
-    t = _upper(tok)
-    if not t:
-        return False
-    if t in VALID_SIZES:
-        return True
+def parse_qty_and_size(tok: str) -> Tuple[int, str]:
+    t = tok.strip().upper()
     m = QTY_SIZE_RE.match(t)
-    return bool(m and _upper(m.group(1)) in VALID_SIZES)
+    if m:
+        return int(m.group(1)), m.group(2)
+    return 1, t
 
 
+def gender_from_size(size: str) -> str:
+    s = size.upper()
+    if "BL" in s:
+        return "FE"
+    if s.endswith("A"):
+        return "C"
+    return "MA"
+
+
+def build_json_preview(orders: List[dict]) -> str:
+    data = dict(BASE_JSON)
+    data["orders"] = orders
+    return json.dumps(data, ensure_ascii=False, indent=4)
+
+
+def export_json(orders: List[dict], out_dir: str) -> str:
+    ensure_dir(out_dir)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    fp = os.path.join(out_dir, f"List-{stamp}.json")
+
+    data = dict(BASE_JSON)
+    data["orders"] = orders
+
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+    return fp
+
+
+# -----------------------------
+# Parser
+# -----------------------------
 @dataclass(frozen=True)
 class ParsedRow:
     name: str
     number: str
-    tams: Tuple[str, ...]     # TAMs encontrados (1..4)
-    s2: str                  # STRING2 (opcional)
-    s3: str                  # STRING3 (opcional)
+    tams: Tuple[str, ...]
+    s2: str
+    s3: str
 
 
 def parse_line(line: str) -> ParsedRow | None:
-    """
-    Regra:
-    - separar por vírgula (preservando vazios como tokens vazios)
-    - classificar tokens em: STRING, NÚMERO, TAM
-    - 1ª STRING => NOME
-    - 1º NÚMERO => NÚMERO
-    - TAMs em ordem => TAM1..TAM4 (obrigatório ter pelo menos 1)
-    - demais STRINGS (que não são NOME) => STRING2, STRING3 em ordem
-    """
     raw = line.strip()
     if not raw:
         return None
 
-    parts = [_clean_token(p) for p in raw.split(",")]  # preserva vazios (",,")
-    # remove espaços, mas NÃO remove tokens vazios (importante pra estrutura)
-    # porém, para classificação, tokens vazios são ignorados.
+    parts = [p.strip() for p in raw.split(",")]
 
     name = ""
     number = ""
     tams: List[str] = []
-    extra_strings: List[str] = []
+    extra: List[str] = []
 
     for tok in parts:
-        t = _clean_token(tok)
-        if not t:
+        if not tok:
             continue
+        up = tok.upper()
 
-        up = _upper(t)
-
-        if _is_size(up):
-            # mantém o formato original em caixa alta
+        if up in VALID_SIZES or QTY_SIZE_RE.match(up):
             tams.append(up)
             continue
 
-        if _is_number(t) and not number:
-            number = up
+        if tok.isdigit() and not number:
+            number = tok
             continue
 
-        # string comum
         if not name:
             name = up
         else:
-            extra_strings.append(up)
+            extra.append(up)
 
-    # obrigatórios: NOME, NÚMERO e TAM1 "existem", mas valor pode ser vazio.
-    # Aqui, seguindo sua regra mais recente: NOME pode vir vazio na lista, mas a coluna existe.
-    # Se não apareceu nenhuma STRING (name), aceitamos name="".
-    # Se não apareceu número, aceitamos number="".
     if not tams:
-        raise ValueError(f"Sem TAM1 reconhecido: {raw}")
-
-    # limita a 4 TAMs
-    if len(tams) > 4:
-        raise ValueError(f"Mais de 4 TAMs na linha: {raw}")
-
-    s2 = extra_strings[0] if len(extra_strings) >= 1 else ""
-    s3 = extra_strings[1] if len(extra_strings) >= 2 else ""
+        raise ValueError("Nenhum TAM encontrado.")
 
     return ParsedRow(
         name=name,
         number=number,
-        tams=tuple(tams),
-        s2=s2,
-        s3=s3,
+        tams=tuple(tams[:4]),
+        s2=extra[0] if len(extra) >= 1 else "",
+        s3=extra[1] if len(extra) >= 2 else "",
     )
 
 
-def build_output(rows: List[ParsedRow]) -> str:
-    """
-    Ordem final dinâmica:
-    NOME,NÚMERO,TAM1..TAMk,STRING2,STRING3
-    - k = maior quantidade de TAMs encontrada em qualquer linha
-    - STRING2/3 entram logo após o último TAM existente (k)
-    - Só inclui coluna STRING2 se existir em qualquer linha
-    - Só inclui coluna STRING3 se existir em qualquer linha
-    """
-    if not rows:
-        return ""
-
-    max_tams = max(len(r.tams) for r in rows)
-    has_s2 = any(r.s2 != "" for r in rows)
-    has_s3 = any(r.s3 != "" for r in rows)
-
-    # cabeçalho (opcional) – deixo fácil habilitar no futuro
-    # headers = ["NOME", "NÚMERO"] + [f"TAM{i}" for i in range(1, max_tams + 1)]
-    # if has_s2: headers.append("STRING2")
-    # if has_s3: headers.append("STRING3")
-
-    out_lines: List[str] = []
-
-    for r in rows:
-        cols: List[str] = [r.name, r.number]
-
-        # TAMs (preenche vazios para bater com max_tams)
-        tam_list = list(r.tams) + [""] * (max_tams - len(r.tams))
-        cols.extend(tam_list)
-
-        if has_s2:
-            cols.append(r.s2)
-        if has_s3:
-            cols.append(r.s3)
-
-        out_lines.append(",".join(cols))
-
-    return "\n".join(out_lines)
-
-
-def process_text(text: str) -> str:
-    parsed: List[ParsedRow] = []
+def process_text(text: str) -> Tuple[str, List[ParsedRow]]:
+    rows: List[ParsedRow] = []
 
     for i, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
-            row = parse_line(line)
-            if row:
-                parsed.append(row)
-        except ValueError as e:
-            # Erro com contexto de linha (mais amigável)
+            r = parse_line(line)
+            if r:
+                rows.append(r)
+        except Exception as e:
             raise ValueError(f"Linha {i}: {e}") from None
 
-    # Ordena por NOME e depois por NÚMERO (ambos string)
-    parsed.sort(key=lambda r: (r.name, r.number))
-    return build_output(parsed)
+    rows.sort(key=lambda r: (r.name, r.number))
+
+    max_tams = max(len(r.tams) for r in rows)
+    has_s2 = any(r.s2 for r in rows)
+    has_s3 = any(r.s3 for r in rows)
+
+    out_lines: List[str] = []
+    for r in rows:
+        cols = [r.name, r.number]
+        cols.extend(list(r.tams) + [""] * (max_tams - len(r.tams)))
+        if has_s2:
+            cols.append(r.s2)
+        if has_s3:
+            cols.append(r.s3)
+        out_lines.append(",".join(cols))
+
+    return "\n".join(out_lines), rows
 
 
 # -----------------------------
-# UI (Lite) + suporte a Hub
+# UI
 # -----------------------------
 class PXOrderListFrame(tk.Frame):
     def __init__(self, parent) -> None:
         super().__init__(parent)
 
-        # Topo
+        self._rows: List[ParsedRow] = []
+        self._last_orders: List[dict] = []
+        self.output_dir = DEFAULT_OUTPUT_DIR
+
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
 
-        tk.Label(
-            top,
-            text="PXOrderList — Organiza Lista",
-            font=("Segoe UI", 12, "bold"),
-        ).pack(side="left")
+        tk.Label(top, text="PXOrderList — Organiza Lista", font=("Segoe UI", 12, "bold")).pack(side="left")
 
-        # Botões
         btns = tk.Frame(self)
         btns.pack(fill="x", padx=10, pady=(0, 10))
 
         tk.Button(btns, text="Processar", command=self.on_process).pack(side="right")
+        tk.Button(btns, text="Gerar JSON", command=self.generate_json).pack(side="right", padx=6)
         tk.Button(btns, text="Copiar saída", command=self.copy_output).pack(side="right", padx=6)
         tk.Button(btns, text="Limpar", command=self.clear_all).pack(side="right")
 
-        # Corpo (2 colunas)
         body = tk.Frame(self)
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         left = tk.Frame(body)
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
-
         right = tk.Frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
-        tk.Label(left, text="Entrada (separado por vírgula):").pack(anchor="w")
+        tk.Label(left, text="Entrada:").pack(anchor="w")
         self.txt_in = tk.Text(left, wrap="none")
-        self.txt_in.pack(fill="both", expand=True, pady=(6, 0))
+        self.txt_in.pack(fill="both", expand=True)
 
-        tk.Label(right, text="Saída (organizada):").pack(anchor="w")
+        tk.Label(right, text="Saída:").pack(anchor="w")
         self.txt_out = tk.Text(right, wrap="none")
-        self.txt_out.pack(fill="both", expand=True, pady=(6, 0))
+        self.txt_out.pack(fill="both", expand=True)
 
-        # Exemplo
-        self.txt_in.insert(
-            "1.0",
-            "G,JÃO,10\n"
-            "JOÃO,5,G,M\n"
-            "MANEL,PP\n"
-            "JUACA,JUSÉ,PP\n"
-        )
+    def on_process(self):
+        raw = self.txt_in.get("1.0", "end")
+        out, rows = process_text(raw)
+        self.txt_out.delete("1.0", "end")
+        self.txt_out.insert("1.0", out)
+        self._rows = rows
+        self._last_orders = []
 
-    def on_process(self) -> None:
-        raw = self.txt_in.get("1.0", "end").strip("\n")
-        if not raw.strip():
-            messagebox.showwarning(APP_NAME, "Cole uma lista na entrada.")
+    def generate_json(self):
+        if not self._rows:
+            messagebox.showwarning(APP_NAME, "Processe a lista antes.")
             return
 
-        try:
-            out = process_text(raw)
-            self.txt_out.delete("1.0", "end")
-            self.txt_out.insert("1.0", out)
-            #messagebox.showinfo(APP_NAME, "OK! Lista organizada.")
-        except Exception as e:
-            messagebox.showerror(APP_NAME, str(e))
+        orders: List[dict] = []
 
-    def copy_output(self) -> None:
+        for r in self._rows:
+            for tam in r.tams:
+                qty, size = parse_qty_and_size(tam)
+                gender = gender_from_size(size)
+
+                orders.append({
+                    "Name": r.name,
+                    "Nickname": r.s2,
+                    "Number": r.number,
+                    "BloodType": r.s3,
+                    "Gender": gender,
+                    "ShortSleeve": f"{qty}-{size}",
+                    "LongSleeve": "",
+                    "Short": "",
+                    "Pants": "",
+                    "Tanktop": "",
+                    "Vest": ""
+                })
+
+        self._last_orders = orders
+
+        folder = filedialog.askdirectory(title="Escolha a pasta para salvar o JSON")
+        if not folder:
+            return
+
+        fp = export_json(orders, folder)
+        messagebox.showinfo(APP_NAME, f"JSON gerado:\n{fp}\n\nRegistros: {len(orders)}")
+
+    def copy_output(self):
         text = self.txt_out.get("1.0", "end").strip()
         if not text:
-            messagebox.showwarning(APP_NAME, "Não há saída para copiar.")
             return
         root = self.winfo_toplevel()
         root.clipboard_clear()
         root.clipboard_append(text)
         root.update()
-        messagebox.showinfo(APP_NAME, "Saída copiada para a área de transferência.")
 
-    def clear_all(self) -> None:
+    def clear_all(self):
         self.txt_in.delete("1.0", "end")
         self.txt_out.delete("1.0", "end")
+        self._rows = []
+        self._last_orders = []
 
 
 def build_ui(parent):
-    """
-    Para o Hub:
-    - o Hub chama build_ui(parent) e adiciona o frame na aba.
-    """
-    frame = PXOrderListFrame(parent)
-    return frame
+    return PXOrderListFrame(parent)
 
 
-def main() -> None:
+def main():
     root = tk.Tk()
     root.title(APP_NAME)
     root.geometry("1000x600")
-    root.minsize(900, 520)
-
-    ui = build_ui(root)
-    ui.pack(fill="both", expand=True)
-
+    build_ui(root).pack(fill="both", expand=True)
     root.mainloop()
 
 
