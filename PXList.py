@@ -32,7 +32,7 @@ FIELD3_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$")
 CHILD_SIZE_RE = re.compile(r"^(?:[2-9]|1[0-2])A$", re.IGNORECASE)
 
 # Tamanhos adultos permitidos (PP ao XXGG)
-ADULT_SIZES = {"PP", "P", "M", "G", "GG", "XGG", "XXGG"}
+ADULT_SIZES = {"PP", "P", "M", "G", "GG", "XGG", "XXGG", "XLGG"}
 
 
 # =========================

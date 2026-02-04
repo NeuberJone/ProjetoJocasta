@@ -25,10 +25,10 @@ SEP = "\\\\"  # duas barras (Power Duplicate)
 
 VALID_SIZES = {
     # Adulto
-    "PP", "P", "M", "G", "GG", "XG", "XGG",
+    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG", "XLGG"
     # Babylook
-    "BLPP", "BLP", "BLM", "BLG", "BLGG",
-    # Infantil
+    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG"
+    # Infantil com A
     "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
 }
 

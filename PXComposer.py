@@ -40,12 +40,11 @@ PIECE_FIELDS = [
 # Tamanhos válidos (Adulto, Babylook, Infantil)
 VALID_SIZES = {
     # Adulto
-    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG",
+    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG", "XLGG"
     # Babylook
-    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG",
-    # Infantil
-    "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A",
-    "10A", "11A", "12A", "14A", "16A",
+    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG"
+    # Infantil com A
+    "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
 }
 
 # Tamanho com quantidade (QTY-TAM)
