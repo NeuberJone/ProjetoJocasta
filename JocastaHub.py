@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import importlib
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -48,11 +49,13 @@ def save_config(cfg: dict) -> None:
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+
 def _safe_import(name: str):
     try:
-        return __import__(name)
+        return importlib.import_module(name)
     except Exception as e:
         return e
+
 
 
 # =========================
@@ -76,27 +79,27 @@ class JocastaHub(RootBase):
         # ---- Fluxos de Trabalho ----
         self.FLOWS: dict[str, list[tuple[str, str]]] = {
             "SISBolt": [
-                ("PXFlow", "PXFlow"),
-                ("PXComposer", "PXComposer"),
+                ("PXFlow", "modules.PXFlow"),
+                ("PXComposer", "modules.PXComposer"),
             ],
             "Power Duplicate": [
-                ("PXDupe", "PXDupe"),
+                ("PXDupe", "modules.PXDupe"),
             ],
             "Impressão": [
-                ("PXPrint", "PXPrint"),
-                ("PXPrintLogs", "PXPrintLogs"),
+                ("PXPrintLogs", "modules.PXPrintLogs"),
+                ("PXPrint", "modules.PXPrint"),
             ],
             "Utilitários": [
-                ("PXOrderList", "PXOrderList"),
-                ("Jarvis", "Jarvis"),
+                ("PXOrderList", "modules.PXOrderList"),
+                ("Jarvis", "modules.Jarvis"),
             ],
             "Legado": [
-                ("PXListLite", "PXListLite"),
-                ("PXTotaList", "PXTotaList"),
-                ("PXList", "PXList"),
-                ("PXListPlus", "PXListPlus"),
-                ("PXSort", "PXSort"),
-                ("PXSortLite", "PXSortLite"),
+                ("PXListLite", "modules.PXListLite"),
+                ("PXTotaList", "modules.PXTotaList"),
+                ("PXList", "modules.PXList"),
+                ("PXListPlus", "modules.PXListPlus"),
+                ("PXSort", "modules.PXSort"),
+                ("PXSortLite", "modules.PXSortLite"),
             ],
         }
 

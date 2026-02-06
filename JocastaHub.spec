@@ -1,45 +1,51 @@
 # -*- mode: python ; coding: utf-8 -*-
+
 from PyInstaller.utils.hooks import collect_all
-
-datas = []
-binaries = []
-hiddenimports = ['PXList', 'PXListLite', 'PXSort', 'PXSortLite', 'PXTotaList', 'PXListPlus', 'PXFlow', 'PXComposer', 'PXDupe', 'PXPrint', 'PXPrintLogs', 'PXOrderList', 'Jarvis']
-tmp_ret = collect_all('tkinterdnd2')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-
+datas, binaries, hidden = collect_all("tkinterdnd2")
 
 a = Analysis(
     ['JocastaHub.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=hiddenimports,
+    hiddenimports=hidden + [
+        "modules.PXFlow",
+        "modules.PXComposer",
+        "modules.PXDupe",
+        "modules.PXPrint",
+        "modules.PXPrintLogs",
+        "modules.PXOrderList",
+        "modules.PXBridge",
+        "modules.PXList",
+        "modules.PXListLite",
+        "modules.PXListPlus",
+        "modules.PXSort",
+        "modules.PXSortLite",
+        "modules.PXTotaList",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=None,
     noarchive=False,
     optimize=0,
 )
-pyz = PYZ(a.pure)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
+    a.zipfiles,
     a.datas,
-    [],
     name='JocastaHub',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
 )
