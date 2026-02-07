@@ -6,6 +6,8 @@ import importlib
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
+from core.version import __version__
+
 
 # ✅ Importa a config do PXCore SEM conflitar com funções locais
 from core.config import load_config as load_pxcore_config
@@ -78,7 +80,7 @@ class JocastaHub(RootBase):
 
         super().__init__()
 
-        self.title("Projeto Jocasta")
+        self.title(f"Projeto Jocasta v{__version__}")
         self.geometry("1100x720")
         self.minsize(980, 600)
 
@@ -186,7 +188,7 @@ class JocastaHub(RootBase):
         for title, module_name in self.FLOWS[flow_name]:
             self._add_tab(title, module_name)
 
-        self.title(f"Projeto Jocasta — {flow_name}")
+        self.title(f"Projeto Jocasta v{__version__} — {flow_name}")
 
     def _clear_tabs(self) -> None:
         for tab_id in self.nb.tabs():
