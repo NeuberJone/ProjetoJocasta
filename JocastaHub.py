@@ -7,6 +7,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+# ✅ Importa a config do PXCore SEM conflitar com funções locais
+from core.config import load_config as load_pxcore_config
+
 # Root precisa ser TkinterDnD.Tk para drag & drop
 try:
     from tkinterdnd2 import TkinterDnD  # type: ignore
@@ -19,9 +22,9 @@ APP_NAME = "JocastaHub"
 
 
 # =========================
-# Config helpers
+# Hub Config helpers (somente prefs do Hub por enquanto)
 # =========================
-def get_config_path() -> Path:
+def get_hub_config_path() -> Path:
     """
     User-writable config path:
       - Windows: %APPDATA%\\JocastaHub\\config.json
@@ -33,8 +36,8 @@ def get_config_path() -> Path:
     return Path.home() / ".config" / APP_NAME / "config.json"
 
 
-def load_config() -> dict:
-    path = get_config_path()
+def load_hub_config() -> dict:
+    path = get_hub_config_path()
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -43,11 +46,10 @@ def load_config() -> dict:
     return {}
 
 
-def save_config(cfg: dict) -> None:
-    path = get_config_path()
+def save_hub_config(cfg: dict) -> None:
+    path = get_hub_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-
 
 
 def _safe_import(name: str):
@@ -57,26 +59,38 @@ def _safe_import(name: str):
         return e
 
 
-
 # =========================
 # Main App
 # =========================
 class JocastaHub(RootBase):
     def __init__(self) -> None:
+        # ✅ 1) Carrega config do PXCore (cria config.json + pastas padrão)
+        # Isso é o que vai criar C:\PXCore\lists\json\logs\exports\temp
+        try:
+            self.px_cfg = load_pxcore_config()
+        except Exception as e:
+            # Não trava o app se config do core falhar — mas mostra o erro
+            self.px_cfg = None
+            messagebox.showwarning(
+                "PXCore",
+                f"Falha ao carregar configurações do PXCore.\n\n{type(e).__name__}: {e}"
+            )
+
         super().__init__()
 
         self.title("Projeto Jocasta")
         self.geometry("1100x720")
         self.minsize(980, 600)
 
-        # ---- config ----
-        self.config_data = load_config()
+        # ✅ 2) Config “do Hub” (preferências simples do hub: default_flow)
+        self.config_data = load_hub_config()
 
         # ---- Notebook ----
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
         # ---- Fluxos de Trabalho ----
+        # Tupla: (display_name, module_name)
         self.FLOWS: dict[str, list[tuple[str, str]]] = {
             "SISBolt": [
                 ("PXFlow", "modules.PXFlow"),
@@ -148,7 +162,7 @@ class JocastaHub(RootBase):
     # =========================
     def set_default_workflow(self) -> None:
         self.config_data["default_flow"] = self.current_flow
-        save_config(self.config_data)
+        save_hub_config(self.config_data)
 
         messagebox.showinfo(
             "Projeto Jocasta",
