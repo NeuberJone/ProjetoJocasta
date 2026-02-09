@@ -2,6 +2,7 @@
   "base_dir": "C:\\PXCore",
   "export_naming": "{ident}_{date}_{time}",
   "dev_mode_enabled": false,
+  "dev_password_hash": "<sha1_of_password>",
   "theme": "auto",
   "machines": [
     { "id": "M1", "name": "Impressora Sublimação 1", "type": "sublimacao", "model": "", "serial": "", "active": true },
