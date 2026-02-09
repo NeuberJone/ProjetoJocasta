@@ -2,6 +2,7 @@
 
 from PyInstaller.utils.hooks import collect_all
 datas, binaries, hidden = collect_all("tkinterdnd2")
+from core.version import __version__
 
 a = Analysis(
     ['JocastaHub.py'],
@@ -42,7 +43,7 @@ exe = EXE(
     a.binaries,
     a.zipfiles,
     a.datas,
-    name='JocastaHub',
+    name=f'JocastaHub-{__version__}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

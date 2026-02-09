@@ -15,8 +15,8 @@ except Exception:
     DND_AVAILABLE = False
 
 
-APP_NAME = "Jarvis"
-APP_TITLE = "Jarvis"
+APP_NAME = "PXBridge"
+APP_TITLE = "PXBridge"
 DEFAULT_JSON_SUBFOLDER = "JSON"
 
 
@@ -115,7 +115,7 @@ def do_convert_json_data(root, data: dict, origem: str, status_setter=None):
 
 
 def baixar_por_linhas(linhas, pasta_saida: str):
-    headers = {"User-Agent": "Jarvis/1.0 (+local)"}
+    headers = {"User-Agent": "PXBridge/1.0 (+local)"}
     os.makedirs(pasta_saida, exist_ok=True)
 
     total = 0
@@ -234,7 +234,7 @@ def build_ui(parent):
 
     tk.Label(
         top,
-        text="Jarvis — cole um TXT com linhas 'JSON: <url>' ou abra um .txt/.json",
+        text="PXBridge — cole um TXT com linhas 'JSON: <url>' ou abra um .txt/.json",
         font=("Segoe UI", 11, "bold"),
     ).pack(side="left")
 

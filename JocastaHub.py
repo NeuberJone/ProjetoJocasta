@@ -107,7 +107,7 @@ class JocastaHub(RootBase):
             ],
             "Utilitários": [
                 ("PXOrderList", "modules.PXOrderList"),
-                ("Jarvis", "modules.Jarvis"),
+                ("PXBridge", "modules.PXBridge"),
             ],
             "Legado": [
                 ("PXListLite", "modules.PXListLite"),

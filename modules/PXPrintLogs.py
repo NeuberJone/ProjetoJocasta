@@ -183,7 +183,9 @@ def parse_log_txt(path: str) -> Optional[Job]:
 
     height_mm = _f(item1.get("HeightMM", "0"))
     vpos_mm = _f(item1.get("VPositionMM", "0"))
-    real_mm = height_mm + vpos_mm
+    # Real é apenas o comprimento impresso (HeightMM), não soma deslocamento
+    real_mm = height_mm
+
 
     fabric = _fabric_from_document(document)
 
