@@ -41,6 +41,8 @@ def _ensure_dirs(cfg: PXCoreConfig) -> None:
     (base / "logs").mkdir(parents=True, exist_ok=True)
     (base / "exports").mkdir(parents=True, exist_ok=True)
     (base / "temp").mkdir(parents=True, exist_ok=True)
+    (base / "data").mkdir(parents=True, exist_ok=True)
+
 
 
 def save_config(cfg: PXCoreConfig) -> None:

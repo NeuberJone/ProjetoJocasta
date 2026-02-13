@@ -3,14 +3,14 @@
 # Projeto Jocasta — PXPrintLogs
 #
 # Regras:
-# - Ordena jobs por EndTime desc (último impresso primeiro)
+# - Ordena Pedidos por EndTime desc (último impresso primeiro)
 # - Agrupa em blocos por TECIDO consecutivo (se entrou outro tecido no meio, quebra)
 # - Metragem REAL (m) = (HeightMM + VPositionMM) / 1000
 #
 # Exportação:
-# - PDF Resumido: tabela de blocos (Total centralizado 2 casas + "m", Qtd jobs centralizada) + Total geral
+# - PDF Resumido: tabela de blocos (Total centralizado 2 casas + "m", Qtd Pedidos centralizada) + Total geral
 # - PDF Completo:
-#   1) Lista de jobs: EndTime | Arquivo (completo + wrap) | Tecido (completo + wrap) | Tamanho
+#   1) Lista de Pedidos: EndTime | Arquivo (completo + wrap) | Tecido (completo + wrap) | Tamanho
 #      + linha separadora quando mudar tecido (entre blocos)
 #   2) Separação
 #   3) Resumo igual ao Resumido + Total geral
@@ -28,13 +28,22 @@ from __future__ import annotations
 import os
 import re
 import json
+import math
+import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from core.printlogs_db import connect as db_connect, JobRow, upsert_jobs
 
-import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+
+def _round_up_cm(value_m: float) -> float:
+    """
+    Arredonda para cima em centímetros (0.01 m).
+    Ex: 6.361 -> 6.37
+    """
+    return math.ceil(value_m * 100) / 100
 
 # ---- PDF (reportlab) ----
 try:
@@ -104,23 +113,23 @@ class Job:
 class Block:
     fabric: str
     machine: str
-    jobs: List[Job]
+    Jobs: List[Job]
 
     @property
     def total_m(self) -> float:
-        return sum(j.real_m for j in self.jobs)
+        return sum(j.real_m for j in self.Jobs)
 
     @property
     def job_count(self) -> int:
-        return len(self.jobs)
+        return len(self.Jobs)
 
     @property
     def newest_end(self) -> datetime:
-        return max(j.end_time for j in self.jobs)
+        return max(j.end_time for j in self.Jobs)
 
     @property
     def oldest_end(self) -> datetime:
-        return min(j.end_time for j in self.jobs)
+        return min(j.end_time for j in self.Jobs)
 
 
 # --------------------------
@@ -189,6 +198,8 @@ def parse_log_txt(path: str) -> Optional[Job]:
 
     fabric = _fabric_from_document(document)
 
+    # job.source_path = path
+
     return Job(
         end_time=end_dt,
         document=document,
@@ -199,28 +210,28 @@ def parse_log_txt(path: str) -> Optional[Job]:
         src_file=os.path.basename(path),
     )
 
-def build_blocks(jobs: List[Job], machine: str) -> List[Block]:
-    jobs_sorted = sorted(jobs, key=lambda j: j.end_time, reverse=True)
+def build_blocks(Jobs: List[Job], machine: str) -> List[Block]:
+    Jobs_sorted = sorted(Jobs, key=lambda j: j.end_time, reverse=True)
 
     blocks: List[Block] = []
-    current_jobs: List[Job] = []
+    current_Jobs: List[Job] = []
     current_fabric: Optional[str] = None
 
-    for j in jobs_sorted:
+    for j in Jobs_sorted:
         if current_fabric is None:
             current_fabric = j.fabric
-            current_jobs = [j]
+            current_Jobs = [j]
             continue
 
         if j.fabric == current_fabric:
-            current_jobs.append(j)
+            current_Jobs.append(j)
         else:
-            blocks.append(Block(fabric=current_fabric, machine=machine, jobs=current_jobs))
+            blocks.append(Block(fabric=current_fabric, machine=machine, Jobs=current_Jobs))
             current_fabric = j.fabric
-            current_jobs = [j]
+            current_Jobs = [j]
 
-    if current_fabric is not None and current_jobs:
-        blocks.append(Block(fabric=current_fabric, machine=machine, jobs=current_jobs))
+    if current_fabric is not None and current_Jobs:
+        blocks.append(Block(fabric=current_fabric, machine=machine, Jobs=current_Jobs))
 
     return blocks
 
@@ -319,7 +330,7 @@ def _pdf_draw_summary_table(
     """
     Resumo:
     - Total (m) centralizado, 2 casas, com "m"
-    - Qtd jobs centralizado
+    - Qtd Pedidos centralizado
     - Total geral no final
     """
     # Larguras FIXAS (A4 com margem 40)
@@ -327,7 +338,7 @@ def _pdf_draw_summary_table(
     w_num   = 30
     w_fab   = 180
     w_total = 90
-    w_jobs  = 70
+    w_Jobs  = 70
     w_last  = 145   # soma = 515
 
     def _reprint_summary_header(y0: float) -> float:
@@ -346,7 +357,7 @@ def _pdf_draw_summary_table(
 
         # Centraliza também o TÍTULO dessas colunas
         c.drawCentredString(x + (w_total / 2), y0, "Total (m)"); x += w_total
-        c.drawCentredString(x + (w_jobs / 2),  y0, "Qtd jobs");  x += w_jobs
+        c.drawCentredString(x + (w_Jobs / 2),  y0, "Qtd Pedidos");  x += w_Jobs
 
         c.drawString(x, y0, "Último fim")
         y0 -= 14
@@ -373,10 +384,10 @@ def _pdf_draw_summary_table(
         c.drawString(x, y, b.fabric); x += w_fab
 
         # Total centralizado (centro real da coluna)
-        c.drawCentredString(x + (w_total / 2), y, f"{b.total_m:.2f} m"); x += w_total
+        c.drawCentredString(x + (w_total / 2), y, f"{_round_up_cm(b.total_m):.2f} m")
 
-        # Qtd jobs centralizado (centro real da coluna)
-        c.drawCentredString(x + (w_jobs / 2), y, str(b.job_count)); x += w_jobs
+        # Qtd Pedidos centralizado (centro real da coluna)
+        c.drawCentredString(x + (w_Jobs / 2), y, str(b.job_count)); x += w_Jobs
 
         c.drawString(x, y, b.newest_end.strftime("%d/%m/%Y %H:%M:%S"))
         y -= 14
@@ -401,7 +412,7 @@ def _pdf_draw_summary_table(
     total_roll = _roll_total_m(blocks)
     c.setFont("Helvetica-Bold", 11)
     c.drawString(40, y, "Total geral do rolo:")
-    c.drawRightString(page_w - 40, y, f"{total_roll:.2f} m")
+    c.drawRightString(page_w - 40, y, f"{_round_up_cm(total_roll):.2f} m")
     c.setFont("Helvetica", 10)
     y -= 18
 
@@ -448,12 +459,6 @@ def export_pdf(
     # --------------------
     # COMPLETO
     # --------------------
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y, "Jobs (último impresso primeiro)")
-    y -= 16
-    c.setFont("Helvetica", 10)
-    c.line(40, y, page_w - 40, y)
-    y -= 18
 
     # Larguras FIXAS (A4 com margem 40) => 515 úteis
     w_end  = 120
@@ -467,9 +472,9 @@ def export_pdf(
     fs_row = 10
     line_h =_hook = 12
 
-    def _reprint_jobs_header(y0: float) -> float:
+    def _reprint_Jobs_header(y0: float) -> float:
         c.setFont("Helvetica-Bold", 12)
-        c.drawString(40, y0, "Jobs (último impresso primeiro)")
+        c.drawString(40, y0, "Pedidos (último impresso primeiro)")
         y0 -= 16
         c.setFont("Helvetica", 10)
         c.line(40, y0, page_w - 40, y0)
@@ -486,7 +491,7 @@ def export_pdf(
         return y0
 
     # imprime cabeçalho das colunas na primeira página
-    y = _reprint_jobs_header(y)
+    y = _reprint_Jobs_header(y)
 
     for bi, b in enumerate(blocks):
         # separador entre blocos (mudou tecido)
@@ -496,18 +501,18 @@ def export_pdf(
                 _begin_page()
                 y = page_h - 40
                 y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
-                y = _reprint_jobs_header(y)
+                y = _reprint_Jobs_header(y)
 
             c.setLineWidth(1)
             c.line(40, y + 6, page_w - 40, y + 6)
             y -= 8
 
-        # jobs do bloco (mais recente primeiro)
-        for j in sorted(b.jobs, key=lambda jj: jj.end_time, reverse=True):
+        # Pedidos do bloco (mais recente primeiro)
+        for j in sorted(b.Jobs, key=lambda jj: jj.end_time, reverse=True):
             end_txt = j.end_time.strftime("%d/%m/%Y %H:%M:%S")
             doc_txt = j.document  # COMPLETO (SEM "...")
             fab_txt = j.fabric    # COMPLETO (SEM "...")
-            size_txt = f"{j.real_m:.2f} m"
+            size_txt = f"{_round_up_cm(j.real_m):.2f} m"
 
             doc_lines = _wrap_text(doc_txt, w_doc - 6, font, fs_row)
             fab_lines = _wrap_text(fab_txt, w_fab - 6, font, fs_row)
@@ -520,7 +525,7 @@ def export_pdf(
                 _begin_page()
                 y = page_h - 40
                 y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
-                y = _reprint_jobs_header(y)
+                y = _reprint_Jobs_header(y)
 
             x0 = 40
             c.setFont(font, fs_row)
@@ -566,7 +571,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.cfg = load_cfg()
         self.machine: Optional[str] = None
-        self.jobs: List[Job] = []
+        self.Jobs: List[Job] = []
         self.blocks: List[Block] = []
 
         top = ttk.Frame(self)
@@ -642,7 +647,7 @@ class PXPrintLogsUI(ttk.Frame):
         self.var_detail_title = tk.StringVar(value="Selecione um tecido na lista abaixo...")
         ttk.Label(details, textvariable=self.var_detail_title).pack(anchor="w", padx=10, pady=(8, 6))
 
-        self.tree_jobs = ttk.Treeview(details, columns=("end", "doc", "h", "v", "real_m"), show="headings", height=6)
+        self.tree_Jobs = ttk.Treeview(details, columns=("end", "doc", "h", "v", "real_m"), show="headings", height=6)
         for col, txt, w in [
             ("end", "EndTime", 140),
             ("doc", "Documento", 420),
@@ -650,22 +655,22 @@ class PXPrintLogsUI(ttk.Frame):
             ("v", "VPosMM", 90),
             ("real_m", "Real (m)", 90),
         ]:
-            self.tree_jobs.heading(col, text=txt)
-            self.tree_jobs.column(col, width=w, anchor="w")
-        sbj = ttk.Scrollbar(details, orient="vertical", command=self.tree_jobs.yview)
-        self.tree_jobs.configure(yscrollcommand=sbj.set)
-        self.tree_jobs.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
+            self.tree_Jobs.heading(col, text=txt)
+            self.tree_Jobs.column(col, width=w, anchor="w")
+        sbj = ttk.Scrollbar(details, orient="vertical", command=self.tree_Jobs.yview)
+        self.tree_Jobs.configure(yscrollcommand=sbj.set)
+        self.tree_Jobs.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
         sbj.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
 
         blocks_box = ttk.LabelFrame(self, text="Ordem do rolo (último impresso primeiro)")
         blocks_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        self.tree_blocks = ttk.Treeview(blocks_box, columns=("#", "fabric", "total_m", "jobs", "last"), show="headings", height=12)
+        self.tree_blocks = ttk.Treeview(blocks_box, columns=("#", "fabric", "total_m", "Jobs", "last"), show="headings", height=12)
         for col, txt, w, anchor in [
             ("#", "#", 40, "w"),
             ("fabric", "Tecido", 180, "w"),
             ("total_m", "Total (m)", 110, "e"),
-            ("jobs", "Qtd jobs", 90, "e"),
+            ("Jobs", "Qtd Jobs", 90, "e"),
             ("last", "Último EndTime", 160, "w"),
         ]:
             self.tree_blocks.heading(col, text=txt)
@@ -828,8 +833,29 @@ class PXPrintLogsUI(ttk.Frame):
         if not self.var_roll.get().strip():
             self.var_roll.set(self._auto_roll_name())
 
-        self.jobs = parsed
+        self.Jobs = parsed
         self.blocks = build_blocks(parsed, machine)
+
+        try:
+            with db_connect() as con:
+                rows = [
+                    JobRow(
+                        machine=machine,
+                        end_time=j.end_time,
+                        document=j.document,
+                        height_mm=j.height_mm,
+                        vpos_mm=j.vpos_mm,
+                        real_m=j.real_m,
+                        source_path=p,
+                    )
+                    for j, p in zip(parsed, txts)
+                ]
+                inserted = upsert_jobs(con, rows)
+            self.status.configure(text=self.status.cget("text") + f" | DB: +{inserted}")
+        except Exception as e:
+            # não pode quebrar o app por causa do DB
+            self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")
+
 
         self.refresh_blocks()
         self.clear_details()
@@ -838,12 +864,12 @@ class PXPrintLogsUI(ttk.Frame):
 
     def on_clear(self):
         self.machine = None
-        self.jobs = []
+        self.Jobs = []
         self.blocks = []
         self.var_roll.set("")
         self.lbl_machine.configure(text="Máquina do lote: (não definida)")
         self.tree_blocks.delete(*self.tree_blocks.get_children())
-        self.tree_jobs.delete(*self.tree_jobs.get_children())
+        self.tree_Jobs.delete(*self.tree_Jobs.get_children())
         self.var_detail_title.set("Selecione um tecido na lista abaixo...")
         self.status.configure(text="Limpo.")
 
@@ -857,7 +883,7 @@ class PXPrintLogsUI(ttk.Frame):
                 values=(
                     idx,
                     b.fabric,
-                    f"{b.total_m:.3f}",
+                    f"{_round_up_cm(b.total_m):.2f} m",
                     b.job_count,
                     b.newest_end.strftime("%d/%m/%Y %H:%M:%S"),
                 ),
@@ -865,7 +891,7 @@ class PXPrintLogsUI(ttk.Frame):
 
     def clear_details(self):
         self.var_detail_title.set("Selecione um tecido na lista abaixo...")
-        self.tree_jobs.delete(*self.tree_jobs.get_children())
+        self.tree_Jobs.delete(*self.tree_Jobs.get_children())
 
     def on_select_block(self, _evt=None):
         sel = self.tree_blocks.selection()
@@ -877,15 +903,15 @@ class PXPrintLogsUI(ttk.Frame):
         b = self.blocks[bi]
 
         title = (
-            f"Tecido: {b.fabric} | Máquina: {b.machine} | Jobs: {b.job_count} | "
-            f"Total: {b.total_m:.3f} m | "
+            f"Tecido: {b.fabric} | Máquina: {b.machine} | Pedidos: {b.job_count} | "
+            f"Total: {_round_up_cm(b.total_m):.2f} m | "
             f"{b.newest_end.strftime('%d/%m/%Y %H:%M:%S')} → {b.oldest_end.strftime('%d/%m/%Y %H:%M:%S')}"
         )
         self.var_detail_title.set(title)
 
-        self.tree_jobs.delete(*self.tree_jobs.get_children())
-        for j in sorted(b.jobs, key=lambda jj: jj.end_time, reverse=True):
-            self.tree_jobs.insert(
+        self.tree_Jobs.delete(*self.tree_Jobs.get_children())
+        for j in sorted(b.Jobs, key=lambda jj: jj.end_time, reverse=True):
+            self.tree_Jobs.insert(
                 "",
                 "end",
                 values=(
@@ -893,7 +919,7 @@ class PXPrintLogsUI(ttk.Frame):
                     j.document,
                     f"{j.height_mm:.1f}",
                     f"{j.vpos_mm:.1f}",
-                    f"{j.real_m:.3f}",
+                    f"{_round_up_cm(j.real_m):.2f}",
                 ),
             )
 
@@ -915,8 +941,8 @@ class PXPrintLogsUI(ttk.Frame):
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
 
         out_dir = self._get_export_dir()
-        normal_path = str(out_dir / f"{roll}_{mode_tag}_NORMAL.pdf")
-        mirror_path = str(out_dir / f"{roll}_{mode_tag}_ESPELHO.pdf")
+        normal_path = str(out_dir / f"{roll}_{mode_tag}_roll.pdf")
+        mirror_path = str(out_dir / f"{roll}_{mode_tag}_roll.jpg")
 
         try:
             if which == "normal":
