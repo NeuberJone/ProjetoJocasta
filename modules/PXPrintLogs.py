@@ -5,7 +5,7 @@
 # Regras:
 # - Ordena Pedidos por EndTime desc (último impresso primeiro)
 # - Agrupa em blocos por TECIDO consecutivo (se entrou outro tecido no meio, quebra)
-# - Metragem REAL (m) = (HeightMM + VPositionMM) / 1000
+# - Metragem REAL (m) = HeightMM / 1000  (VPositionMM é deslocamento/offset)
 #
 # Exportação:
 # - PDF Resumido: tabela de blocos (Total centralizado 2 casas + "m", Qtd Pedidos centralizada) + Total geral
@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-from core.printlogs_db import connect as db_connect, JobRow, upsert_jobs
+from core.printlogs_db import save_export_transactional, OrderRow
 
 from tkinter import ttk, messagebox, filedialog
 
@@ -207,7 +207,7 @@ def parse_log_txt(path: str) -> Optional[Job]:
         height_mm=height_mm,
         vpos_mm=vpos_mm,
         real_mm=real_mm,
-        src_file=os.path.basename(path),
+        src_file=str(path),
     )
 
 def build_blocks(Jobs: List[Job], machine: str) -> List[Block]:
@@ -470,7 +470,7 @@ def export_pdf(
     font_bold = "Helvetica-Bold"
     fs_head = 10
     fs_row = 10
-    line_h =_hook = 12
+    line_h = 12
 
     def _reprint_Jobs_header(y0: float) -> float:
         c.setFont("Helvetica-Bold", 12)
@@ -670,7 +670,7 @@ class PXPrintLogsUI(ttk.Frame):
             ("#", "#", 40, "w"),
             ("fabric", "Tecido", 180, "w"),
             ("total_m", "Total (m)", 110, "e"),
-            ("Jobs", "Qtd Jobs", 90, "e"),
+            ("Jobs", "Qtd Pedidos", 90, "e"),
             ("last", "Último EndTime", 160, "w"),
         ]:
             self.tree_blocks.heading(col, text=txt)
@@ -818,10 +818,28 @@ class PXPrintLogsUI(ttk.Frame):
             return
 
         parsed: List[Job] = []
+        skipped_invalid = 0
+
         for p in txts:
             j = parse_log_txt(p)
-            if j:
-                parsed.append(j)
+            if not j:
+                # arquivo ignorado porque não foi parseado
+                skipped_invalid += 1
+                continue
+
+            # Valida HeightMM
+            if j.height_mm <= 0:
+                skipped_invalid += 1
+                continue
+
+            # Recalcula real_m (sanity check explícita)
+            correct_real_m = j.height_mm / 1000.0
+            if abs(j.real_m - correct_real_m) > 0.001:
+                # Inconsistência grave detectada
+                skipped_invalid += 1
+                continue
+
+            parsed.append(j)
 
         if not parsed:
             messagebox.showerror("Falha", "Nenhum log válido encontrado.")
@@ -836,31 +854,12 @@ class PXPrintLogsUI(ttk.Frame):
         self.Jobs = parsed
         self.blocks = build_blocks(parsed, machine)
 
-        try:
-            with db_connect() as con:
-                rows = [
-                    JobRow(
-                        machine=machine,
-                        end_time=j.end_time,
-                        document=j.document,
-                        height_mm=j.height_mm,
-                        vpos_mm=j.vpos_mm,
-                        real_m=j.real_m,
-                        source_path=p,
-                    )
-                    for j, p in zip(parsed, txts)
-                ]
-                inserted = upsert_jobs(con, rows)
-            self.status.configure(text=self.status.cget("text") + f" | DB: +{inserted}")
-        except Exception as e:
-            # não pode quebrar o app por causa do DB
-            self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")
-
-
         self.refresh_blocks()
         self.clear_details()
 
-        self.status.configure(text=f"Importado: {len(parsed)} logs | Blocos: {len(self.blocks)} | Máquina: {machine}")
+        extra = f" | Ignorados: {skipped_invalid}" if skipped_invalid else ""
+        self.status.configure(text=f"Importado: {len(parsed)} logs | Blocos: {len(self.blocks)} | Máquina: {machine}{extra}")
+
 
     def on_clear(self):
         self.machine = None
@@ -942,7 +941,18 @@ class PXPrintLogsUI(ttk.Frame):
 
         out_dir = self._get_export_dir()
         normal_path = str(out_dir / f"{roll}_{mode_tag}_roll.pdf")
-        mirror_path = str(out_dir / f"{roll}_{mode_tag}_roll.jpg")
+        mirror_path = str(out_dir / f"{roll}_{mode_tag}_rollPrint.pdf")
+
+        for j in self.Jobs:
+            if j.height_mm <= 0:
+                messagebox.showerror("Dados inválidos", f"HeightMM inválido no job: {j.document}")
+                return
+            if abs(j.real_m - (j.height_mm / 1000.0)) > 0.001:
+                messagebox.showerror(
+                    "Dados inválidos",
+                    "Inconsistência em real_m detectada (possível regressão do cálculo)."
+                )
+                return
 
         try:
             if which == "normal":
@@ -957,6 +967,30 @@ class PXPrintLogsUI(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Erro ao exportar", str(e))
             return
+        try:
+            orders = [
+                OrderRow(
+                    end_time=j.end_time.isoformat(timespec="seconds"),
+                    document=j.document,
+                    fabric=j.fabric,
+                    height_mm=float(j.height_mm),
+                    vpos_mm=float(j.vpos_mm),
+                    real_m=float(j.real_m),
+                    source_path=j.src_file,
+                )
+                for j in self.Jobs
+            ]
+
+            roll_id = save_export_transactional(
+                machine=self.machine,
+                roll_name=roll,
+                export_mode=mode,     # "full" | "summary"
+                app_version="dev",
+                orders=orders,
+            )
+            self.status.configure(text=self.status.cget("text") + f" | DB ok (roll_id={roll_id})")
+        except Exception as e:
+            self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")
 
         if which == "both":
             messagebox.showinfo("Exportado", f"PDFs gerados em:\n{out_dir}\n\n{Path(normal_path).name}\n{Path(mirror_path).name}")

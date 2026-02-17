@@ -1,146 +1,181 @@
+# core/printlogs_db.py
 from __future__ import annotations
 
+import json
 import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 from core.config import load_config
 
 
-def get_db_path() -> Path:
-    cfg = load_config()
-    base = Path(cfg.base_dir)
-    return base / "data" / "printlogs.db"
-
-
-def connect() -> sqlite3.Connection:
-    db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(db_path))
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA foreign_keys=ON;")
-    return con
-
-
-def ensure_schema(con: sqlite3.Connection) -> None:
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS print_jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            machine TEXT NOT NULL,
-            roll_name TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            document TEXT NOT NULL,
-            height_mm REAL,
-            vpos_mm REAL,
-            real_m REAL,
-            source_path TEXT NOT NULL,
-            source_hash TEXT NOT NULL UNIQUE,
-            imported_at TEXT NOT NULL,
-            valid INTEGER NOT NULL DEFAULT 1
-        );
-        """
-    )
-    con.execute("CREATE INDEX IF NOT EXISTS idx_print_jobs_doc ON print_jobs(document);")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_print_jobs_roll ON print_jobs(roll_name);")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_print_jobs_end ON print_jobs(end_time);")
-
-
-def file_sha1(path: str) -> str:
-    h = hashlib.sha1()
-    p = Path(path)
-    with p.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-@dataclass(frozen=True)
-class JobRow:
-    machine: str
-    roll_name: str
-    end_time: datetime
+@dataclass
+class OrderRow:
+    end_time: str
     document: str
+    fabric: str
     height_mm: float
     vpos_mm: float
     real_m: float
     source_path: str
 
 
-def upsert_jobs(con: sqlite3.Connection, jobs: Iterable[JobRow]) -> int:
-    ensure_schema(con)
-    now = datetime.now().isoformat(timespec="seconds")
-
-    inserted = 0
-    for j in jobs:
-        sh = file_sha1(j.source_path)
-        cur = con.execute(
-            """
-            INSERT OR IGNORE INTO print_jobs
-            (machine, roll_name, end_time, document, height_mm, vpos_mm, real_m, source_path, source_hash, imported_at, valid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1);
-            """,
-            (
-                j.machine,
-                j.roll_name,
-                j.end_time.isoformat(timespec="seconds"),
-                j.document,
-                float(j.height_mm),
-                float(j.vpos_mm),
-                float(j.real_m),
-                j.source_path,
-                sh,
-                now,
-            ),
-        )
-        if cur.rowcount == 1:
-            inserted += 1
-
-    con.commit()
-    return inserted
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
-def find_orders(con: sqlite3.Connection, query: str, limit: int = 200):
-    ensure_schema(con)
-    q = f"%{query.strip()}%"
-    cur = con.execute(
+def get_db_path() -> Path:
+    cfg = load_config()
+    base_dir = Path(getattr(cfg, "base_dir", "C:\\PXCore"))
+    return base_dir / "data" / "printlogs.db"
+
+
+def connect() -> sqlite3.Connection:
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(db_path))
+    con.execute("PRAGMA foreign_keys = ON;")
+    con.execute("PRAGMA journal_mode = WAL;")
+    con.execute("PRAGMA synchronous = NORMAL;")
+    return con
+
+
+def init_schema(con: sqlite3.Connection) -> None:
+    con.executescript(
         """
-        SELECT machine, roll_name, end_time, document, real_m, source_path, valid
-        FROM print_jobs
-        WHERE document LIKE ?
-        ORDER BY end_time DESC
-        LIMIT ?;
-        """,
-        (q, int(limit)),
+        CREATE TABLE IF NOT EXISTS rolls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            roll_name TEXT NOT NULL,
+            machine TEXT NOT NULL,
+            export_mode TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            source_hash TEXT NOT NULL UNIQUE,
+            app_version TEXT,
+            notes TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            roll_id INTEGER NOT NULL,
+            end_time TEXT,
+            document TEXT,
+            fabric TEXT,
+            height_mm REAL,
+            vpos_mm REAL,
+            real_m REAL,
+            source_path TEXT,
+            job_hash TEXT NOT NULL,
+            FOREIGN KEY (roll_id) REFERENCES rolls(id) ON DELETE CASCADE,
+            UNIQUE (roll_id, job_hash)
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            ref_table TEXT NOT NULL,
+            ref_id INTEGER NOT NULL,
+            payload_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS order_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            delta_m REAL NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+        );
+        """
     )
-    return cur.fetchall()
+    con.commit()
 
 
-def find_roll(con: sqlite3.Connection, roll_name: str, machine: str | None = None, limit: int = 500):
-    ensure_schema(con)
-    if machine:
+def make_job_hash(machine: str, end_time: str, document: str, height_mm: float) -> str:
+    raw = f"{machine}|{end_time}|{document}|{height_mm}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def make_source_hash(machine: str, roll_name: str, export_mode: str, orders: Iterable[OrderRow]) -> str:
+    """
+    Hash do "conteúdo exportado".
+    Se tentar exportar exatamente o mesmo conjunto, bloqueia como duplicado.
+    """
+    parts = [machine.strip(), roll_name.strip(), export_mode.strip()]
+    # ordena para ficar determinístico
+    normalized = sorted(
+        (o.end_time, o.document, o.fabric, float(o.height_mm), float(o.real_m), Path(o.source_path).name)
+        for o in orders
+    )
+    parts.append(json.dumps(normalized, ensure_ascii=False))
+    raw = "|".join(parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def log_event(con: sqlite3.Connection, event_type: str, ref_table: str, ref_id: int, payload: Optional[dict] = None) -> None:
+    con.execute(
+        "INSERT INTO events(created_at, event_type, ref_table, ref_id, payload_json) VALUES(?,?,?,?,?)",
+        (_now_iso(), event_type, ref_table, ref_id, json.dumps(payload or {}, ensure_ascii=False)),
+    )
+
+
+def save_export_transactional(
+    machine: str,
+    roll_name: str,
+    export_mode: str,
+    app_version: str,
+    orders: list[OrderRow],
+) -> int:
+    """
+    Salva 1 exportação (roll + orders + evento) de forma transacional.
+    Retorna roll_id.
+    """
+    con = connect()
+    try:
+        init_schema(con)
+
+        source_hash = make_source_hash(machine, roll_name, export_mode, orders)
+
+        # Transação
+        con.execute("BEGIN;")
+
+        # cria roll (ou falha se duplicado)
         cur = con.execute(
             """
-            SELECT machine, roll_name, end_time, document, real_m, source_path, valid
-            FROM print_jobs
-            WHERE roll_name = ? AND machine = ?
-            ORDER BY end_time ASC
-            LIMIT ?;
+            INSERT INTO rolls(roll_name, machine, export_mode, created_at, source_hash, app_version)
+            VALUES(?,?,?,?,?,?)
             """,
-            (roll_name, machine, int(limit)),
+            (roll_name, machine, export_mode, _now_iso(), source_hash, app_version),
         )
-    else:
-        cur = con.execute(
-            """
-            SELECT machine, roll_name, end_time, document, real_m, source_path, valid
-            FROM print_jobs
-            WHERE roll_name = ?
-            ORDER BY end_time ASC
-            LIMIT ?;
-            """,
-            (roll_name, int(limit)),
-        )
-    return cur.fetchall()
+        roll_id = int(cur.lastrowid)
+
+        # insere orders
+        for o in orders:
+            job_hash = make_job_hash(machine, o.end_time, o.document, o.height_mm)
+            con.execute(
+                """
+                INSERT OR IGNORE INTO orders(
+                    roll_id, end_time, document, fabric, height_mm, vpos_mm, real_m, source_path, job_hash
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (roll_id, o.end_time, o.document, o.fabric, o.height_mm, o.vpos_mm, o.real_m, o.source_path, job_hash),
+            )
+
+        # evento de export
+        log_event(con, "EXPORT", "rolls", roll_id, {"orders_count": len(orders)})
+
+        con.commit()
+        return roll_id
+
+    except sqlite3.IntegrityError as e:
+        con.rollback()
+        # geralmente aqui cai duplicidade do source_hash
+        raise
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
