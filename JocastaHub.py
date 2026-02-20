@@ -98,8 +98,10 @@ class JocastaHub(RootBase):
             ],
             "Impressão": [
                 ("PXPrintLogs", "modules.PXPrintLogs"),
+                ("PXSearchOrders", "modules.PXSearchOrders"),  # histórico
                 ("PXPrint", "modules.PXPrint"),
             ],
+            
             "Utilitários": [
                 ("PXOrderList", "modules.PXOrderList"),
                 ("PXBridge", "modules.PXBridge"),

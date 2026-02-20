@@ -55,6 +55,14 @@ except Exception:
     A4 = None
     pdfmetrics = None
 
+# ---- PDF -> JPG (PyMuPDF) ----
+try:
+    import fitz  # PyMuPDF
+    _HAS_PYMUPDF = True
+except Exception:
+    fitz = None
+    _HAS_PYMUPDF = False
+
 # ---- Drag & drop (tkinterdnd2) ----
 try:
     from tkinterdnd2 import DND_FILES  # type: ignore
@@ -561,6 +569,22 @@ def export_pdf(
     _end_page()
     c.save()
 
+def pdf_first_page_to_jpg(pdf_path: str, jpg_path: str, dpi: int = 300) -> None:
+    """
+    Converte a primeira página de um PDF para JPG.
+    """
+    if not _HAS_PYMUPDF or fitz is None:
+        raise RuntimeError("PyMuPDF não instalado.")
+
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc.load_page(0)
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        pix.save(jpg_path)
+    finally:
+        doc.close()
 
 # --------------------------
 # UI
@@ -851,14 +875,48 @@ class PXPrintLogsUI(ttk.Frame):
         if not self.var_roll.get().strip():
             self.var_roll.set(self._auto_roll_name())
 
-        self.Jobs = parsed
-        self.blocks = build_blocks(parsed, machine)
+                # Se já existe um lote carregado, somar os novos logs no lote atual
+        if self.machine and self.machine != machine:
+            messagebox.showwarning(
+                "Máquina diferente",
+                f"Você já tem logs carregados da máquina {self.machine}.\n"
+                f"Você está tentando importar logs da máquina {machine}.\n\n"
+                "Limpe antes de importar outra máquina."
+            )
+            return
+
+        # Define máquina do lote (se ainda não tinha)
+        self.machine = machine
+        self.lbl_machine.configure(text=f"Máquina do lote: {machine}")
+
+        if not self.var_roll.get().strip():
+            self.var_roll.set(self._auto_roll_name())
+
+        # APPEND: junta sem perder o que já existia
+        existing = list(self.Jobs) if self.Jobs else []
+        combined = existing + parsed
+
+        # (Opcional mas recomendado) remover duplicados pelo src_file
+        seen = set()
+        deduped = []
+        for j in combined:
+            key = j.src_file  # ou (j.end_time, j.document, j.height_mm) se preferir
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(j)
+
+        self.Jobs = deduped
+        self.blocks = build_blocks(self.Jobs, machine)
 
         self.refresh_blocks()
         self.clear_details()
 
         extra = f" | Ignorados: {skipped_invalid}" if skipped_invalid else ""
-        self.status.configure(text=f"Importado: {len(parsed)} logs | Blocos: {len(self.blocks)} | Máquina: {machine}{extra}")
+        self.status.configure(
+            text=f"Importado: +{len(parsed)} logs | Total: {len(self.Jobs)} | Blocos: {len(self.blocks)} | Máquina: {machine}{extra}"
+        )
+
 
 
     def on_clear(self):
@@ -931,8 +989,13 @@ class PXPrintLogsUI(ttk.Frame):
         if not self.blocks or not self.machine:
             messagebox.showwarning("Nada para exportar", "Importe logs primeiro.")
             return
+
         if canvas is None:
             messagebox.showerror("Dependência faltando", "Instale reportlab: pip install reportlab")
+            return
+
+        if not _HAS_PYMUPDF:
+            messagebox.showerror("Dependência faltando", "Instale pymupdf: pip install pymupdf")
             return
 
         roll = self._get_roll_name()
@@ -940,9 +1003,15 @@ class PXPrintLogsUI(ttk.Frame):
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
 
         out_dir = self._get_export_dir()
-        normal_path = str(out_dir / f"{roll}_{mode_tag}_roll.pdf")
-        mirror_path = str(out_dir / f"{roll}_{mode_tag}_rollPrint.pdf")
 
+        # Nomes finais
+        normal_path = str(out_dir / f"{roll}_{mode_tag}_roll.pdf")
+        mirror_path = str(out_dir / f"{roll}_{mode_tag}_roll.jpg")
+
+        # PDF temporário para gerar JPG
+        tmp_mirror_pdf = str(out_dir / f"{roll}_{mode_tag}_roll.tmp.pdf")
+
+        # Validação de integridade
         for j in self.Jobs:
             if j.height_mm <= 0:
                 messagebox.showerror("Dados inválidos", f"HeightMM inválido no job: {j.document}")
@@ -950,23 +1019,36 @@ class PXPrintLogsUI(ttk.Frame):
             if abs(j.real_m - (j.height_mm / 1000.0)) > 0.001:
                 messagebox.showerror(
                     "Dados inválidos",
-                    "Inconsistência em real_m detectada (possível regressão do cálculo)."
+                    "Inconsistência em real_m detectada."
                 )
                 return
 
         try:
             if which == "normal":
                 export_pdf(normal_path, self.blocks, roll, self.machine, mode=mode, mirrored=False)
+
             elif which == "mirror":
-                export_pdf(mirror_path, self.blocks, roll, self.machine, mode=mode, mirrored=True)
+                export_pdf(tmp_mirror_pdf, self.blocks, roll, self.machine, mode=mode, mirrored=True)
+                pdf_first_page_to_jpg(tmp_mirror_pdf, mirror_path, dpi=300)
+                Path(tmp_mirror_pdf).unlink(missing_ok=True)
+
             elif which == "both":
                 export_pdf(normal_path, self.blocks, roll, self.machine, mode=mode, mirrored=False)
-                export_pdf(mirror_path, self.blocks, roll, self.machine, mode=mode, mirrored=True)
+
+                export_pdf(tmp_mirror_pdf, self.blocks, roll, self.machine, mode=mode, mirrored=True)
+                pdf_first_page_to_jpg(tmp_mirror_pdf, mirror_path, dpi=300)
+                Path(tmp_mirror_pdf).unlink(missing_ok=True)
+
             else:
                 return
+
         except Exception as e:
             messagebox.showerror("Erro ao exportar", str(e))
             return
+
+        # -------------------------
+        # Registro no banco
+        # -------------------------
         try:
             orders = [
                 OrderRow(
@@ -981,23 +1063,52 @@ class PXPrintLogsUI(ttk.Frame):
                 for j in self.Jobs
             ]
 
+            payload = {
+                "which": which,
+                "output_dir": str(out_dir),
+                "normal_path": normal_path if which in ("normal", "both") else None,
+                "mirror_path": mirror_path if which in ("mirror", "both") else None,
+            }
+
             roll_id = save_export_transactional(
                 machine=self.machine,
                 roll_name=roll,
-                export_mode=mode,     # "full" | "summary"
+                export_mode=mode,
                 app_version="dev",
                 orders=orders,
+                event_type="EXPORT_ROLL",
+                event_payload=payload,
             )
-            self.status.configure(text=self.status.cget("text") + f" | DB ok (roll_id={roll_id})")
-        except Exception as e:
-            self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")
 
+            self.status.configure(
+                text=self.status.cget("text") + f" | DB ok (roll_id={roll_id})"
+            )
+
+        except Exception as e:
+            self.status.configure(
+                text=self.status.cget("text") + f" | DB erro: {type(e).__name__}"
+            )
+
+        # -------------------------
+        # Mensagem final
+        # -------------------------
         if which == "both":
-            messagebox.showinfo("Exportado", f"PDFs gerados em:\n{out_dir}\n\n{Path(normal_path).name}\n{Path(mirror_path).name}")
+            messagebox.showinfo(
+                "Exportado",
+                f"Arquivos gerados em:\n{out_dir}\n\n"
+                f"{Path(normal_path).name}\n"
+                f"{Path(mirror_path).name}"
+            )
         elif which == "normal":
-            messagebox.showinfo("Exportado", f"PDF gerado em:\n{out_dir}\n\n{Path(normal_path).name}")
+            messagebox.showinfo(
+                "Exportado",
+                f"Arquivo gerado em:\n{out_dir}\n\n{Path(normal_path).name}"
+            )
         else:
-            messagebox.showinfo("Exportado", f"PDF gerado em:\n{out_dir}\n\n{Path(mirror_path).name}")
+            messagebox.showinfo(
+                "Exportado",
+                f"Arquivo gerado em:\n{out_dir}\n\n{Path(mirror_path).name}"
+            )
 
 
 def build_ui(parent):
