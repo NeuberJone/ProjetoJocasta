@@ -23,6 +23,7 @@ a = Analysis(
         "modules.PXSort",
         "modules.PXSortLite",
         "modules.PXTotaList",
+        "modules.PXSearchOrders",
     ],
     hookspath=[],
     hooksconfig={},

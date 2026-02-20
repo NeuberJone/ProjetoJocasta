@@ -21,6 +21,8 @@
 # - Botão "Atualizar nome" para atualizar hhmmss do nome do rolo
 # - Botão "Definir como padrão" para modo do PDF
 # - Import por botão ou Drag&Drop (apenas .txt)
+# - Import incremental: importar outra pasta NÃO apaga o primeiro import
+# - Espelhado: exporta JPG (com largura 17cm / 21cm / personalizado)
 # --------------------------------------------------------------------
 
 from __future__ import annotations
@@ -34,9 +36,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-from core.printlogs_db import save_export_transactional, OrderRow
 
 from tkinter import ttk, messagebox, filedialog
+
+from core.printlogs_db import save_export_transactional, OrderRow
+
 
 def _round_up_cm(value_m: float) -> float:
     """
@@ -44,6 +48,7 @@ def _round_up_cm(value_m: float) -> float:
     Ex: 6.361 -> 6.37
     """
     return math.ceil(value_m * 100) / 100
+
 
 # ---- PDF (reportlab) ----
 try:
@@ -55,13 +60,15 @@ except Exception:
     A4 = None
     pdfmetrics = None
 
-# ---- PDF -> JPG (PyMuPDF) ----
+
+# ---- JPG (PyMuPDF) ----
 try:
     import fitz  # PyMuPDF
     _HAS_PYMUPDF = True
 except Exception:
     fitz = None
     _HAS_PYMUPDF = False
+
 
 # ---- Drag & drop (tkinterdnd2) ----
 try:
@@ -71,6 +78,20 @@ except Exception:
     DND_FILES = None
     _HAS_DND = False
 
+# ---- JPG export (PyMuPDF + Pillow) ----
+try:
+    import fitz  # PyMuPDF
+    _HAS_PYMUPDF = True
+except Exception:
+    fitz = None
+    _HAS_PYMUPDF = False
+
+try:
+    from PIL import Image
+    _HAS_PIL = True
+except Exception:
+    Image = None
+    _HAS_PIL = False
 
 # --------------------------
 # Config / storage
@@ -82,7 +103,13 @@ CFG_PATH = APP_DIR / "config.json"
 DEFAULT_CFG = {
     "report_mode_default": "full",     # "full" | "summary"
     "export_dir": r"C:\Registro",      # pasta padrão de exportação
+
+    # JPG espelhado (tamanho final)
+    "mirror_jpg_width_mode": "17",     # "17" | "21" | "custom"
+    "mirror_jpg_width_cm_custom": 17.0,
+    "mirror_jpg_dpi": 300,             # usado para converter cm->px (qualidade)
 }
+
 
 def load_cfg() -> dict:
     if CFG_PATH.exists():
@@ -91,6 +118,7 @@ def load_cfg() -> dict:
         except Exception:
             return dict(DEFAULT_CFG)
     return dict(DEFAULT_CFG)
+
 
 def save_cfg(cfg: dict) -> None:
     try:
@@ -110,7 +138,7 @@ class Job:
     height_mm: float
     vpos_mm: float
     real_mm: float
-    src_file: str
+    src_file: str  # caminho completo (ajuda no dedupe)
 
     @property
     def real_m(self) -> float:
@@ -146,6 +174,7 @@ class Block:
 _RE_KV = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$")
 _RE_SECTION = re.compile(r"^\s*\[(.+?)\]\s*$")
 
+
 def _parse_datetime(s: str) -> Optional[datetime]:
     s = (s or "").strip()
     for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M"):
@@ -155,11 +184,13 @@ def _parse_datetime(s: str) -> Optional[datetime]:
             pass
     return None
 
+
 def _fabric_from_document(doc: str) -> str:
     parts = [p.strip() for p in (doc or "").split(" - ")]
     if len(parts) >= 2 and parts[1].strip():
         return parts[1].strip().upper()
     return "DESCONHECIDO"
+
 
 def parse_log_txt(path: str) -> Optional[Job]:
     try:
@@ -200,13 +231,11 @@ def parse_log_txt(path: str) -> Optional[Job]:
 
     height_mm = _f(item1.get("HeightMM", "0"))
     vpos_mm = _f(item1.get("VPositionMM", "0"))
+
     # Real é apenas o comprimento impresso (HeightMM), não soma deslocamento
     real_mm = height_mm
 
-
     fabric = _fabric_from_document(document)
-
-    # job.source_path = path
 
     return Job(
         end_time=end_dt,
@@ -215,8 +244,9 @@ def parse_log_txt(path: str) -> Optional[Job]:
         height_mm=height_mm,
         vpos_mm=vpos_mm,
         real_mm=real_mm,
-        src_file=str(path),
+        src_file=str(path),  # caminho completo
     )
+
 
 def build_blocks(Jobs: List[Job], machine: str) -> List[Block]:
     Jobs_sorted = sorted(Jobs, key=lambda j: j.end_time, reverse=True)
@@ -245,6 +275,44 @@ def build_blocks(Jobs: List[Job], machine: str) -> List[Block]:
 
 
 # --------------------------
+# JPG helpers
+# --------------------------
+def _cm_to_px(cm: float, dpi: int) -> int:
+    return max(1, int(round((cm / 2.54) * dpi)))
+
+
+def pdf_first_page_to_jpg_sized(pdf_path: str, jpg_path: str, target_width_cm: float, dpi: int = 300) -> None:
+    """
+    Converte a primeira página de um PDF para JPG com largura física desejada (em cm).
+    Mantém proporção automaticamente.
+    """
+    if not _HAS_PYMUPDF or fitz is None:
+        raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
+
+    if target_width_cm <= 0:
+        raise ValueError("target_width_cm deve ser > 0")
+
+    width_px = _cm_to_px(float(target_width_cm), int(dpi))
+
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc.load_page(0)
+        page_width_pt = float(page.rect.width)  # pontos (1/72")
+        if page_width_pt <= 0:
+            raise RuntimeError("Página inválida para renderizar.")
+
+        # zoom: pixels = points * zoom
+        zoom = width_px / page_width_pt
+        mat = fitz.Matrix(zoom, zoom)
+
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=95)
+        from PIL import Image
+    finally:
+        doc.close()
+
+# --------------------------
 # PDF helpers
 # --------------------------
 def _sanitize_filename(name: str) -> str:
@@ -254,11 +322,14 @@ def _sanitize_filename(name: str) -> str:
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
+
 def _pdf_need_new_page(y: float, min_y: float = 60) -> bool:
     return y < min_y
 
+
 def _roll_total_m(blocks: List[Block]) -> float:
     return sum(b.total_m for b in blocks)
+
 
 def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, top_y: float) -> float:
     c.setFont("Helvetica-Bold", 14)
@@ -271,6 +342,7 @@ def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, 
     )
     c.line(40, top_y - 26, page_w - 40, top_y - 26)
     return top_y - 40
+
 
 def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
     """
@@ -316,6 +388,7 @@ def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> L
 
     return lines
 
+
 def _draw_wrapped_cell(c, x: float, y_top: float, lines: List[str], font_name: str, font_size: int, line_h: float):
     c.setFont(font_name, font_size)
     yy = y_top
@@ -343,11 +416,11 @@ def _pdf_draw_summary_table(
     """
     # Larguras FIXAS (A4 com margem 40)
     # total útil = 595 - 80 = 515
-    w_num   = 30
-    w_fab   = 180
+    w_num = 30
+    w_fab = 180
     w_total = 90
-    w_Jobs  = 70
-    w_last  = 145   # soma = 515
+    w_Jobs = 70
+    w_last = 145  # soma = 515
 
     def _reprint_summary_header(y0: float) -> float:
         c.setFont("Helvetica-Bold", 12)
@@ -360,12 +433,16 @@ def _pdf_draw_summary_table(
         # Cabeçalho colunas
         c.setFont("Helvetica-Bold", 10)
         x = 40
-        c.drawString(x, y0, "#"); x += w_num
-        c.drawString(x, y0, "Tecido"); x += w_fab
+        c.drawString(x, y0, "#")
+        x += w_num
+        c.drawString(x, y0, "Tecido")
+        x += w_fab
 
         # Centraliza também o TÍTULO dessas colunas
-        c.drawCentredString(x + (w_total / 2), y0, "Total (m)"); x += w_total
-        c.drawCentredString(x + (w_Jobs / 2),  y0, "Qtd Pedidos");  x += w_Jobs
+        c.drawCentredString(x + (w_total / 2), y0, "Total (m)")
+        x += w_total
+        c.drawCentredString(x + (w_Jobs / 2), y0, "Qtd Pedidos")
+        x += w_Jobs
 
         c.drawString(x, y0, "Último fim")
         y0 -= 14
@@ -388,14 +465,17 @@ def _pdf_draw_summary_table(
             y = _reprint_summary_header(y)
 
         x = 40
-        c.drawString(x, y, str(i)); x += w_num
-        c.drawString(x, y, b.fabric); x += w_fab
+        c.drawString(x, y, str(i))
+        x += w_num
+        c.drawString(x, y, b.fabric)
+        x += w_fab
 
         # Total centralizado (centro real da coluna)
         c.drawCentredString(x + (w_total / 2), y, f"{_round_up_cm(b.total_m):.2f} m")
 
         # Qtd Pedidos centralizado (centro real da coluna)
-        c.drawCentredString(x + (w_Jobs / 2), y, str(b.job_count)); x += w_Jobs
+        c.drawCentredString(x + (w_Jobs / 2), y, str(b.job_count))
+        x += w_Jobs
 
         c.drawString(x, y, b.newest_end.strftime("%d/%m/%Y %H:%M:%S"))
         y -= 14
@@ -469,9 +549,9 @@ def export_pdf(
     # --------------------
 
     # Larguras FIXAS (A4 com margem 40) => 515 úteis
-    w_end  = 120
-    w_doc  = 260
-    w_fab  = 95
+    w_end = 120
+    w_doc = 260
+    w_fab = 95
     w_size = 40  # soma = 515
 
     font = "Helvetica"
@@ -490,9 +570,12 @@ def export_pdf(
 
         c.setFont(font_bold, fs_head)
         xh = 40
-        c.drawString(xh, y0, "EndTime"); xh += w_end
-        c.drawString(xh, y0, "Arquivo"); xh += w_doc
-        c.drawString(xh, y0, "Tecido");  xh += w_fab
+        c.drawString(xh, y0, "EndTime")
+        xh += w_end
+        c.drawString(xh, y0, "Arquivo")
+        xh += w_doc
+        c.drawString(xh, y0, "Tecido")
+        xh += w_fab
         c.drawString(xh, y0, "Tamanho")
         y0 -= 14
         c.setFont(font, fs_row)
@@ -569,20 +652,44 @@ def export_pdf(
     _end_page()
     c.save()
 
-def pdf_first_page_to_jpg(pdf_path: str, jpg_path: str, dpi: int = 300) -> None:
+def pdf_first_page_to_jpg_scaled(
+    pdf_path: str,
+    jpg_path: str,
+    *,
+    target_width_cm: float,
+    dpi: int = 300,
+    quality: int = 95,
+) -> None:
     """
-    Converte a primeira página de um PDF para JPG.
+    Renderiza a 1ª página do PDF em JPG com LARGURA física alvo (cm).
+    - Gera pixels suficientes para bater a largura em cm no DPI informado
+    - Salva o JPG com metadata dpi=(dpi,dpi) pra impressão sair no tamanho certo
     """
-    if not _HAS_PYMUPDF or fitz is None:
-        raise RuntimeError("PyMuPDF não instalado.")
+    if not _HAS_PYMUPDF:
+        raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
+    if not _HAS_PIL:
+        raise RuntimeError("Pillow não instalado. Instale: pip install pillow")
+
+    # largura em pixels que corresponde a target_width_cm no dpi desejado
+    width_in = float(target_width_cm) / 2.54
+    target_width_px = int(round(width_in * dpi))
 
     doc = fitz.open(pdf_path)
     try:
         page = doc.load_page(0)
-        zoom = dpi / 72.0
+
+        # page.rect.width está em pontos (pt). 1 pt = 1/72 inch.
+        page_width_pt = float(page.rect.width)
+
+        # PyMuPDF: pixels = pt * zoom  (onde zoom= dpi/72 se for 1:1 no dpi)
+        # Aqui a gente força a largura final: zoom = target_px / page_width_pt
+        zoom = target_width_px / page_width_pt
         mat = fitz.Matrix(zoom, zoom)
+
         pix = page.get_pixmap(matrix=mat, alpha=False)
-        pix.save(jpg_path)
+
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
     finally:
         doc.close()
 
@@ -630,6 +737,32 @@ class PXPrintLogsUI(ttk.Frame):
         self.lbl_machine = ttk.Label(top, text="Máquina do lote: (não definida)")
         self.lbl_machine.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
+        # ---- JPG espelhado: tamanho ----
+        ttk.Label(top, text="JPG espelhado").grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+        self.var_jpg_mode = tk.StringVar(value=self.cfg.get("mirror_jpg_width_mode", "17"))
+        self.var_jpg_custom = tk.StringVar(value=str(self.cfg.get("mirror_jpg_width_cm_custom", 17.0)))
+
+        ttk.Radiobutton(top, text="17 cm", value="17", variable=self.var_jpg_mode)\
+            .grid(row=3, column=1, padx=(6, 0), sticky="w", pady=(6, 0))
+        ttk.Radiobutton(top, text="21 cm", value="21", variable=self.var_jpg_mode)\
+            .grid(row=3, column=2, padx=(6, 0), sticky="w", pady=(6, 0))
+        ttk.Radiobutton(top, text="Personalizado", value="custom", variable=self.var_jpg_mode)\
+            .grid(row=3, column=3, padx=(6, 0), sticky="w", pady=(6, 0))
+
+        self.ent_jpg_custom = ttk.Entry(top, textvariable=self.var_jpg_custom, width=6)
+        self.ent_jpg_custom.grid(row=3, column=4, padx=(6, 0), sticky="w", pady=(6, 0))
+        ttk.Label(top, text="cm").grid(row=3, column=5, padx=(4, 0), sticky="w", pady=(6, 0))
+
+        ttk.Button(top, text="Definir JPG como padrão", command=self.on_set_default_jpg)\
+            .grid(row=3, column=6, padx=(12, 0), sticky="w", pady=(6, 0))
+
+        def _update_custom_state(*_):
+            self.ent_jpg_custom.configure(state=("normal" if self.var_jpg_mode.get() == "custom" else "disabled"))
+
+        _update_custom_state()
+        self.var_jpg_mode.trace_add("write", _update_custom_state)
+
         btns = ttk.Frame(top)
         btns.grid(row=2, column=4, columnspan=3, sticky="e", pady=(6, 0))
 
@@ -641,14 +774,13 @@ class PXPrintLogsUI(ttk.Frame):
         ttk.Button(row_actions, text="Importar pasta", command=self.on_import_folder).pack(side="left", padx=4)
         ttk.Button(row_actions, text="Limpar", command=self.on_clear).pack(side="left", padx=4)
 
-        # Linha 2: exportação (fica mais largo e não corta)
+        # Linha 2: exportação
         row_export = ttk.Frame(btns)
         row_export.pack(anchor="e")
 
         ttk.Button(row_export, text="Exportar PDF Normal", command=lambda: self.on_export(which="normal")).pack(side="left", padx=4)
-        ttk.Button(row_export, text="Exportar PDF Espelhado", command=lambda: self.on_export(which="mirror")).pack(side="left", padx=4)
+        ttk.Button(row_export, text="Exportar JPG Espelhado", command=lambda: self.on_export(which="mirror")).pack(side="left", padx=4)
         ttk.Button(row_export, text="Exportar Ambos", command=lambda: self.on_export(which="both")).pack(side="left", padx=4)
-
 
         drop_frame = ttk.LabelFrame(self, text="Arraste e solte logs .txt aqui")
         drop_frame.pack(fill="x", padx=10, pady=(0, 10))
@@ -711,6 +843,9 @@ class PXPrintLogsUI(ttk.Frame):
 
         self._ensure_export_dir()
 
+    # --------------------------
+    # Config helpers
+    # --------------------------
     def _ensure_export_dir(self):
         export_dir = Path(self.cfg.get("export_dir", r"C:\Registro"))
         try:
@@ -733,6 +868,38 @@ class PXPrintLogsUI(ttk.Frame):
         save_cfg(self.cfg)
         messagebox.showinfo("Padrão salvo", "O modo de PDF foi definido como padrão.")
 
+    def _get_mirror_target_cm(self) -> float:
+        mode = (self.var_jpg_mode.get() or "").strip()
+        if mode in ("17", "21"):
+            return float(mode)
+
+        # custom
+        s = (self.var_jpg_custom.get() or "").replace(",", ".").strip()
+        try:
+            v = float(s)
+        except Exception:
+            raise ValueError("Largura personalizada inválida.")
+
+        # limites anti-erro
+        if v < 8 or v > 40:
+            raise ValueError("Use entre 8 cm e 40 cm.")
+        return v
+
+    def on_set_default_jpg(self):
+        try:
+            cm = self._get_mirror_target_cm()
+        except Exception as e:
+            messagebox.showerror("JPG", str(e))
+            return
+
+        self.cfg["mirror_jpg_width_mode"] = self.var_jpg_mode.get()
+        self.cfg["mirror_jpg_width_cm_custom"] = float(cm)
+        save_cfg(self.cfg)
+        messagebox.showinfo("JPG", f"Padrão salvo: {cm:.1f} cm")
+
+    # --------------------------
+    # Machine / naming
+    # --------------------------
     def ask_machine(self) -> Optional[str]:
         win = tk.Toplevel(self)
         win.title("Selecionar máquina")
@@ -784,6 +951,9 @@ class PXPrintLogsUI(ttk.Frame):
             self.var_roll.set(name)
         return _sanitize_filename(name)
 
+    # --------------------------
+    # Drag & drop
+    # --------------------------
     def on_drop_files(self, event):
         raw = getattr(event, "data", "") or ""
         files = self._split_dnd_files(raw)
@@ -812,6 +982,9 @@ class PXPrintLogsUI(ttk.Frame):
             out.append(buff.strip())
         return [p.strip() for p in out if p.strip()]
 
+    # --------------------------
+    # Import
+    # --------------------------
     def on_import_files(self):
         paths = filedialog.askopenfilenames(
             title="Selecionar logs .txt",
@@ -836,18 +1009,36 @@ class PXPrintLogsUI(ttk.Frame):
             messagebox.showwarning("Sem .txt", "Solte/seleciona apenas arquivos .txt.")
             return
 
-        machine = self.ask_machine()
-        if not machine:
-            self.status.configure(text="Importação cancelada.")
-            return
+        # Import incremental:
+        # - Se já existe máquina definida, não pergunta de novo
+        # - Não apaga import anterior
+        if self.machine:
+            machine = self.machine
+        else:
+            machine = self.ask_machine()
+            if not machine:
+                self.status.configure(text="Importação cancelada.")
+                return
+
+            self.machine = machine
+            self.lbl_machine.configure(text=f"Máquina do lote: {machine}")
+
+            if not self.var_roll.get().strip():
+                self.var_roll.set(self._auto_roll_name())
 
         parsed: List[Job] = []
         skipped_invalid = 0
 
+        # Dedupe por caminho completo (evita reimportar o mesmo arquivo)
+        existing_src = set(j.src_file for j in self.Jobs) if self.Jobs else set()
+
         for p in txts:
-            j = parse_log_txt(p)
+            p_full = str(p)
+            if p_full in existing_src:
+                continue
+
+            j = parse_log_txt(p_full)
             if not j:
-                # arquivo ignorado porque não foi parseado
                 skipped_invalid += 1
                 continue
 
@@ -859,66 +1050,34 @@ class PXPrintLogsUI(ttk.Frame):
             # Recalcula real_m (sanity check explícita)
             correct_real_m = j.height_mm / 1000.0
             if abs(j.real_m - correct_real_m) > 0.001:
-                # Inconsistência grave detectada
                 skipped_invalid += 1
                 continue
 
             parsed.append(j)
+            existing_src.add(j.src_file)
 
-        if not parsed:
+        if not parsed and not self.Jobs:
             messagebox.showerror("Falha", "Nenhum log válido encontrado.")
             return
 
-        self.machine = machine
-        self.lbl_machine.configure(text=f"Máquina do lote: {machine}")
+        # Merge incremental
+        if parsed:
+            self.Jobs.extend(parsed)
 
-        if not self.var_roll.get().strip():
-            self.var_roll.set(self._auto_roll_name())
-
-                # Se já existe um lote carregado, somar os novos logs no lote atual
-        if self.machine and self.machine != machine:
-            messagebox.showwarning(
-                "Máquina diferente",
-                f"Você já tem logs carregados da máquina {self.machine}.\n"
-                f"Você está tentando importar logs da máquina {machine}.\n\n"
-                "Limpe antes de importar outra máquina."
-            )
-            return
-
-        # Define máquina do lote (se ainda não tinha)
-        self.machine = machine
-        self.lbl_machine.configure(text=f"Máquina do lote: {machine}")
-
-        if not self.var_roll.get().strip():
-            self.var_roll.set(self._auto_roll_name())
-
-        # APPEND: junta sem perder o que já existia
-        existing = list(self.Jobs) if self.Jobs else []
-        combined = existing + parsed
-
-        # (Opcional mas recomendado) remover duplicados pelo src_file
-        seen = set()
-        deduped = []
-        for j in combined:
-            key = j.src_file  # ou (j.end_time, j.document, j.height_mm) se preferir
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(j)
-
-        self.Jobs = deduped
         self.blocks = build_blocks(self.Jobs, machine)
 
         self.refresh_blocks()
         self.clear_details()
 
         extra = f" | Ignorados: {skipped_invalid}" if skipped_invalid else ""
+        added = f" | +{len(parsed)} novos" if parsed else " | +0 novos"
         self.status.configure(
-            text=f"Importado: +{len(parsed)} logs | Total: {len(self.Jobs)} | Blocos: {len(self.blocks)} | Máquina: {machine}{extra}"
+            text=f"Importado total: {len(self.Jobs)} logs{added} | Blocos: {len(self.blocks)} | Máquina: {machine}{extra}"
         )
 
-
-
+    # --------------------------
+    # Clear / refresh
+    # --------------------------
     def on_clear(self):
         self.machine = None
         self.Jobs = []
@@ -980,6 +1139,9 @@ class PXPrintLogsUI(ttk.Frame):
                 ),
             )
 
+    # --------------------------
+    # Export
+    # --------------------------
     def _get_export_dir(self) -> Path:
         export_dir = Path(self.cfg.get("export_dir", r"C:\Registro"))
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -998,6 +1160,10 @@ class PXPrintLogsUI(ttk.Frame):
             messagebox.showerror("Dependência faltando", "Instale pymupdf: pip install pymupdf")
             return
 
+        if not _HAS_PIL:
+            messagebox.showerror("Dependência faltando", "Instale pillow: pip install pillow")
+            return
+
         roll = self._get_roll_name()
         mode = self.var_mode.get()
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
@@ -1006,10 +1172,14 @@ class PXPrintLogsUI(ttk.Frame):
 
         # Nomes finais
         normal_path = str(out_dir / f"{roll}_{mode_tag}_roll.pdf")
-        mirror_path = str(out_dir / f"{roll}_{mode_tag}_roll.jpg")
+        mirror_path = str(out_dir / f"{roll}_{mode_tag}_roll.jpg")  # espelhado é JPG
 
-        # PDF temporário para gerar JPG
+        # PDF temporário (espelhado) para gerar JPG
         tmp_mirror_pdf = str(out_dir / f"{roll}_{mode_tag}_roll.tmp.pdf")
+
+        # parâmetros do JPG (calcula 1 vez e reutiliza)
+        target_cm = float(self._get_mirror_target_cm())
+        dpi = int(self.cfg.get("mirror_jpg_dpi", 300))
 
         # Validação de integridade
         for j in self.Jobs:
@@ -1017,10 +1187,7 @@ class PXPrintLogsUI(ttk.Frame):
                 messagebox.showerror("Dados inválidos", f"HeightMM inválido no job: {j.document}")
                 return
             if abs(j.real_m - (j.height_mm / 1000.0)) > 0.001:
-                messagebox.showerror(
-                    "Dados inválidos",
-                    "Inconsistência em real_m detectada."
-                )
+                messagebox.showerror("Dados inválidos", "Inconsistência em real_m detectada.")
                 return
 
         try:
@@ -1029,14 +1196,26 @@ class PXPrintLogsUI(ttk.Frame):
 
             elif which == "mirror":
                 export_pdf(tmp_mirror_pdf, self.blocks, roll, self.machine, mode=mode, mirrored=True)
-                pdf_first_page_to_jpg(tmp_mirror_pdf, mirror_path, dpi=300)
+                pdf_first_page_to_jpg_scaled(
+                    tmp_mirror_pdf,
+                    mirror_path,
+                    target_width_cm=target_cm,
+                    dpi=dpi,
+                    quality=95,
+                )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
             elif which == "both":
                 export_pdf(normal_path, self.blocks, roll, self.machine, mode=mode, mirrored=False)
 
                 export_pdf(tmp_mirror_pdf, self.blocks, roll, self.machine, mode=mode, mirrored=True)
-                pdf_first_page_to_jpg(tmp_mirror_pdf, mirror_path, dpi=300)
+                pdf_first_page_to_jpg_scaled(
+                    tmp_mirror_pdf,
+                    mirror_path,
+                    target_width_cm=target_cm,
+                    dpi=dpi,
+                    quality=95,
+                )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
             else:
@@ -1068,6 +1247,8 @@ class PXPrintLogsUI(ttk.Frame):
                 "output_dir": str(out_dir),
                 "normal_path": normal_path if which in ("normal", "both") else None,
                 "mirror_path": mirror_path if which in ("mirror", "both") else None,
+                "mirror_width_cm": (target_cm if which in ("mirror", "both") else None),
+                "mirror_dpi": (dpi if which in ("mirror", "both") else None),
             }
 
             roll_id = save_export_transactional(
@@ -1080,14 +1261,10 @@ class PXPrintLogsUI(ttk.Frame):
                 event_payload=payload,
             )
 
-            self.status.configure(
-                text=self.status.cget("text") + f" | DB ok (roll_id={roll_id})"
-            )
+            self.status.configure(text=self.status.cget("text") + f" | DB ok (roll_id={roll_id})")
 
         except Exception as e:
-            self.status.configure(
-                text=self.status.cget("text") + f" | DB erro: {type(e).__name__}"
-            )
+            self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")
 
         # -------------------------
         # Mensagem final
@@ -1100,16 +1277,9 @@ class PXPrintLogsUI(ttk.Frame):
                 f"{Path(mirror_path).name}"
             )
         elif which == "normal":
-            messagebox.showinfo(
-                "Exportado",
-                f"Arquivo gerado em:\n{out_dir}\n\n{Path(normal_path).name}"
-            )
+            messagebox.showinfo("Exportado", f"Arquivo gerado em:\n{out_dir}\n\n{Path(normal_path).name}")
         else:
-            messagebox.showinfo(
-                "Exportado",
-                f"Arquivo gerado em:\n{out_dir}\n\n{Path(mirror_path).name}"
-            )
-
+            messagebox.showinfo("Exportado", f"Arquivo gerado em:\n{out_dir}\n\n{Path(mirror_path).name}")
 
 def build_ui(parent):
     return PXPrintLogsUI(parent)
