@@ -1,2 +1,2 @@
-__version__ = "0.2.2"
-
+APP_NAME = "Projeto Jocasta"
+APP_VERSION = "0.2.3"

@@ -32,6 +32,7 @@ import re
 import json
 import math
 import tkinter as tk
+from core.version import APP_VERSION
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1341,7 +1342,7 @@ class PXPrintLogsUI(ttk.Frame):
                 machine=self.machine,
                 roll_name=roll,
                 export_mode=mode,
-                app_version="dev",
+                app_version=APP_VERSION,
                 orders=orders,
                 event_type="EXPORT_ROLL",
                 event_payload=payload,
