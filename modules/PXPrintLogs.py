@@ -36,11 +36,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-
+from core.config import load_config  # core (objeto PXCoreConfig)
 from tkinter import ttk, messagebox, filedialog
-
 from core.printlogs_db import save_export_transactional, OrderRow
-
 
 def _round_up_cm(value_m: float) -> float:
     """
@@ -102,7 +100,7 @@ CFG_PATH = APP_DIR / "config.json"
 
 DEFAULT_CFG = {
     "report_mode_default": "full",     # "full" | "summary"
-    "export_dir": r"C:\Registro",      # pasta padrão de exportação
+    # "export_dir": r"C:\Registro",      # legado (não usar mais)
 
     # JPG espelhado (tamanho final)
     "mirror_jpg_width_mode": "17",     # "17" | "21" | "custom"
@@ -273,6 +271,53 @@ def build_blocks(Jobs: List[Job], machine: str) -> List[Block]:
 
     return blocks
 
+# --------------------------
+# Output dirs (PXCore base)
+# --------------------------
+MODULE_NAME = "PXPrintLogs"
+
+def _pxcore_base_dir() -> Path:
+    cfg = load_config()  # PXCoreConfig (objeto)
+    base_dir = getattr(cfg, "base_dir", None) or r"C:\PXCore"
+    return Path(base_dir)
+
+def _ym(dt: datetime) -> tuple[str, str]:
+    return f"{dt.year:04d}", f"{dt.month:02d}"
+
+def _pdf_out_dir(dt: datetime) -> Path:
+    # SOMENTE PDFs
+    y, m = _ym(dt)
+    out = _pxcore_base_dir() / "pdf" / "PXPrintLogs" / "rolls" / y / m
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+def _print_out_dir(dt: datetime) -> Path:
+    # Operacional (JPG espelhado)
+    y, m = _ym(dt)
+    out = _pxcore_base_dir() / "print" / MODULE_NAME / "jpg" / y / m
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+def _temp_dir() -> Path:
+    out = _pxcore_base_dir() / "temp" / MODULE_NAME
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+def _versioned_path(path: Path) -> Path:
+    """Evita sobrescrever: se existir, cria _v2, _v3..."""
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    m = re.search(r"_v(\d+)$", stem, flags=re.IGNORECASE)
+    base = stem[:m.start()] if m else stem
+
+    n = 2
+    while True:
+        cand = path.with_name(f"{base}_v{n}{path.suffix}")
+        if not cand.exists():
+            return cand
+        n += 1
 
 # --------------------------
 # JPG helpers
@@ -308,7 +353,7 @@ def pdf_first_page_to_jpg_sized(pdf_path: str, jpg_path: str, target_width_cm: f
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=95)
-        from PIL import Image
+        #from PIL import Image
     finally:
         doc.close()
 
@@ -470,13 +515,15 @@ def _pdf_draw_summary_table(
         c.drawString(x, y, b.fabric)
         x += w_fab
 
-        # Total centralizado (centro real da coluna)
+        # Total (coluna Total)
         c.drawCentredString(x + (w_total / 2), y, f"{_round_up_cm(b.total_m):.2f} m")
+        x += w_total
 
-        # Qtd Pedidos centralizado (centro real da coluna)
+        # Qtd Pedidos (coluna Qtd)
         c.drawCentredString(x + (w_Jobs / 2), y, str(b.job_count))
         x += w_Jobs
 
+        # Último fim (coluna Último fim)
         c.drawString(x, y, b.newest_end.strftime("%d/%m/%Y %H:%M:%S"))
         y -= 14
 
@@ -700,7 +747,7 @@ class PXPrintLogsUI(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
 
-        self.cfg = load_cfg()
+        self.mcfg = load_cfg()
         self.machine: Optional[str] = None
         self.Jobs: List[Job] = []
         self.blocks: List[Block] = []
@@ -717,7 +764,7 @@ class PXPrintLogsUI(ttk.Frame):
             .grid(row=0, column=2, padx=(0, 12), sticky="w")
 
         ttk.Label(top, text="Modo do PDF").grid(row=0, column=3, sticky="w")
-        self.var_mode = tk.StringVar(value=self.cfg.get("report_mode_default", "full"))
+        self.var_mode = tk.StringVar(value=self.mcfg.get("report_mode_default", "full"))
         ttk.Radiobutton(top, text="Completo", value="full", variable=self.var_mode)\
             .grid(row=0, column=4, padx=(6, 0), sticky="w")
         ttk.Radiobutton(top, text="Resumido", value="summary", variable=self.var_mode)\
@@ -727,11 +774,11 @@ class PXPrintLogsUI(ttk.Frame):
             .grid(row=0, column=6, padx=(0, 12), sticky="w")
 
         ttk.Label(top, text="Pasta").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.var_export_dir = tk.StringVar(value=self.cfg.get("export_dir", r"C:\Registro"))
+        self.var_export_dir = tk.StringVar(value=str(_pdf_out_dir(datetime.now())))
         self.lbl_export_dir = ttk.Label(top, textvariable=self.var_export_dir)
         self.lbl_export_dir.grid(row=1, column=1, columnspan=5, sticky="w", padx=(6, 0), pady=(6, 0))
 
-        ttk.Button(top, text="Alterar pasta", command=self.on_change_export_dir)\
+        ttk.Button(top, text="Abrir pastas", command=self.on_open_folders_menu)\
             .grid(row=1, column=6, sticky="w", pady=(6, 0))
 
         self.lbl_machine = ttk.Label(top, text="Máquina do lote: (não definida)")
@@ -740,8 +787,8 @@ class PXPrintLogsUI(ttk.Frame):
         # ---- JPG espelhado: tamanho ----
         ttk.Label(top, text="JPG espelhado").grid(row=3, column=0, sticky="w", pady=(6, 0))
 
-        self.var_jpg_mode = tk.StringVar(value=self.cfg.get("mirror_jpg_width_mode", "17"))
-        self.var_jpg_custom = tk.StringVar(value=str(self.cfg.get("mirror_jpg_width_cm_custom", 17.0)))
+        self.var_jpg_mode = tk.StringVar(value=self.mcfg.get("mirror_jpg_width_mode", "17"))
+        self.var_jpg_custom = tk.StringVar(value=str(self.mcfg.get("mirror_jpg_width_cm_custom", 17.0)))
 
         ttk.Radiobutton(top, text="17 cm", value="17", variable=self.var_jpg_mode)\
             .grid(row=3, column=1, padx=(6, 0), sticky="w", pady=(6, 0))
@@ -847,25 +894,50 @@ class PXPrintLogsUI(ttk.Frame):
     # Config helpers
     # --------------------------
     def _ensure_export_dir(self):
-        export_dir = Path(self.cfg.get("export_dir", r"C:\Registro"))
+    # Exibe a pasta de PDFs (comprovantes) no UI
+        self.var_export_dir.set(str(_pdf_out_dir(datetime.now())))
+
+    def on_open_folders_menu(self):
+        """Abre um menu simples para escolher PDF/JPG."""
         try:
-            export_dir.mkdir(parents=True, exist_ok=True)
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Abrir pasta PDF (comprovantes)", command=self.open_pdf_folder)
+            menu.add_command(label="Abrir pasta JPG (operação)", command=self.open_jpg_folder)
+
+            # posiciona o menu perto do mouse
+            x = self.winfo_pointerx()
+            y = self.winfo_pointery()
+            menu.tk_popup(x, y)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def open_pdf_folder(self):
+        try:
+            folder = _pdf_out_dir(datetime.now())
+            os.startfile(str(folder))
         except Exception:
-            pass
-        self.var_export_dir.set(str(export_dir))
+            messagebox.showerror("Erro", "Não foi possível abrir a pasta de PDFs.")
+
+    def open_jpg_folder(self):
+        try:
+            folder = _print_out_dir(datetime.now())
+            os.startfile(str(folder))
+        except Exception:
+            messagebox.showerror("Erro", "Não foi possível abrir a pasta de JPGs.")
 
     def on_change_export_dir(self):
-        folder = filedialog.askdirectory(title="Escolher pasta de exportação")
-        if not folder:
-            return
-        self.cfg["export_dir"] = folder
-        save_cfg(self.cfg)
-        self._ensure_export_dir()
-        messagebox.showinfo("Pasta atualizada", f"Nova pasta padrão:\n{folder}")
+        try:
+            folder = Path(self.var_export_dir.get()).resolve()
+            os.startfile(str(folder))
+        except Exception:
+            messagebox.showerror("Erro", "Não foi possível abrir a pasta de PDFs.")
 
     def on_set_default_mode(self):
-        self.cfg["report_mode_default"] = self.var_mode.get()
-        save_cfg(self.cfg)
+        self.mcfg["report_mode_default"] = self.var_mode.get()
+        save_cfg(self.mcfg)
         messagebox.showinfo("Padrão salvo", "O modo de PDF foi definido como padrão.")
 
     def _get_mirror_target_cm(self) -> float:
@@ -892,9 +964,9 @@ class PXPrintLogsUI(ttk.Frame):
             messagebox.showerror("JPG", str(e))
             return
 
-        self.cfg["mirror_jpg_width_mode"] = self.var_jpg_mode.get()
-        self.cfg["mirror_jpg_width_cm_custom"] = float(cm)
-        save_cfg(self.cfg)
+        self.mcfg["mirror_jpg_width_mode"] = self.var_jpg_mode.get()
+        self.mcfg["mirror_jpg_width_cm_custom"] = float(cm)
+        save_cfg(self.mcfg)
         messagebox.showinfo("JPG", f"Padrão salvo: {cm:.1f} cm")
 
     # --------------------------
@@ -1143,7 +1215,7 @@ class PXPrintLogsUI(ttk.Frame):
     # Export
     # --------------------------
     def _get_export_dir(self) -> Path:
-        export_dir = Path(self.cfg.get("export_dir", r"C:\Registro"))
+        export_dir = Path(self.mcfg.get("export_dir", r"C:\Registro"))
         export_dir.mkdir(parents=True, exist_ok=True)
         return export_dir
 
@@ -1168,18 +1240,31 @@ class PXPrintLogsUI(ttk.Frame):
         mode = self.var_mode.get()
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
 
-        out_dir = self._get_export_dir()
+        # -------------------------
+        # Pastas padronizadas (PXCore base)
+        # -------------------------
+        dt = datetime.now()
+        pdf_dir = _pdf_out_dir(dt)       # .../pdf/PXPrintLogs/rolls/YYYY/MM
+        jpg_dir = _print_out_dir(dt)     # .../print/PXPrintLogs/jpg/YYYY/MM
+        tmp_dir = _temp_dir()            # .../temp/PXPrintLogs
 
-        # Nomes finais
-        normal_path = str(out_dir / f"{roll}_{mode_tag}_roll.pdf")
-        mirror_path = str(out_dir / f"{roll}_{mode_tag}_roll.jpg")  # espelhado é JPG
+        # -------------------------
+        # Nome padronizado
+        # -------------------------
+        date_iso = dt.strftime("%Y-%m-%d")
+        roll_safe = _sanitize_filename(roll)
+        base_name = f"{date_iso}_{self.machine}_{roll_safe}_{mode_tag}"
 
-        # PDF temporário (espelhado) para gerar JPG
-        tmp_mirror_pdf = str(out_dir / f"{roll}_{mode_tag}_roll.tmp.pdf")
+        # Nomes finais (sem sobrescrever: _v2, _v3...)
+        normal_path = str(_versioned_path(pdf_dir / f"{base_name}.pdf"))
+        mirror_path = str(_versioned_path(jpg_dir / f"{base_name}.jpg"))  # espelhado é JPG
+
+        # PDF temporário (espelhado) para gerar JPG (não fica na pasta final)
+        tmp_mirror_pdf = str(tmp_dir / f"{base_name}.tmp.pdf")
 
         # parâmetros do JPG (calcula 1 vez e reutiliza)
         target_cm = float(self._get_mirror_target_cm())
-        dpi = int(self.cfg.get("mirror_jpg_dpi", 300))
+        dpi = int(self.mcfg.get("mirror_jpg_dpi", 300))
 
         # Validação de integridade
         for j in self.Jobs:
@@ -1244,7 +1329,8 @@ class PXPrintLogsUI(ttk.Frame):
 
             payload = {
                 "which": which,
-                "output_dir": str(out_dir),
+                "pdf_dir": str(pdf_dir),
+                "jpg_dir": str(jpg_dir),
                 "normal_path": normal_path if which in ("normal", "both") else None,
                 "mirror_path": mirror_path if which in ("mirror", "both") else None,
                 "mirror_width_cm": (target_cm if which in ("mirror", "both") else None),
@@ -1269,17 +1355,26 @@ class PXPrintLogsUI(ttk.Frame):
         # -------------------------
         # Mensagem final
         # -------------------------
+        # Para o usuário, faz sentido mostrar a pasta do PDF (principal “comprovante”)
+        shown_dir = pdf_dir
+
         if which == "both":
             messagebox.showinfo(
                 "Exportado",
-                f"Arquivos gerados em:\n{out_dir}\n\n"
+                f"PDF (comprovante):\n{pdf_dir}\n"
+                f"JPG (operação):\n{jpg_dir}\n\n"
                 f"{Path(normal_path).name}\n"
                 f"{Path(mirror_path).name}"
             )
         elif which == "normal":
-            messagebox.showinfo("Exportado", f"Arquivo gerado em:\n{out_dir}\n\n{Path(normal_path).name}")
+            messagebox.showinfo(
+                "Exportado",
+                f"PDF (comprovante):\n{shown_dir}\n\n{Path(normal_path).name}"
+            )
         else:
-            messagebox.showinfo("Exportado", f"Arquivo gerado em:\n{out_dir}\n\n{Path(mirror_path).name}")
-
+            messagebox.showinfo(
+                "Exportado",
+                f"JPG (operação):\n{jpg_dir}\n\n{Path(mirror_path).name}"
+            )
 def build_ui(parent):
     return PXPrintLogsUI(parent)

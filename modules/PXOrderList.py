@@ -10,7 +10,6 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Tuple
 
-
 APP_NAME = "PXOrderList"
 DEFAULT_OUTPUT_DIR = r"C:\Listas"
 
@@ -23,7 +22,7 @@ BASE_JSON = {
     "client_name": "",
     "orders": [],
     "unique_name_chars": "",
-    "unique_nickname_chars": ""
+    "unique_nickname_chars": "",
 }
 
 # -----------------------------
@@ -58,16 +57,38 @@ def save_config(cfg: dict) -> None:
 # -----------------------------
 VALID_SIZES = {
     # Adulto
-    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG", "XLGG",
+    "PP",
+    "P",
+    "M",
+    "G",
+    "GG",
+    "XG",
+    "XGG",
+    "XXGG",
+    "XLGG",
     # Babylook
-    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG",
+    "BLPP",
+    "BLP",
+    "BLM",
+    "BLG",
+    "BLXG",
+    "BLGG",
+    "BLXGG",
+    "BLXXGG",
+    "BLXLGG",
     # Infantil com A
-    "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
+    "2A",
+    "4A",
+    "6A",
+    "8A",
+    "10A",
+    "12A",
+    "14A",
+    "16A",
 }
 
 # aceita "2-M", "10-BLP", "3-4A" etc.
 QTY_SIZE_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
-
 
 # -----------------------------
 # Helpers (iguais ao Flow)
@@ -79,8 +100,8 @@ def ensure_dir(path: str) -> None:
 def parse_qty_and_size(tok: str) -> Tuple[int, str]:
     """
     Aceita:
-      - QTY-SIZE (3-G, 2-BLP, 5-12A)
-      - SIZE sozinho (G, BLP, 12A) -> qty=1
+    - QTY-SIZE (3-G, 2-BLP, 5-12A)
+    - SIZE sozinho (G, BLP, 12A) -> qty=1
     Retorna (qty, size)
     """
     t = (tok or "").strip()
@@ -88,6 +109,7 @@ def parse_qty_and_size(tok: str) -> Tuple[int, str]:
         raise ValueError("Tamanho vazio (não permitido).")
 
     t = t.upper()
+
     m = QTY_SIZE_RE.match(t)
     if m:
         qty = int(m.group(1))
@@ -106,17 +128,19 @@ def parse_qty_and_size(tok: str) -> Tuple[int, str]:
 def display_size_token(size_token: str) -> str:
     """
     Para LISTA ORGANIZADA:
-      - "1-G" -> "G"
-      - "3-G" -> "3-G"
+    - "1-G" -> "G"
+    - "3-G" -> "3-G"
     """
     st = (size_token or "").strip()
     if not st:
         return ""
+
     m = QTY_SIZE_RE.match(st)
     if m:
         qty = int(m.group(1))
         size = m.group(2).strip().upper()
         return size if qty == 1 else f"{qty}-{size}"
+
     return st.upper()
 
 
@@ -128,11 +152,12 @@ def normalize_size_token(tok: str) -> str:
 def gender_from_size(size: str) -> str:
     """
     Regras (iguais ao Flow):
-      - Infantil (termina com A): Gender = C
-      - Babylook (contém BL): Gender = FE
-      - Senão: Gender = MA
+    - Infantil (termina com A): Gender = C
+    - Babylook (contém BL): Gender = FE
+    - Senão: Gender = MA
+
     Divergência:
-      - BL + A => erro
+    - BL + A => erro
     """
     s = (size or "").strip().upper()
     has_bl = "BL" in s
@@ -157,13 +182,10 @@ def build_json_preview(orders: List[dict]) -> str:
 def export_json(orders: List[dict], out_dir: str) -> str:
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     fp = os.path.join(out_dir, f"List-{stamp}.json")
-
     data = dict(BASE_JSON)
     data["orders"] = orders
-
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-
     return fp
 
 
@@ -197,9 +219,9 @@ def _is_size(tok: str) -> bool:
 class ParsedRow:
     name: str
     number: str
-    tams: Tuple[str, ...]     # TAMs encontrados (1..4)
-    s2: str                  # STRING2 (opcional)
-    s3: str                  # STRING3 (opcional)
+    tams: Tuple[str, ...]  # TAMs encontrados (1..4) (normalizados)
+    s2: str  # STRING2 (opcional)
+    s3: str  # STRING3 (opcional)
 
 
 def parse_line(line: str) -> ParsedRow | None:
@@ -222,7 +244,9 @@ def parse_line(line: str) -> ParsedRow | None:
         up = _upper(t)
 
         if _is_size(up):
-            tams.append(up)
+            # ✅ AJUSTE: normaliza tamanho aqui (remove espaços e padroniza "QTY-SIZE")
+            # Ex.: "2 - G" -> "2-G", "G " -> "1-G"
+            tams.append(normalize_size_token(up))
             continue
 
         if _is_number(t) and not number:
@@ -236,7 +260,6 @@ def parse_line(line: str) -> ParsedRow | None:
 
     if not tams:
         raise ValueError(f"Sem TAM1 reconhecido: {raw}")
-
     if len(tams) > 4:
         raise ValueError(f"Mais de 4 TAMs na linha: {raw}")
 
@@ -263,15 +286,12 @@ def build_output(rows: List[ParsedRow]) -> str:
     out_lines: List[str] = []
     for r in rows:
         cols: List[str] = [r.name, r.number]
-
         tam_list = [display_size_token(t) for t in r.tams] + [""] * (max_tams - len(r.tams))
         cols.extend(tam_list)
-
         if has_s2:
             cols.append(r.s2)
         if has_s3:
             cols.append(r.s3)
-
         out_lines.append(",".join(cols))
 
     return "\n".join(out_lines)
@@ -279,7 +299,6 @@ def build_output(rows: List[ParsedRow]) -> str:
 
 def process_text(text: str) -> List[ParsedRow]:
     parsed: List[ParsedRow] = []
-
     for i, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
@@ -301,27 +320,26 @@ def build_orders_from_orderlist(rows: List[ParsedRow]) -> List[dict]:
     - Nickname <- s2, BloodType <- s3
     """
     orders: List[dict] = []
-
     for r in rows:
         for tam in r.tams:
-            st = normalize_size_token(tam)
-            qty, size = parse_qty_and_size(st)
+            # tam já vem normalizado (ex.: "1-G", "2-G")
+            qty, size = parse_qty_and_size(tam)
             gender = gender_from_size(size)
-
-            orders.append({
-                "Name": r.name,
-                "Nickname": r.s2,
-                "Number": r.number,
-                "BloodType": r.s3,
-                "Gender": gender,
-                "ShortSleeve": f"{qty}-{size}",
-                "LongSleeve": "",
-                "Short": "",
-                "Pants": "",
-                "Tanktop": "",
-                "Vest": ""
-            })
-
+            orders.append(
+                {
+                    "Name": r.name,
+                    "Nickname": r.s2,
+                    "Number": r.number,
+                    "BloodType": r.s3,
+                    "Gender": gender,
+                    "ShortSleeve": f"{qty}-{size}",
+                    "LongSleeve": "",
+                    "Short": "",
+                    "Pants": "",
+                    "Tanktop": "",
+                    "Vest": "",
+                }
+            )
     return orders
 
 
@@ -342,15 +360,17 @@ class PXOrderListFrame(tk.Frame):
         # Header
         header = tk.Frame(self)
         header.pack(fill="x", padx=10, pady=(10, 6))
-
         tk.Label(header, text="PXOrderList", font=("Segoe UI", 16, "bold")).pack(side="left")
 
         # Output dir
         out_row = tk.Frame(self)
         out_row.pack(fill="x", padx=10, pady=(0, 8))
-
         tk.Button(out_row, text="Pasta...", command=self.pick_output_folder).pack(side="left")
-        self.lbl_out = tk.Label(out_row, text=f"Pasta de saída: {self.output_dir_var.get()}", font=("Segoe UI", 9))
+        self.lbl_out = tk.Label(
+            out_row,
+            text=f"Pasta de saída: {self.output_dir_var.get()}",
+            font=("Segoe UI", 9),
+        )
         self.lbl_out.pack(side="right")
 
         # Body
@@ -392,13 +412,14 @@ class PXOrderListFrame(tk.Frame):
         tk.Button(btns, text="Limpar", command=self.clear_all).pack(side="left")
         tk.Button(btns, text="Copiar lista", command=self.copy_list).pack(side="left", padx=6)
         tk.Button(btns, text="Copiar JSON", command=self.copy_json).pack(side="left", padx=6)
-
         tk.Button(btns, text="Gerar JSON", command=self.generate_json).pack(side="right")
         tk.Button(btns, text="Processar", command=self.process_and_preview).pack(side="right", padx=6)
 
         # Status
         self.status_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self.status_var, font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(0, 10))
+        tk.Label(self, textvariable=self.status_var, font=("Segoe UI", 9)).pack(
+            anchor="w", padx=10, pady=(0, 10)
+        )
 
         # Exemplo
         self.txt_in.insert(
@@ -406,7 +427,7 @@ class PXOrderListFrame(tk.Frame):
             "G,JÃO,10\n"
             "JOÃO,5,G,M\n"
             "MANEL,PP\n"
-            "JUACA,JUSÉ,PP\n"
+            "JUACA,JUSÉ,PP\n",
         )
 
     def _set_text_readonly(self, txt: tk.Text, readonly: bool) -> None:
@@ -420,7 +441,7 @@ class PXOrderListFrame(tk.Frame):
             cfg["output_dir"] = folder
             save_config(cfg)
             self.lbl_out.config(text=f"Pasta de saída: {folder}")
-            self.status_var.set(f"📁 Pasta de saída: {folder}")
+            self.status_var.set(f" Pasta de saída: {folder}")
 
     def ensure_output_dir(self) -> str:
         out = self.output_dir_var.get().strip() or DEFAULT_OUTPUT_DIR
@@ -447,17 +468,17 @@ class PXOrderListFrame(tk.Frame):
         root.clipboard_clear()
         root.clipboard_append(text)
         root.update()
-        self.status_var.set("📋 Lista organizada copiada.")
+        self.status_var.set(" Lista organizada copiada.")
 
     def copy_json(self) -> None:
         if not self._last_json.strip():
-            messagebox.showwarning(APP_NAME, "Ainda não há prévia do JSON. Clique em Processar.")
+            messagebox.showwarning(APP_NAME, "Ainda não há prévia do JSON.\nClique em Processar.")
             return
         root = self.winfo_toplevel()
         root.clipboard_clear()
         root.clipboard_append(self._last_json)
         root.update()
-        self.status_var.set("📋 JSON copiado.")
+        self.status_var.set(" JSON copiado.")
 
     def process_and_preview(self) -> None:
         raw = self.txt_in.get("1.0", "end").strip("\n")
@@ -493,7 +514,9 @@ class PXOrderListFrame(tk.Frame):
             self.txt_json.insert("1.0", preview)
             self._set_text_readonly(self.txt_json, True)
 
-            self.status_var.set(f"✅ Processado: {len(rows)} linha(s) | lista copiada | prévia JSON pronta.")
+            self.status_var.set(
+                f"✅ Processado: {len(rows)} linha(s) | lista copiada | prévia JSON pronta."
+            )
             self.nb.select(0)
 
         except Exception as e:
@@ -503,15 +526,18 @@ class PXOrderListFrame(tk.Frame):
     def generate_json(self) -> None:
         if not self._last_orders:
             self.process_and_preview()
-            if not self._last_orders:
-                return
+        if not self._last_orders:
+            return
 
         try:
             out_dir = self.ensure_output_dir()
             fp = export_json(self._last_orders, out_dir)
-            messagebox.showinfo(APP_NAME, f"JSON gerado:\n{fp}\n\nRegistros: {len(self._last_orders)}")
+            messagebox.showinfo(
+                APP_NAME, f"JSON gerado:\n{fp}\n\nRegistros: {len(self._last_orders)}"
+            )
             self.status_var.set(f"✅ JSON gerado: {fp} | Registros: {len(self._last_orders)}")
             self.nb.select(1)
+
         except Exception as e:
             messagebox.showerror(APP_NAME, str(e))
             self.status_var.set(f"❌ Erro: {e}")
@@ -526,10 +552,8 @@ def main() -> None:
     root.title(APP_NAME)
     root.geometry("1200x720")
     root.minsize(1000, 620)
-
     ui = build_ui(root)
     ui.pack(fill="both", expand=True)
-
     root.mainloop()
 
 

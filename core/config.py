@@ -102,7 +102,6 @@ def load_config() -> PXCoreConfig:
         _ensure_dirs(cfg)
         return cfg
 
-
 # =========================
 # 🔐 Dev password helpers
 # =========================
@@ -119,3 +118,37 @@ def verify_dev_password(cfg: PXCoreConfig, password: str) -> bool:
 def set_dev_password(cfg: PXCoreConfig, new_password: str) -> None:
     cfg.dev_password_hash = hash_password(new_password)
     save_config(cfg)
+
+# adicione no core/config.py
+
+def module_config_path(module_name: str) -> Path:
+    """
+    Caminho gravável de config por módulo:
+      - Windows: %APPDATA%\\PXCore\\modules\\<module_name>.json
+      - Linux: ~/.config/PXCore/modules/<module_name>.json
+    """
+    base_dir = _config_path().parent  # .../PXCore
+    mod_dir = base_dir / "modules"
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    return mod_dir / f"{module_name}.json"
+
+
+def read_module_cfg(module_name: str, defaults: dict) -> dict:
+    """
+    Lê config do módulo com defaults. Não explode se estiver corrompido.
+    """
+    path = module_config_path(module_name)
+    if not path.exists():
+        return dict(defaults)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+        if isinstance(raw, dict):
+            return {**defaults, **raw}
+    except Exception:
+        pass
+    return dict(defaults)
+
+
+def write_module_cfg(module_name: str, cfg: dict) -> None:
+    path = module_config_path(module_name)
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
