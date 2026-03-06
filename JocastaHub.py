@@ -99,6 +99,7 @@ class JocastaHub(RootBase):
             "Impressão": [
                 ("PXPrintLogs", "modules.PXPrintLogs"),
                 ("PXSearchOrders", "modules.PXSearchOrders"),  # histórico
+                ("PXPrintCalc", "modules.PXPrintCalc"),
                 ("PXPrint", "modules.PXPrint"),
             ],
             

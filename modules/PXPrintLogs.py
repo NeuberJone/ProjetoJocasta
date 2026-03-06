@@ -40,6 +40,7 @@ from typing import List, Optional
 from core.config import load_config  # core (objeto PXCoreConfig)
 from tkinter import ttk, messagebox, filedialog
 from core.printlogs_db import save_export_transactional, OrderRow
+from core.format import fmt_m, round_up_cm_m
 
 def _round_up_cm(value_m: float) -> float:
     """
@@ -1193,8 +1194,8 @@ class PXPrintLogsUI(ttk.Frame):
 
         title = (
             f"Tecido: {b.fabric} | Máquina: {b.machine} | Pedidos: {b.job_count} | "
-            f"Total: {_round_up_cm(b.total_m):.2f} m | "
-            f"{b.newest_end.strftime('%d/%m/%Y %H:%M:%S')} → {b.oldest_end.strftime('%d/%m/%Y %H:%M:%S')}"
+            f"Total: {fmt_m(b.total_m)} | "
+            f"{b.newest_end:%d/%m/%Y %H:%M:%S} → {b.oldest_end:%d/%m/%Y %H:%M:%S}"
         )
         self.var_detail_title.set(title)
 
@@ -1208,7 +1209,7 @@ class PXPrintLogsUI(ttk.Frame):
                     j.document,
                     f"{j.height_mm:.1f}",
                     f"{j.vpos_mm:.1f}",
-                    f"{_round_up_cm(j.real_m):.2f}",
+                    fmt_m(j.real_m, suffix=False),
                 ),
             )
 

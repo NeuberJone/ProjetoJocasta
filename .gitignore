@@ -29,3 +29,6 @@ RAWS/
 config.json
 
 raw.txt
+
+PXPrintCalc.py
+PXPrintCalc.fabrics.json

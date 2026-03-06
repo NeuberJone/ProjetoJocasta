@@ -1,15 +1,10 @@
-# core/paths.py
 from __future__ import annotations
 
 import os
-import re
 import sys
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-
-from core.config import load_config
-
-_INVALID_WIN = re.compile(r'[\\/:*?"<>|]')
 
 
 def is_frozen() -> bool:
@@ -17,8 +12,9 @@ def is_frozen() -> bool:
 
 
 def app_dir() -> Path:
-    """Pasta do app.
-    - Dev: pasta do projeto
+    """
+    Pasta do app.
+    - Dev: raiz do projeto
     - EXE (PyInstaller): pasta onde está o executável
     """
     if is_frozen():
@@ -26,21 +22,18 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-# Mantido por compatibilidade (evite usar para config do PXCore)
 def config_path() -> Path:
-    """Config LOCAL do app (legado).
-    Atenção: o config oficial do PXCore fica em APPDATA (core/config.py).
+    """
+    Caminho do config.json (local do app).
+    Mantém simples e portátil: o config fica junto do exe/projeto.
+    OBS: o PXCore config principal hoje está em APPDATA via core.config.
     """
     return app_dir() / "config.json"
 
 
-def default_base_dir() -> Path:
-    """Padrão que você quer: C:\PXCore"""
-    return Path(r"C:\PXCore")
-
-
-def ensure_dir(path: Path) -> None:
+def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def open_in_explorer(path: Path) -> None:
@@ -49,60 +42,61 @@ def open_in_explorer(path: Path) -> None:
     os.startfile(str(path))  # noqa: S606 (Windows-only)
 
 
-def pxcore_base_dir() -> Path:
-    cfg = load_config()
-    return Path(cfg.base_dir)
+# =========================
+# PXCore base + estrutura
+# =========================
+
+@dataclass(frozen=True)
+class PxDirs:
+    base: Path
+    lists: Path
+    json: Path
+    logs: Path
+    temp: Path
+    data: Path
+    pdf: Path
+    print: Path
+    exports: Path  # legado
 
 
-def safe_name(name: str, *, fallback: str = "SEM_NOME") -> str:
-    s = (name or "").strip()
-    if not s:
-        s = fallback
-    s = _INVALID_WIN.sub("-", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+def get_px_dirs(base_dir: str | Path) -> PxDirs:
+    base = Path(str(base_dir))
+    return PxDirs(
+        base=base,
+        lists=base / "lists",
+        json=base / "json",
+        logs=base / "logs",
+        temp=base / "temp",
+        data=base / "data",
+        pdf=base / "pdf",
+        print=base / "print",
+        exports=base / "exports",
+    )
 
 
-def ym_from_dt(dt: datetime | date | None) -> tuple[str, str]:
-    if dt is None:
-        dt = datetime.now()
-    if isinstance(dt, date) and not isinstance(dt, datetime):
-        y = dt.year
-        m = dt.month
-    else:
-        y = int(dt.year)
-        m = int(dt.month)
-    return f"{y:04d}", f"{m:02d}"
+def y_m(dt: datetime | None = None) -> tuple[str, str]:
+    dt = dt or datetime.now()
+    return dt.strftime("%Y"), dt.strftime("%m")
 
 
-def pdf_dir(module_name: str, *, category: str = "rolls", dt: datetime | date | None = None) -> Path:
-    """Diretório SOMENTE PDFs:
-    <base>/pdf/<Module>/<category>/YYYY/MM
+def pdf_rolls_dir(base_dir: str | Path, module: str, dt: datetime | None = None) -> Path:
     """
-    base = pxcore_base_dir()
-    y, m = ym_from_dt(dt)
-    out = base / "pdf" / safe_name(module_name) / safe_name(category) / y / m
-    ensure_dir(out)
-    return out
-
-
-def print_dir(module_name: str, *, kind: str = "jpg", dt: datetime | date | None = None) -> Path:
-    """Diretório operacional (impressão):
-    <base>/print/<Module>/<kind>/YYYY/MM
+    PDFs (comprovantes): base/pdf/<module>/rolls/YYYY/MM
     """
-    base = pxcore_base_dir()
-    y, m = ym_from_dt(dt)
-    out = base / "print" / safe_name(module_name) / safe_name(kind) / y / m
-    ensure_dir(out)
-    return out
+    y, m = y_m(dt)
+    return ensure_dir(Path(str(base_dir)) / "pdf" / module / "rolls" / y / m)
 
 
-def logs_dir(module_name: str, *, category: str = "imported", dt: datetime | date | None = None) -> Path:
-    """Diretório de logs brutos/diagnóstico:
-    <base>/logs/<Module>/<category>/YYYY/MM
+def print_jpg_dir(base_dir: str | Path, module: str, dt: datetime | None = None) -> Path:
     """
-    base = pxcore_base_dir()
-    y, m = ym_from_dt(dt)
-    out = base / "logs" / safe_name(module_name) / safe_name(category) / y / m
-    ensure_dir(out)
-    return out
+    Operação de impressão (JPG etc): base/print/<module>/jpg/YYYY/MM
+    """
+    y, m = y_m(dt)
+    return ensure_dir(Path(str(base_dir)) / "print" / module / "jpg" / y / m)
+
+
+def temp_module_dir(base_dir: str | Path, module: str) -> Path:
+    """
+    Temporários por módulo: base/temp/<module>
+    """
+    return ensure_dir(Path(str(base_dir)) / "temp" / module)

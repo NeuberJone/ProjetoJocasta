@@ -24,6 +24,7 @@ a = Analysis(
         "modules.PXSortLite",
         "modules.PXTotaList",
         "modules.PXSearchOrders",
+        "modules.PXPrintCalc",
     ],
     hookspath=[],
     hooksconfig={},
