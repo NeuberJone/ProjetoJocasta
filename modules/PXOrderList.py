@@ -10,8 +10,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import List, Tuple
 
+from core.config import load_config
+from core.paths import open_in_explorer
+
 APP_NAME = "PXOrderList"
-DEFAULT_OUTPUT_DIR = r"C:\Listas"
 
 # -----------------------------
 # JSON base (igual ao PXFlow)
@@ -26,30 +28,51 @@ BASE_JSON = {
 }
 
 # -----------------------------
-# Config persistente (igual ao Flow)
+# PXCore / pastas
 # -----------------------------
-def get_config_file() -> str:
-    base = os.environ.get("APPDATA") or str(Path.home())
-    cfg_dir = Path(base) / "PXList"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    return str(cfg_dir / "pxorderlist_config.json")
+MODULE_NAME = "PXOrderList"
 
 
-def load_config() -> dict:
-    fp = get_config_file()
-    if not os.path.exists(fp):
-        return {}
+def _pxcore_base_dir() -> Path:
+    cfg = load_config()
+    base_dir = getattr(cfg, "base_dir", None) or r"C:\PXCore"
+    return Path(base_dir)
+
+
+def _default_output_dir() -> Path:
+    out = _pxcore_base_dir() / "json" / MODULE_NAME
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+# -----------------------------
+# Config persistente do módulo
+# -----------------------------
+APP_DIR = Path(os.environ.get("APPDATA") or str(Path.home())) / "ProjetoJocasta" / MODULE_NAME
+APP_DIR.mkdir(parents=True, exist_ok=True)
+CFG_PATH = APP_DIR / "config.json"
+
+DEFAULT_CFG = {
+    "output_dir": str(_default_output_dir()),
+}
+
+
+def load_module_cfg() -> dict:
+    if CFG_PATH.exists():
+        try:
+            raw = json.loads(CFG_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return {**DEFAULT_CFG, **raw}
+        except Exception:
+            pass
+    return dict(DEFAULT_CFG)
+
+
+def save_module_cfg(cfg: dict) -> None:
     try:
-        with open(fp, "r", encoding="utf-8") as f:
-            return json.load(f)
+        CFG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
-        return {}
-
-
-def save_config(cfg: dict) -> None:
-    fp = get_config_file()
-    with open(fp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        pass
 
 
 # -----------------------------
@@ -57,44 +80,22 @@ def save_config(cfg: dict) -> None:
 # -----------------------------
 VALID_SIZES = {
     # Adulto
-    "PP",
-    "P",
-    "M",
-    "G",
-    "GG",
-    "XG",
-    "XGG",
-    "XXGG",
-    "XLGG",
+    "PP", "P", "M", "G", "GG", "XG", "XGG", "XXGG", "XLGG",
     # Babylook
-    "BLPP",
-    "BLP",
-    "BLM",
-    "BLG",
-    "BLXG",
-    "BLGG",
-    "BLXGG",
-    "BLXXGG",
-    "BLXLGG",
+    "BLPP", "BLP", "BLM", "BLG", "BLGG", "BLXGG", "BLXXGG",
     # Infantil com A
-    "2A",
-    "4A",
-    "6A",
-    "8A",
-    "10A",
-    "12A",
-    "14A",
-    "16A",
+    "2A", "4A", "6A", "8A", "10A", "12A", "14A", "16A",
 }
 
 # aceita "2-M", "10-BLP", "3-4A" etc.
 QTY_SIZE_RE = re.compile(r"^\s*(\d+)\s*-\s*([A-Za-z0-9]+)\s*$", re.IGNORECASE)
 
+
 # -----------------------------
-# Helpers (iguais ao Flow)
+# Helpers
 # -----------------------------
-def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+def ensure_dir(path: str | Path) -> None:
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 def parse_qty_and_size(tok: str) -> Tuple[int, str]:
@@ -102,6 +103,7 @@ def parse_qty_and_size(tok: str) -> Tuple[int, str]:
     Aceita:
     - QTY-SIZE (3-G, 2-BLP, 5-12A)
     - SIZE sozinho (G, BLP, 12A) -> qty=1
+
     Retorna (qty, size)
     """
     t = (tok or "").strip()
@@ -109,7 +111,6 @@ def parse_qty_and_size(tok: str) -> Tuple[int, str]:
         raise ValueError("Tamanho vazio (não permitido).")
 
     t = t.upper()
-
     m = QTY_SIZE_RE.match(t)
     if m:
         qty = int(m.group(1))
@@ -134,13 +135,11 @@ def display_size_token(size_token: str) -> str:
     st = (size_token or "").strip()
     if not st:
         return ""
-
     m = QTY_SIZE_RE.match(st)
     if m:
         qty = int(m.group(1))
         size = m.group(2).strip().upper()
         return size if qty == 1 else f"{qty}-{size}"
-
     return st.upper()
 
 
@@ -151,7 +150,7 @@ def normalize_size_token(tok: str) -> str:
 
 def gender_from_size(size: str) -> str:
     """
-    Regras (iguais ao Flow):
+    Regras:
     - Infantil (termina com A): Gender = C
     - Babylook (contém BL): Gender = FE
     - Senão: Gender = MA
@@ -165,7 +164,6 @@ def gender_from_size(size: str) -> str:
 
     if has_bl and ends_a:
         raise ValueError("Divergência: tamanho contém 'BL' e termina com 'A' (infantil).")
-
     if ends_a:
         return "C"
     if has_bl:
@@ -179,14 +177,17 @@ def build_json_preview(orders: List[dict]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=4)
 
 
-def export_json(orders: List[dict], out_dir: str) -> str:
+def export_json(orders: List[dict], out_dir: str | Path) -> str:
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    fp = os.path.join(out_dir, f"List-{stamp}.json")
+    fp = Path(out_dir) / f"List-{stamp}.json"
+
     data = dict(BASE_JSON)
     data["orders"] = orders
+
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-    return fp
+
+    return str(fp)
 
 
 # -----------------------------
@@ -219,9 +220,9 @@ def _is_size(tok: str) -> bool:
 class ParsedRow:
     name: str
     number: str
-    tams: Tuple[str, ...]  # TAMs encontrados (1..4) (normalizados)
-    s2: str  # STRING2 (opcional)
-    s3: str  # STRING3 (opcional)
+    tams: Tuple[str, ...]   # TAMs encontrados (1..4)
+    s2: str                 # STRING2 (opcional)
+    s3: str                 # STRING3 (opcional)
 
 
 def parse_line(line: str) -> ParsedRow | None:
@@ -244,9 +245,7 @@ def parse_line(line: str) -> ParsedRow | None:
         up = _upper(t)
 
         if _is_size(up):
-            # ✅ AJUSTE: normaliza tamanho aqui (remove espaços e padroniza "QTY-SIZE")
-            # Ex.: "2 - G" -> "2-G", "G " -> "1-G"
-            tams.append(normalize_size_token(up))
+            tams.append(up)
             continue
 
         if _is_number(t) and not number:
@@ -260,6 +259,7 @@ def parse_line(line: str) -> ParsedRow | None:
 
     if not tams:
         raise ValueError(f"Sem TAM1 reconhecido: {raw}")
+
     if len(tams) > 4:
         raise ValueError(f"Mais de 4 TAMs na linha: {raw}")
 
@@ -284,14 +284,18 @@ def build_output(rows: List[ParsedRow]) -> str:
     has_s3 = any(r.s3 != "" for r in rows)
 
     out_lines: List[str] = []
+
     for r in rows:
         cols: List[str] = [r.name, r.number]
+
         tam_list = [display_size_token(t) for t in r.tams] + [""] * (max_tams - len(r.tams))
         cols.extend(tam_list)
+
         if has_s2:
             cols.append(r.s2)
         if has_s3:
             cols.append(r.s3)
+
         out_lines.append(",".join(cols))
 
     return "\n".join(out_lines)
@@ -299,6 +303,7 @@ def build_output(rows: List[ParsedRow]) -> str:
 
 def process_text(text: str) -> List[ParsedRow]:
     parsed: List[ParsedRow] = []
+
     for i, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
@@ -320,39 +325,39 @@ def build_orders_from_orderlist(rows: List[ParsedRow]) -> List[dict]:
     - Nickname <- s2, BloodType <- s3
     """
     orders: List[dict] = []
+
     for r in rows:
         for tam in r.tams:
-            # tam já vem normalizado (ex.: "1-G", "2-G")
-            qty, size = parse_qty_and_size(tam)
+            st = normalize_size_token(tam)
+            qty, size = parse_qty_and_size(st)
             gender = gender_from_size(size)
-            orders.append(
-                {
-                    "Name": r.name,
-                    "Nickname": r.s2,
-                    "Number": r.number,
-                    "BloodType": r.s3,
-                    "Gender": gender,
-                    "ShortSleeve": f"{qty}-{size}",
-                    "LongSleeve": "",
-                    "Short": "",
-                    "Pants": "",
-                    "Tanktop": "",
-                    "Vest": "",
-                }
-            )
+
+            orders.append({
+                "Name": r.name,
+                "Nickname": r.s2,
+                "Number": r.number,
+                "BloodType": r.s3,
+                "Gender": gender,
+                "ShortSleeve": f"{qty}-{size}",
+                "LongSleeve": "",
+                "Short": "",
+                "Pants": "",
+                "Tanktop": "",
+                "Vest": "",
+            })
+
     return orders
 
 
 # -----------------------------
-# UI (Flow-like)
+# UI
 # -----------------------------
 class PXOrderListFrame(tk.Frame):
     def __init__(self, parent) -> None:
         super().__init__(parent)
 
-        cfg = load_config()
-        self.output_dir_var = tk.StringVar(value=cfg.get("output_dir", DEFAULT_OUTPUT_DIR))
-
+        cfg = load_module_cfg()
+        self.output_dir_var = tk.StringVar(value=cfg.get("output_dir", str(_default_output_dir())))
         self._rows: List[ParsedRow] = []
         self._last_orders: List[dict] = []
         self._last_json: str = ""
@@ -360,12 +365,16 @@ class PXOrderListFrame(tk.Frame):
         # Header
         header = tk.Frame(self)
         header.pack(fill="x", padx=10, pady=(10, 6))
+
         tk.Label(header, text="PXOrderList", font=("Segoe UI", 16, "bold")).pack(side="left")
 
         # Output dir
         out_row = tk.Frame(self)
         out_row.pack(fill="x", padx=10, pady=(0, 8))
+
         tk.Button(out_row, text="Pasta...", command=self.pick_output_folder).pack(side="left")
+        tk.Button(out_row, text="Abrir pasta", command=self.open_output_folder).pack(side="left", padx=(6, 0))
+
         self.lbl_out = tk.Label(
             out_row,
             text=f"Pasta de saída: {self.output_dir_var.get()}",
@@ -417,9 +426,7 @@ class PXOrderListFrame(tk.Frame):
 
         # Status
         self.status_var = tk.StringVar(value="")
-        tk.Label(self, textvariable=self.status_var, font=("Segoe UI", 9)).pack(
-            anchor="w", padx=10, pady=(0, 10)
-        )
+        tk.Label(self, textvariable=self.status_var, font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=(0, 10))
 
         # Exemplo
         self.txt_in.insert(
@@ -427,33 +434,45 @@ class PXOrderListFrame(tk.Frame):
             "G,JÃO,10\n"
             "JOÃO,5,G,M\n"
             "MANEL,PP\n"
-            "JUACA,JUSÉ,PP\n",
+            "JUACA,JUSÉ,PP\n"
         )
 
     def _set_text_readonly(self, txt: tk.Text, readonly: bool) -> None:
         txt.configure(state=("disabled" if readonly else "normal"))
 
-    def pick_output_folder(self):
+    def _refresh_output_label(self) -> None:
+        self.lbl_out.config(text=f"Pasta de saída: {self.output_dir_var.get()}")
+
+    def pick_output_folder(self) -> None:
         folder = filedialog.askdirectory(title="PXOrderList - Escolha a pasta para salvar o JSON")
         if folder:
             self.output_dir_var.set(folder)
-            cfg = load_config()
+            cfg = load_module_cfg()
             cfg["output_dir"] = folder
-            save_config(cfg)
-            self.lbl_out.config(text=f"Pasta de saída: {folder}")
-            self.status_var.set(f" Pasta de saída: {folder}")
+            save_module_cfg(cfg)
+            self._refresh_output_label()
+            self.status_var.set(f"Pasta de saída: {folder}")
+
+    def open_output_folder(self) -> None:
+        try:
+            out = self.ensure_output_dir()
+            open_in_explorer(Path(out))
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"Não foi possível abrir a pasta.\n\n{e}")
 
     def ensure_output_dir(self) -> str:
-        out = self.output_dir_var.get().strip() or DEFAULT_OUTPUT_DIR
+        out = self.output_dir_var.get().strip() or str(_default_output_dir())
         ensure_dir(out)
         return out
 
     def clear_all(self) -> None:
         self.txt_in.delete("1.0", "end")
         self.txt_out.delete("1.0", "end")
+
         self._set_text_readonly(self.txt_json, False)
         self.txt_json.delete("1.0", "end")
         self._set_text_readonly(self.txt_json, True)
+
         self._rows = []
         self._last_orders = []
         self._last_json = ""
@@ -464,21 +483,25 @@ class PXOrderListFrame(tk.Frame):
         if not text:
             messagebox.showwarning(APP_NAME, "Não há lista organizada para copiar.")
             return
+
         root = self.winfo_toplevel()
         root.clipboard_clear()
         root.clipboard_append(text)
         root.update()
-        self.status_var.set(" Lista organizada copiada.")
+
+        self.status_var.set("Lista organizada copiada.")
 
     def copy_json(self) -> None:
         if not self._last_json.strip():
             messagebox.showwarning(APP_NAME, "Ainda não há prévia do JSON.\nClique em Processar.")
             return
+
         root = self.winfo_toplevel()
         root.clipboard_clear()
         root.clipboard_append(self._last_json)
         root.update()
-        self.status_var.set(" JSON copiado.")
+
+        self.status_var.set("JSON copiado.")
 
     def process_and_preview(self) -> None:
         raw = self.txt_in.get("1.0", "end").strip("\n")
@@ -493,10 +516,11 @@ class PXOrderListFrame(tk.Frame):
                 return
 
             organized = build_output(rows)
+
             self.txt_out.delete("1.0", "end")
             self.txt_out.insert("1.0", organized)
 
-            # ✅ copia lista organizada sempre (igual Flow)
+            # copia lista organizada sempre
             root = self.winfo_toplevel()
             root.clipboard_clear()
             root.clipboard_append(organized)
@@ -514,9 +538,7 @@ class PXOrderListFrame(tk.Frame):
             self.txt_json.insert("1.0", preview)
             self._set_text_readonly(self.txt_json, True)
 
-            self.status_var.set(
-                f"✅ Processado: {len(rows)} linha(s) | lista copiada | prévia JSON pronta."
-            )
+            self.status_var.set(f"✅ Processado: {len(rows)} linha(s) | lista copiada | prévia JSON pronta.")
             self.nb.select(0)
 
         except Exception as e:
@@ -526,15 +548,14 @@ class PXOrderListFrame(tk.Frame):
     def generate_json(self) -> None:
         if not self._last_orders:
             self.process_and_preview()
-        if not self._last_orders:
-            return
+            if not self._last_orders:
+                return
 
         try:
             out_dir = self.ensure_output_dir()
             fp = export_json(self._last_orders, out_dir)
-            messagebox.showinfo(
-                APP_NAME, f"JSON gerado:\n{fp}\n\nRegistros: {len(self._last_orders)}"
-            )
+
+            messagebox.showinfo(APP_NAME, f"JSON gerado:\n{fp}\n\nRegistros: {len(self._last_orders)}")
             self.status_var.set(f"✅ JSON gerado: {fp} | Registros: {len(self._last_orders)}")
             self.nb.select(1)
 
@@ -552,8 +573,10 @@ def main() -> None:
     root.title(APP_NAME)
     root.geometry("1200x720")
     root.minsize(1000, 620)
+
     ui = build_ui(root)
     ui.pack(fill="both", expand=True)
+
     root.mainloop()
 
 
