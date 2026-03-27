@@ -16,8 +16,7 @@
 #   3) Resumo igual ao Resumido + Total geral
 #
 # Extras:
-# - Exporta por padrão em C:\Registro (configurável)
-# - Evita sobrescrever: sufixo FULL/SUMMARY no nome do PDF
+# - Evita sobrescrever: sufixo FULL/SUMMARY
 # - Botão "Atualizar nome" para atualizar hhmmss do nome do rolo
 # - Botão "Definir como padrão" para modo do PDF
 # - Import por botão ou Drag&Drop (apenas .txt)
@@ -30,25 +29,19 @@ from __future__ import annotations
 import os
 import re
 import json
-import math
 import tkinter as tk
-from core.version import APP_VERSION
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-from core.config import load_config  # core (objeto PXCoreConfig)
+
 from tkinter import ttk, messagebox, filedialog
+
+from core.version import APP_VERSION
+from core.config import load_config
 from core.printlogs_db import save_export_transactional, OrderRow
-from core.format import fmt_m, round_up_cm_m
-
-def _round_up_cm(value_m: float) -> float:
-    """
-    Arredonda para cima em centímetros (0.01 m).
-    Ex: 6.361 -> 6.37
-    """
-    return math.ceil(value_m * 100) / 100
-
+from core.format import fmt_m
+from core.paths import pdf_rolls_dir, print_jpg_dir, temp_module_dir
 
 # ---- PDF (reportlab) ----
 try:
@@ -60,7 +53,6 @@ except Exception:
     A4 = None
     pdfmetrics = None
 
-
 # ---- JPG (PyMuPDF) ----
 try:
     import fitz  # PyMuPDF
@@ -68,7 +60,6 @@ try:
 except Exception:
     fitz = None
     _HAS_PYMUPDF = False
-
 
 # ---- Drag & drop (tkinterdnd2) ----
 try:
@@ -78,14 +69,7 @@ except Exception:
     DND_FILES = None
     _HAS_DND = False
 
-# ---- JPG export (PyMuPDF + Pillow) ----
-try:
-    import fitz  # PyMuPDF
-    _HAS_PYMUPDF = True
-except Exception:
-    fitz = None
-    _HAS_PYMUPDF = False
-
+# ---- Pillow ----
 try:
     from PIL import Image
     _HAS_PIL = True
@@ -102,12 +86,9 @@ CFG_PATH = APP_DIR / "config.json"
 
 DEFAULT_CFG = {
     "report_mode_default": "full",     # "full" | "summary"
-    # "export_dir": r"C:\Registro",      # legado (não usar mais)
-
-    # JPG espelhado (tamanho final)
     "mirror_jpg_width_mode": "17",     # "17" | "21" | "custom"
     "mirror_jpg_width_cm_custom": 17.0,
-    "mirror_jpg_dpi": 300,             # usado para converter cm->px (qualidade)
+    "mirror_jpg_dpi": 300,
 }
 
 
@@ -138,7 +119,7 @@ class Job:
     height_mm: float
     vpos_mm: float
     real_mm: float
-    src_file: str  # caminho completo (ajuda no dedupe)
+    src_file: str
 
     @property
     def real_m(self) -> float:
@@ -207,9 +188,11 @@ def parse_log_txt(path: str) -> Optional[Job]:
         if msec:
             section = msec.group(1).strip()
             continue
+
         mkv = _RE_KV.match(line)
         if not mkv:
             continue
+
         k, v = mkv.group(1).strip(), mkv.group(2).strip()
         if section == "General":
             general[k] = v
@@ -231,10 +214,7 @@ def parse_log_txt(path: str) -> Optional[Job]:
 
     height_mm = _f(item1.get("HeightMM", "0"))
     vpos_mm = _f(item1.get("VPositionMM", "0"))
-
-    # Real é apenas o comprimento impresso (HeightMM), não soma deslocamento
     real_mm = height_mm
-
     fabric = _fabric_from_document(document)
 
     return Job(
@@ -244,7 +224,7 @@ def parse_log_txt(path: str) -> Optional[Job]:
         height_mm=height_mm,
         vpos_mm=vpos_mm,
         real_mm=real_mm,
-        src_file=str(path),  # caminho completo
+        src_file=str(path),
     )
 
 
@@ -273,40 +253,20 @@ def build_blocks(Jobs: List[Job], machine: str) -> List[Block]:
 
     return blocks
 
+
 # --------------------------
 # Output dirs (PXCore base)
 # --------------------------
 MODULE_NAME = "PXPrintLogs"
 
+
 def _pxcore_base_dir() -> Path:
-    cfg = load_config()  # PXCoreConfig (objeto)
+    cfg = load_config()
     base_dir = getattr(cfg, "base_dir", None) or r"C:\PXCore"
     return Path(base_dir)
 
-def _ym(dt: datetime) -> tuple[str, str]:
-    return f"{dt.year:04d}", f"{dt.month:02d}"
-
-def _pdf_out_dir(dt: datetime) -> Path:
-    # SOMENTE PDFs
-    y, m = _ym(dt)
-    out = _pxcore_base_dir() / "pdf" / "PXPrintLogs" / "rolls" / y / m
-    out.mkdir(parents=True, exist_ok=True)
-    return out
-
-def _print_out_dir(dt: datetime) -> Path:
-    # Operacional (JPG espelhado)
-    y, m = _ym(dt)
-    out = _pxcore_base_dir() / "print" / MODULE_NAME / "jpg" / y / m
-    out.mkdir(parents=True, exist_ok=True)
-    return out
-
-def _temp_dir() -> Path:
-    out = _pxcore_base_dir() / "temp" / MODULE_NAME
-    out.mkdir(parents=True, exist_ok=True)
-    return out
 
 def _versioned_path(path: Path) -> Path:
-    """Evita sobrescrever: se existir, cria _v2, _v3..."""
     if not path.exists():
         return path
 
@@ -321,6 +281,7 @@ def _versioned_path(path: Path) -> Path:
             return cand
         n += 1
 
+
 # --------------------------
 # JPG helpers
 # --------------------------
@@ -329,12 +290,11 @@ def _cm_to_px(cm: float, dpi: int) -> int:
 
 
 def pdf_first_page_to_jpg_sized(pdf_path: str, jpg_path: str, target_width_cm: float, dpi: int = 300) -> None:
-    """
-    Converte a primeira página de um PDF para JPG com largura física desejada (em cm).
-    Mantém proporção automaticamente.
-    """
     if not _HAS_PYMUPDF or fitz is None:
         raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
+
+    if not _HAS_PIL or Image is None:
+        raise RuntimeError("Pillow não instalado. Instale: pip install pillow")
 
     if target_width_cm <= 0:
         raise ValueError("target_width_cm deve ser > 0")
@@ -344,20 +304,49 @@ def pdf_first_page_to_jpg_sized(pdf_path: str, jpg_path: str, target_width_cm: f
     doc = fitz.open(pdf_path)
     try:
         page = doc.load_page(0)
-        page_width_pt = float(page.rect.width)  # pontos (1/72")
+        page_width_pt = float(page.rect.width)
         if page_width_pt <= 0:
             raise RuntimeError("Página inválida para renderizar.")
 
-        # zoom: pixels = points * zoom
         zoom = width_px / page_width_pt
         mat = fitz.Matrix(zoom, zoom)
 
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=95)
-        #from PIL import Image
     finally:
         doc.close()
+
+
+def pdf_first_page_to_jpg_scaled(
+    pdf_path: str,
+    jpg_path: str,
+    *,
+    target_width_cm: float,
+    dpi: int = 300,
+    quality: int = 95,
+) -> None:
+    if not _HAS_PYMUPDF:
+        raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
+    if not _HAS_PIL or Image is None:
+        raise RuntimeError("Pillow não instalado. Instale: pip install pillow")
+
+    width_in = float(target_width_cm) / 2.54
+    target_width_px = int(round(width_in * dpi))
+
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc.load_page(0)
+        page_width_pt = float(page.rect.width)
+        zoom = target_width_px / page_width_pt
+        mat = fitz.Matrix(zoom, zoom)
+
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
+    finally:
+        doc.close()
+
 
 # --------------------------
 # PDF helpers
@@ -392,15 +381,11 @@ def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, 
 
 
 def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
-    """
-    Wrap por largura real (stringWidth).
-    """
     text = (text or "").strip()
     if not text:
         return [""]
 
     if pdfmetrics is None:
-        # fallback simples (evita crash)
         return [text]
 
     words = text.split()
@@ -418,7 +403,6 @@ def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> L
             if pdfmetrics.stringWidth(w, font_name, font_size) <= max_width:
                 current = w
             else:
-                # quebra por caracteres se uma palavra for maior que a coluna
                 chunk = ""
                 for ch in w:
                     test2 = chunk + ch
@@ -455,19 +439,11 @@ def _pdf_draw_summary_table(
     mode: str,
     mirrored: bool,
 ) -> float:
-    """
-    Resumo:
-    - Total (m) centralizado, 2 casas, com "m"
-    - Qtd Pedidos centralizado
-    - Total geral no final
-    """
-    # Larguras FIXAS (A4 com margem 40)
-    # total útil = 595 - 80 = 515
     w_num = 30
     w_fab = 180
     w_total = 90
-    w_Jobs = 70
-    w_last = 145  # soma = 515
+    w_jobs = 70
+    w_last = 145
 
     def _reprint_summary_header(y0: float) -> float:
         c.setFont("Helvetica-Bold", 12)
@@ -477,20 +453,16 @@ def _pdf_draw_summary_table(
         c.line(40, y0, page_w - 40, y0)
         y0 -= 18
 
-        # Cabeçalho colunas
         c.setFont("Helvetica-Bold", 10)
         x = 40
         c.drawString(x, y0, "#")
         x += w_num
         c.drawString(x, y0, "Tecido")
         x += w_fab
-
-        # Centraliza também o TÍTULO dessas colunas
         c.drawCentredString(x + (w_total / 2), y0, "Total (m)")
         x += w_total
-        c.drawCentredString(x + (w_Jobs / 2), y0, "Qtd Pedidos")
-        x += w_Jobs
-
+        c.drawCentredString(x + (w_jobs / 2), y0, "Qtd Pedidos")
+        x += w_jobs
         c.drawString(x, y0, "Último fim")
         y0 -= 14
         c.setFont("Helvetica", 10)
@@ -517,19 +489,15 @@ def _pdf_draw_summary_table(
         c.drawString(x, y, b.fabric)
         x += w_fab
 
-        # Total (coluna Total)
-        c.drawCentredString(x + (w_total / 2), y, f"{_round_up_cm(b.total_m):.2f} m")
+        c.drawCentredString(x + (w_total / 2), y, fmt_m(b.total_m))
         x += w_total
 
-        # Qtd Pedidos (coluna Qtd)
-        c.drawCentredString(x + (w_Jobs / 2), y, str(b.job_count))
-        x += w_Jobs
+        c.drawCentredString(x + (w_jobs / 2), y, str(b.job_count))
+        x += w_jobs
 
-        # Último fim (coluna Último fim)
         c.drawString(x, y, b.newest_end.strftime("%d/%m/%Y %H:%M:%S"))
         y -= 14
 
-    # Total geral
     if _pdf_need_new_page(y, min_y=85):
         if mirrored:
             c.restoreState()
@@ -549,7 +517,7 @@ def _pdf_draw_summary_table(
     total_roll = _roll_total_m(blocks)
     c.setFont("Helvetica-Bold", 11)
     c.drawString(40, y, "Total geral do rolo:")
-    c.drawRightString(page_w - 40, y, f"{_round_up_cm(total_roll):.2f} m")
+    c.drawRightString(page_w - 40, y, fmt_m(total_roll))
     c.setFont("Helvetica", 10)
     y -= 18
 
@@ -584,24 +552,16 @@ def export_pdf(
     _begin_page()
     y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
 
-    # --------------------
-    # RESUMIDO
-    # --------------------
     if mode == "summary":
         _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
         _end_page()
         c.save()
         return
 
-    # --------------------
-    # COMPLETO
-    # --------------------
-
-    # Larguras FIXAS (A4 com margem 40) => 515 úteis
     w_end = 120
     w_doc = 260
     w_fab = 95
-    w_size = 40  # soma = 515
+    w_size = 40
 
     font = "Helvetica"
     font_bold = "Helvetica-Bold"
@@ -609,7 +569,7 @@ def export_pdf(
     fs_row = 10
     line_h = 12
 
-    def _reprint_Jobs_header(y0: float) -> float:
+    def _reprint_jobs_header(y0: float) -> float:
         c.setFont("Helvetica-Bold", 12)
         c.drawString(40, y0, "Pedidos (último impresso primeiro)")
         y0 -= 16
@@ -630,29 +590,26 @@ def export_pdf(
         c.setFont(font, fs_row)
         return y0
 
-    # imprime cabeçalho das colunas na primeira página
-    y = _reprint_Jobs_header(y)
+    y = _reprint_jobs_header(y)
 
     for bi, b in enumerate(blocks):
-        # separador entre blocos (mudou tecido)
         if bi > 0:
             if _pdf_need_new_page(y, min_y=95):
                 _end_page()
                 _begin_page()
                 y = page_h - 40
                 y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
-                y = _reprint_Jobs_header(y)
+                y = _reprint_jobs_header(y)
 
             c.setLineWidth(1)
             c.line(40, y + 6, page_w - 40, y + 6)
             y -= 8
 
-        # Pedidos do bloco (mais recente primeiro)
         for j in sorted(b.Jobs, key=lambda jj: jj.end_time, reverse=True):
             end_txt = j.end_time.strftime("%d/%m/%Y %H:%M:%S")
-            doc_txt = j.document  # COMPLETO (SEM "...")
-            fab_txt = j.fabric    # COMPLETO (SEM "...")
-            size_txt = f"{_round_up_cm(j.real_m):.2f} m"
+            doc_txt = j.document
+            fab_txt = j.fabric
+            size_txt = fmt_m(j.real_m)
 
             doc_lines = _wrap_text(doc_txt, w_doc - 6, font, fs_row)
             fab_lines = _wrap_text(fab_txt, w_fab - 6, font, fs_row)
@@ -665,26 +622,18 @@ def export_pdf(
                 _begin_page()
                 y = page_h - 40
                 y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
-                y = _reprint_Jobs_header(y)
+                y = _reprint_jobs_header(y)
 
             x0 = 40
             c.setFont(font, fs_row)
 
-            # EndTime (topo)
             c.drawString(x0, y, end_txt)
-
-            # Arquivo com wrap
             _draw_wrapped_cell(c, x0 + w_end, y, doc_lines, font, fs_row, line_h)
-
-            # Tecido com wrap
             _draw_wrapped_cell(c, x0 + w_end + w_doc, y, fab_lines, font, fs_row, line_h)
-
-            # Tamanho (direita)
             c.drawRightString(x0 + w_end + w_doc + w_fab + w_size - 2, y, size_txt)
 
             y -= row_h
 
-    # separação + resumo
     y -= 6
     if _pdf_need_new_page(y, min_y=120):
         _end_page()
@@ -701,46 +650,6 @@ def export_pdf(
     _end_page()
     c.save()
 
-def pdf_first_page_to_jpg_scaled(
-    pdf_path: str,
-    jpg_path: str,
-    *,
-    target_width_cm: float,
-    dpi: int = 300,
-    quality: int = 95,
-) -> None:
-    """
-    Renderiza a 1ª página do PDF em JPG com LARGURA física alvo (cm).
-    - Gera pixels suficientes para bater a largura em cm no DPI informado
-    - Salva o JPG com metadata dpi=(dpi,dpi) pra impressão sair no tamanho certo
-    """
-    if not _HAS_PYMUPDF:
-        raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
-    if not _HAS_PIL:
-        raise RuntimeError("Pillow não instalado. Instale: pip install pillow")
-
-    # largura em pixels que corresponde a target_width_cm no dpi desejado
-    width_in = float(target_width_cm) / 2.54
-    target_width_px = int(round(width_in * dpi))
-
-    doc = fitz.open(pdf_path)
-    try:
-        page = doc.load_page(0)
-
-        # page.rect.width está em pontos (pt). 1 pt = 1/72 inch.
-        page_width_pt = float(page.rect.width)
-
-        # PyMuPDF: pixels = pt * zoom  (onde zoom= dpi/72 se for 1:1 no dpi)
-        # Aqui a gente força a largura final: zoom = target_px / page_width_pt
-        zoom = target_width_px / page_width_pt
-        mat = fitz.Matrix(zoom, zoom)
-
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-
-        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
-    finally:
-        doc.close()
 
 # --------------------------
 # UI
@@ -762,49 +671,39 @@ class PXPrintLogsUI(ttk.Frame):
         self.ent_roll = ttk.Entry(top, textvariable=self.var_roll, width=28)
         self.ent_roll.grid(row=0, column=1, padx=(6, 6), sticky="w")
 
-        ttk.Button(top, text="Atualizar nome", command=self.on_refresh_roll_name)\
-            .grid(row=0, column=2, padx=(0, 12), sticky="w")
+        ttk.Button(top, text="Atualizar nome", command=self.on_refresh_roll_name).grid(row=0, column=2, padx=(0, 12), sticky="w")
 
         ttk.Label(top, text="Modo do PDF").grid(row=0, column=3, sticky="w")
         self.var_mode = tk.StringVar(value=self.mcfg.get("report_mode_default", "full"))
-        ttk.Radiobutton(top, text="Completo", value="full", variable=self.var_mode)\
-            .grid(row=0, column=4, padx=(6, 0), sticky="w")
-        ttk.Radiobutton(top, text="Resumido", value="summary", variable=self.var_mode)\
-            .grid(row=0, column=5, padx=(6, 12), sticky="w")
+        ttk.Radiobutton(top, text="Completo", value="full", variable=self.var_mode).grid(row=0, column=4, padx=(6, 0), sticky="w")
+        ttk.Radiobutton(top, text="Resumido", value="summary", variable=self.var_mode).grid(row=0, column=5, padx=(6, 12), sticky="w")
 
-        ttk.Button(top, text="Definir como padrão", command=self.on_set_default_mode)\
-            .grid(row=0, column=6, padx=(0, 12), sticky="w")
+        ttk.Button(top, text="Definir como padrão", command=self.on_set_default_mode).grid(row=0, column=6, padx=(0, 12), sticky="w")
 
         ttk.Label(top, text="Pasta").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.var_export_dir = tk.StringVar(value=str(_pdf_out_dir(datetime.now())))
+        self.var_export_dir = tk.StringVar(value=str(pdf_rolls_dir(_pxcore_base_dir(), MODULE_NAME, datetime.now())))
         self.lbl_export_dir = ttk.Label(top, textvariable=self.var_export_dir)
         self.lbl_export_dir.grid(row=1, column=1, columnspan=5, sticky="w", padx=(6, 0), pady=(6, 0))
 
-        ttk.Button(top, text="Abrir pastas", command=self.on_open_folders_menu)\
-            .grid(row=1, column=6, sticky="w", pady=(6, 0))
+        ttk.Button(top, text="Abrir pastas", command=self.on_open_folders_menu).grid(row=1, column=6, sticky="w", pady=(6, 0))
 
         self.lbl_machine = ttk.Label(top, text="Máquina do lote: (não definida)")
         self.lbl_machine.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
-        # ---- JPG espelhado: tamanho ----
         ttk.Label(top, text="JPG espelhado").grid(row=3, column=0, sticky="w", pady=(6, 0))
 
         self.var_jpg_mode = tk.StringVar(value=self.mcfg.get("mirror_jpg_width_mode", "17"))
         self.var_jpg_custom = tk.StringVar(value=str(self.mcfg.get("mirror_jpg_width_cm_custom", 17.0)))
 
-        ttk.Radiobutton(top, text="17 cm", value="17", variable=self.var_jpg_mode)\
-            .grid(row=3, column=1, padx=(6, 0), sticky="w", pady=(6, 0))
-        ttk.Radiobutton(top, text="21 cm", value="21", variable=self.var_jpg_mode)\
-            .grid(row=3, column=2, padx=(6, 0), sticky="w", pady=(6, 0))
-        ttk.Radiobutton(top, text="Personalizado", value="custom", variable=self.var_jpg_mode)\
-            .grid(row=3, column=3, padx=(6, 0), sticky="w", pady=(6, 0))
+        ttk.Radiobutton(top, text="17 cm", value="17", variable=self.var_jpg_mode).grid(row=3, column=1, padx=(6, 0), sticky="w", pady=(6, 0))
+        ttk.Radiobutton(top, text="21 cm", value="21", variable=self.var_jpg_mode).grid(row=3, column=2, padx=(6, 0), sticky="w", pady=(6, 0))
+        ttk.Radiobutton(top, text="Personalizado", value="custom", variable=self.var_jpg_mode).grid(row=3, column=3, padx=(6, 0), sticky="w", pady=(6, 0))
 
         self.ent_jpg_custom = ttk.Entry(top, textvariable=self.var_jpg_custom, width=6)
         self.ent_jpg_custom.grid(row=3, column=4, padx=(6, 0), sticky="w", pady=(6, 0))
         ttk.Label(top, text="cm").grid(row=3, column=5, padx=(4, 0), sticky="w", pady=(6, 0))
 
-        ttk.Button(top, text="Definir JPG como padrão", command=self.on_set_default_jpg)\
-            .grid(row=3, column=6, padx=(12, 0), sticky="w", pady=(6, 0))
+        ttk.Button(top, text="Definir JPG como padrão", command=self.on_set_default_jpg).grid(row=3, column=6, padx=(12, 0), sticky="w", pady=(6, 0))
 
         def _update_custom_state(*_):
             self.ent_jpg_custom.configure(state=("normal" if self.var_jpg_mode.get() == "custom" else "disabled"))
@@ -815,7 +714,6 @@ class PXPrintLogsUI(ttk.Frame):
         btns = ttk.Frame(top)
         btns.grid(row=2, column=4, columnspan=3, sticky="e", pady=(6, 0))
 
-        # Linha 1: ações
         row_actions = ttk.Frame(btns)
         row_actions.pack(anchor="e", pady=(0, 4))
 
@@ -823,7 +721,6 @@ class PXPrintLogsUI(ttk.Frame):
         ttk.Button(row_actions, text="Importar pasta", command=self.on_import_folder).pack(side="left", padx=4)
         ttk.Button(row_actions, text="Limpar", command=self.on_clear).pack(side="left", padx=4)
 
-        # Linha 2: exportação
         row_export = ttk.Frame(btns)
         row_export.pack(anchor="e")
 
@@ -862,6 +759,7 @@ class PXPrintLogsUI(ttk.Frame):
         ]:
             self.tree_Jobs.heading(col, text=txt)
             self.tree_Jobs.column(col, width=w, anchor="w")
+
         sbj = ttk.Scrollbar(details, orient="vertical", command=self.tree_Jobs.yview)
         self.tree_Jobs.configure(yscrollcommand=sbj.set)
         self.tree_Jobs.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
@@ -880,6 +778,7 @@ class PXPrintLogsUI(ttk.Frame):
         ]:
             self.tree_blocks.heading(col, text=txt)
             self.tree_blocks.column(col, width=w, anchor=anchor)
+
         sbb = ttk.Scrollbar(blocks_box, orient="vertical", command=self.tree_blocks.yview)
         self.tree_blocks.configure(yscrollcommand=sbb.set)
         self.tree_blocks.pack(side="left", fill="both", expand=True)
@@ -896,17 +795,14 @@ class PXPrintLogsUI(ttk.Frame):
     # Config helpers
     # --------------------------
     def _ensure_export_dir(self):
-    # Exibe a pasta de PDFs (comprovantes) no UI
-        self.var_export_dir.set(str(_pdf_out_dir(datetime.now())))
+        self.var_export_dir.set(str(pdf_rolls_dir(_pxcore_base_dir(), MODULE_NAME, datetime.now())))
 
     def on_open_folders_menu(self):
-        """Abre um menu simples para escolher PDF/JPG."""
         try:
             menu = tk.Menu(self, tearoff=0)
             menu.add_command(label="Abrir pasta PDF (comprovantes)", command=self.open_pdf_folder)
             menu.add_command(label="Abrir pasta JPG (operação)", command=self.open_jpg_folder)
 
-            # posiciona o menu perto do mouse
             x = self.winfo_pointerx()
             y = self.winfo_pointery()
             menu.tk_popup(x, y)
@@ -918,14 +814,14 @@ class PXPrintLogsUI(ttk.Frame):
 
     def open_pdf_folder(self):
         try:
-            folder = _pdf_out_dir(datetime.now())
+            folder = pdf_rolls_dir(_pxcore_base_dir(), MODULE_NAME, datetime.now())
             os.startfile(str(folder))
         except Exception:
             messagebox.showerror("Erro", "Não foi possível abrir a pasta de PDFs.")
 
     def open_jpg_folder(self):
         try:
-            folder = _print_out_dir(datetime.now())
+            folder = print_jpg_dir(_pxcore_base_dir(), MODULE_NAME, datetime.now())
             os.startfile(str(folder))
         except Exception:
             messagebox.showerror("Erro", "Não foi possível abrir a pasta de JPGs.")
@@ -947,14 +843,12 @@ class PXPrintLogsUI(ttk.Frame):
         if mode in ("17", "21"):
             return float(mode)
 
-        # custom
         s = (self.var_jpg_custom.get() or "").replace(",", ".").strip()
         try:
             v = float(s)
         except Exception:
             raise ValueError("Largura personalizada inválida.")
 
-        # limites anti-erro
         if v < 8 or v > 40:
             raise ValueError("Use entre 8 cm e 40 cm.")
         return v
@@ -1083,9 +977,6 @@ class PXPrintLogsUI(ttk.Frame):
             messagebox.showwarning("Sem .txt", "Solte/seleciona apenas arquivos .txt.")
             return
 
-        # Import incremental:
-        # - Se já existe máquina definida, não pergunta de novo
-        # - Não apaga import anterior
         if self.machine:
             machine = self.machine
         else:
@@ -1102,8 +993,6 @@ class PXPrintLogsUI(ttk.Frame):
 
         parsed: List[Job] = []
         skipped_invalid = 0
-
-        # Dedupe por caminho completo (evita reimportar o mesmo arquivo)
         existing_src = set(j.src_file for j in self.Jobs) if self.Jobs else set()
 
         for p in txts:
@@ -1116,12 +1005,10 @@ class PXPrintLogsUI(ttk.Frame):
                 skipped_invalid += 1
                 continue
 
-            # Valida HeightMM
             if j.height_mm <= 0:
                 skipped_invalid += 1
                 continue
 
-            # Recalcula real_m (sanity check explícita)
             correct_real_m = j.height_mm / 1000.0
             if abs(j.real_m - correct_real_m) > 0.001:
                 skipped_invalid += 1
@@ -1134,12 +1021,10 @@ class PXPrintLogsUI(ttk.Frame):
             messagebox.showerror("Falha", "Nenhum log válido encontrado.")
             return
 
-        # Merge incremental
         if parsed:
             self.Jobs.extend(parsed)
 
         self.blocks = build_blocks(self.Jobs, machine)
-
         self.refresh_blocks()
         self.clear_details()
 
@@ -1173,7 +1058,7 @@ class PXPrintLogsUI(ttk.Frame):
                 values=(
                     idx,
                     b.fabric,
-                    f"{_round_up_cm(b.total_m):.2f} m",
+                    fmt_m(b.total_m),
                     b.job_count,
                     b.newest_end.strftime("%d/%m/%Y %H:%M:%S"),
                 ),
@@ -1187,9 +1072,11 @@ class PXPrintLogsUI(ttk.Frame):
         sel = self.tree_blocks.selection()
         if not sel:
             return
+
         bi = int(sel[0])
         if bi < 0 or bi >= len(self.blocks):
             return
+
         b = self.blocks[bi]
 
         title = (
@@ -1242,33 +1129,23 @@ class PXPrintLogsUI(ttk.Frame):
         mode = self.var_mode.get()
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
 
-        # -------------------------
-        # Pastas padronizadas (PXCore base)
-        # -------------------------
         dt = datetime.now()
-        pdf_dir = _pdf_out_dir(dt)       # .../pdf/PXPrintLogs/rolls/YYYY/MM
-        jpg_dir = _print_out_dir(dt)     # .../print/PXPrintLogs/jpg/YYYY/MM
-        tmp_dir = _temp_dir()            # .../temp/PXPrintLogs
+        base_dir = _pxcore_base_dir()
+        pdf_dir = pdf_rolls_dir(base_dir, MODULE_NAME, dt)
+        jpg_dir = print_jpg_dir(base_dir, MODULE_NAME, dt)
+        tmp_dir = temp_module_dir(base_dir, MODULE_NAME)
 
-        # -------------------------
-        # Nome padronizado
-        # -------------------------
         date_iso = dt.strftime("%Y-%m-%d")
         roll_safe = _sanitize_filename(roll)
         base_name = f"{date_iso}_{self.machine}_{roll_safe}_{mode_tag}"
 
-        # Nomes finais (sem sobrescrever: _v2, _v3...)
         normal_path = str(_versioned_path(pdf_dir / f"{base_name}.pdf"))
-        mirror_path = str(_versioned_path(jpg_dir / f"{base_name}.jpg"))  # espelhado é JPG
-
-        # PDF temporário (espelhado) para gerar JPG (não fica na pasta final)
+        mirror_path = str(_versioned_path(jpg_dir / f"{base_name}.jpg"))
         tmp_mirror_pdf = str(tmp_dir / f"{base_name}.tmp.pdf")
 
-        # parâmetros do JPG (calcula 1 vez e reutiliza)
         target_cm = float(self._get_mirror_target_cm())
         dpi = int(self.mcfg.get("mirror_jpg_dpi", 300))
 
-        # Validação de integridade
         for j in self.Jobs:
             if j.height_mm <= 0:
                 messagebox.showerror("Dados inválidos", f"HeightMM inválido no job: {j.document}")
@@ -1294,7 +1171,6 @@ class PXPrintLogsUI(ttk.Frame):
 
             elif which == "both":
                 export_pdf(normal_path, self.blocks, roll, self.machine, mode=mode, mirrored=False)
-
                 export_pdf(tmp_mirror_pdf, self.blocks, roll, self.machine, mode=mode, mirrored=True)
                 pdf_first_page_to_jpg_scaled(
                     tmp_mirror_pdf,
@@ -1312,9 +1188,6 @@ class PXPrintLogsUI(ttk.Frame):
             messagebox.showerror("Erro ao exportar", str(e))
             return
 
-        # -------------------------
-        # Registro no banco
-        # -------------------------
         try:
             orders = [
                 OrderRow(
@@ -1354,10 +1227,6 @@ class PXPrintLogsUI(ttk.Frame):
         except Exception as e:
             self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")
 
-        # -------------------------
-        # Mensagem final
-        # -------------------------
-        # Para o usuário, faz sentido mostrar a pasta do PDF (principal “comprovante”)
         shown_dir = pdf_dir
 
         if which == "both":
@@ -1378,5 +1247,7 @@ class PXPrintLogsUI(ttk.Frame):
                 "Exportado",
                 f"JPG (operação):\n{jpg_dir}\n\n{Path(mirror_path).name}"
             )
+
+
 def build_ui(parent):
     return PXPrintLogsUI(parent)
