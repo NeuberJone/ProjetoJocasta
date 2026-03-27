@@ -24,6 +24,7 @@
 # - Espelhado: exporta JPG (com largura 17cm / 21cm / personalizado)
 # --------------------------------------------------------------------
 
+from modules.pxprintlogs import build_ui
 from __future__ import annotations
 
 import os
