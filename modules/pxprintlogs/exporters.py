@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import List
 
 from core.format import fmt_m
-from .models import Block
+from .models import Block, PedidoSummary
 
 try:
     from reportlab.pdfgen import canvas
@@ -79,6 +79,70 @@ def pdf_first_page_to_jpg_scaled(
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
+    finally:
+        doc.close()
+
+
+def pdf_all_pages_to_jpg_scaled(
+    pdf_path: str | Path,
+    jpg_path: str | Path,
+    *,
+    target_width_cm: float,
+    dpi: int = 300,
+    quality: int = 95,
+    page_gap_px: int = 0,
+) -> None:
+    """
+    Como pdf_first_page_to_jpg_scaled, mas concatena TODAS as páginas do PDF
+    verticalmente num único JPG contínuo, em vez de só renderizar a 1ª página
+    (útil quando o PDF tem mais de uma página, ex.: modo Completo).
+    """
+    if not _HAS_PYMUPDF or fitz is None:
+        raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
+
+    if not _HAS_PIL or Image is None:
+        raise RuntimeError("Pillow não instalado. Instale: pip install pillow")
+
+    if target_width_cm <= 0:
+        raise ValueError("target_width_cm deve ser > 0")
+
+    if dpi <= 0:
+        raise ValueError("dpi deve ser > 0")
+
+    pdf_path = str(pdf_path)
+    jpg_path = str(jpg_path)
+
+    target_width_px = _cm_to_px(target_width_cm, dpi)
+
+    doc = fitz.open(pdf_path)
+    try:
+        if doc.page_count == 0:
+            raise RuntimeError("PDF sem páginas para renderizar.")
+
+        page0_width_pt = float(doc.load_page(0).rect.width)
+        if page0_width_pt <= 0:
+            raise RuntimeError("Página inválida para renderizar.")
+
+        zoom = target_width_px / page0_width_pt
+        mat = fitz.Matrix(zoom, zoom)
+
+        page_images = []
+        for i in range(doc.page_count):
+            pix = doc.load_page(i).get_pixmap(matrix=mat, alpha=False)
+            page_images.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+
+        if len(page_images) == 1:
+            combined = page_images[0]
+        else:
+            total_width = max(im.width for im in page_images)
+            total_height = sum(im.height for im in page_images) + page_gap_px * (len(page_images) - 1)
+            combined = Image.new("RGB", (total_width, total_height), "white")
+            y = 0
+            for im in page_images:
+                combined.paste(im, (0, y))
+                y += im.height + page_gap_px
+
+        combined.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
     finally:
         doc.close()
 
@@ -300,6 +364,76 @@ def _pdf_draw_summary_table(
     return y
 
 
+def _pdf_draw_pedidos_table(
+    c,
+    pedidos: List[PedidoSummary],
+    y: float,
+    page_w: float,
+    page_h: float,
+    roll_name: str,
+    machine: str,
+    mode: str,
+    mirrored: bool,
+) -> float:
+    w_num = 30
+    w_ped = 280
+    w_total = 90
+    w_jobs = 90
+
+    def _reprint_pedidos_header(y0: float) -> float:
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(40, y0, "Pedidos no rolo")
+        y0 -= 16
+
+        c.setFont("Helvetica", 10)
+        c.line(40, y0, page_w - 40, y0)
+        y0 -= 18
+
+        c.setFont("Helvetica-Bold", 10)
+        x = 40
+        c.drawString(x, y0, "#")
+        x += w_num
+        c.drawString(x, y0, "Pedido")
+        x += w_ped
+        c.drawCentredString(x + (w_total / 2), y0, "Total (m)")
+        x += w_total
+        c.drawCentredString(x + (w_jobs / 2), y0, "Qtd Peças")
+        y0 -= 14
+
+        c.setFont("Helvetica", 10)
+        return y0
+
+    y = _reprint_pedidos_header(y)
+
+    for index, pedido in enumerate(pedidos, start=1):
+        if _pdf_need_new_page(y, min_y=60):
+            if mirrored:
+                c.restoreState()
+            c.showPage()
+            if mirrored:
+                c.saveState()
+                c.transform(-1, 0, 0, 1, page_w, 0)
+
+            y = page_h - 40
+            y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
+            y = _reprint_pedidos_header(y)
+
+        x = 40
+        c.drawString(x, y, str(index))
+        x += w_num
+
+        c.drawString(x, y, pedido.pedido)
+        x += w_ped
+
+        c.drawCentredString(x + (w_total / 2), y, fmt_m(pedido.total_m))
+        x += w_total
+
+        c.drawCentredString(x + (w_jobs / 2), y, str(pedido.job_count))
+        y -= 14
+
+    return y
+
+
 def export_pdf(
     out_path: str | Path,
     blocks: List[Block],
@@ -307,6 +441,7 @@ def export_pdf(
     machine: str,
     mode: str = "full",
     mirrored: bool = False,
+    pedidos: List[PedidoSummary] | None = None,
 ) -> None:
     if canvas is None or A4 is None:
         raise RuntimeError("reportlab não está instalado. Instale: pip install reportlab")
@@ -431,7 +566,17 @@ def export_pdf(
     c.line(40, y, page_w - 40, y)
     y -= 22
 
-    _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
+    y = _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
+
+    if pedidos:
+        y -= 10
+        if _pdf_need_new_page(y, min_y=90):
+            _end_page()
+            _begin_page()
+            y = page_h - 40
+            y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
+
+        _pdf_draw_pedidos_table(c, pedidos, y, page_w, page_h, roll_name, machine, mode, mirrored)
 
     _end_page()
     c.save()

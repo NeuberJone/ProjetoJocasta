@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 
 from core.version import __version__
 from core.config import (
@@ -13,6 +13,13 @@ from core.config import (
     save_config as save_pxcore_config,
     verify_dev_password,
     set_dev_password,
+)
+from core.printers import (
+    Printer,
+    load_printers,
+    save_printers,
+    add_or_update_printer,
+    remove_printer,
 )
 
 # Root precisa ser TkinterDnD.Tk para drag & drop
@@ -172,6 +179,7 @@ class JocastaHub(RootBase):
         menu_config = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Configurações", menu=menu_config)
         menu_config.add_command(label="Abrir Configurações", command=self.open_settings)
+        menu_config.add_command(label="Gerenciar Impressoras…", command=self.open_printers_dialog)
         menu_config.add_separator()
         menu_config.add_command(label="Abrir Pasta do PXCore", command=self.open_pxcore_folder)
 
@@ -287,6 +295,176 @@ class JocastaHub(RootBase):
 
         ttk.Separator(frm).pack(fill="x", pady=12)
         ttk.Label(frm, text="(O Modo Dev libera módulos e opções avançadas.)").pack(anchor="w")
+
+    # =========================
+    # Impressoras
+    # =========================
+    def open_printers_dialog(self) -> None:
+        printers: list[Printer] = load_printers()
+        selected_key: dict[str, str | None] = {"value": None}
+
+        win = tk.Toplevel(self)
+        win.title("Gerenciar Impressoras")
+        win.geometry("760x480")
+        win.transient(self)
+        win.grab_set()
+
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        cols = ("display_name", "name", "speed", "jpg_dir", "jpg_filename", "notes")
+        tree = ttk.Treeview(frm, columns=cols, show="headings", height=8)
+        for col, txt, w in [
+            ("display_name", "Nome de exibição", 100),
+            ("name", "Nome completo", 150),
+            ("speed", "Velocidade (m/min)", 100),
+            ("jpg_dir", "Pasta do JPG espelhado", 190),
+            ("jpg_filename", "Nome do arquivo", 120),
+            ("notes", "Observações", 120),
+        ]:
+            tree.heading(col, text=txt)
+            tree.column(col, width=w, anchor="w")
+        tree.pack(fill="both", expand=True, pady=(0, 10))
+
+        form = ttk.Frame(frm)
+        form.pack(fill="x")
+
+        ttk.Label(form, text="Nome completo:").grid(row=0, column=0, sticky="w")
+        var_name = tk.StringVar()
+        ttk.Entry(form, textvariable=var_name, width=28).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+
+        ttk.Label(form, text="Nome de exibição (ex.: M1):").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        var_display = tk.StringVar()
+        ttk.Entry(form, textvariable=var_display, width=14).grid(row=0, column=3, sticky="w", padx=6, pady=2)
+
+        ttk.Label(form, text="Velocidade (m/min):").grid(row=1, column=0, sticky="w")
+        var_speed = tk.StringVar(value="1.50")
+        ttk.Entry(form, textvariable=var_speed, width=10).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+
+        ttk.Label(form, text="Observações:").grid(row=1, column=2, sticky="w", padx=(12, 0))
+        var_notes = tk.StringVar()
+        ttk.Entry(form, textvariable=var_notes, width=28).grid(row=1, column=3, sticky="w", padx=6, pady=2)
+
+        ttk.Label(form, text="Pasta do JPG espelhado:").grid(row=2, column=0, sticky="w", pady=(2, 0))
+        var_jpg_dir = tk.StringVar()
+        ttk.Entry(form, textvariable=var_jpg_dir, width=46).grid(
+            row=2, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0)
+        )
+
+        def on_browse_jpg_dir() -> None:
+            folder = filedialog.askdirectory(title="Pasta para salvar o JPG espelhado desta impressora")
+            if folder:
+                var_jpg_dir.set(folder)
+
+        ttk.Button(form, text="Procurar…", command=on_browse_jpg_dir).grid(
+            row=2, column=3, sticky="w", padx=6, pady=(2, 0)
+        )
+
+        ttk.Label(form, text="Nome do arquivo do JPG:").grid(row=3, column=0, sticky="w", pady=(2, 0))
+        var_jpg_filename = tk.StringVar()
+        ttk.Entry(form, textvariable=var_jpg_filename, width=28).grid(
+            row=3, column=1, sticky="w", padx=6, pady=(2, 0)
+        )
+        ttk.Label(
+            form,
+            text="(opcionais — cada módulo decide se usa isso ou a pasta padrão)",
+            foreground="gray",
+        ).grid(row=4, column=1, columnspan=3, sticky="w", padx=6)
+
+        def refresh_tree(select_key: str | None = None) -> None:
+            tree.delete(*tree.get_children())
+            for pr in printers:
+                tree.insert(
+                    "", "end", iid=pr.key,
+                    values=(
+                        pr.display_name, pr.name, f"{pr.speed_m_min:.2f}",
+                        pr.jpg_output_dir, pr.jpg_output_filename, pr.notes,
+                    ),
+                )
+            if select_key:
+                tree.selection_set(select_key)
+
+        def clear_form() -> None:
+            selected_key["value"] = None
+            var_name.set("")
+            var_display.set("")
+            var_speed.set("1.50")
+            var_notes.set("")
+            var_jpg_dir.set("")
+            var_jpg_filename.set("")
+            tree.selection_remove(*tree.selection())
+
+        def on_select(_evt=None) -> None:
+            sel = tree.selection()
+            if not sel:
+                return
+            key = sel[0]
+            pr = next((p for p in printers if p.key == key), None)
+            if pr is None:
+                return
+            selected_key["value"] = pr.key
+            var_name.set(pr.name)
+            var_display.set(pr.display_name)
+            var_speed.set(f"{pr.speed_m_min:.2f}")
+            var_notes.set(pr.notes)
+            var_jpg_dir.set(pr.jpg_output_dir)
+            var_jpg_filename.set(pr.jpg_output_filename)
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+
+        def on_save() -> None:
+            nonlocal printers
+            try:
+                speed = float(var_speed.get().strip().replace(",", "."))
+            except Exception:
+                messagebox.showerror("Impressoras", "Velocidade inválida.")
+                return
+
+            try:
+                printers = add_or_update_printer(
+                    printers,
+                    key=selected_key["value"],
+                    name=var_name.get(),
+                    display_name=var_display.get(),
+                    speed_m_min=speed,
+                    notes=var_notes.get().strip(),
+                    jpg_output_dir=var_jpg_dir.get().strip(),
+                    jpg_output_filename=var_jpg_filename.get().strip(),
+                )
+            except ValueError as e:
+                messagebox.showerror("Impressoras", str(e))
+                return
+
+            save_printers(printers)
+            new_key = selected_key["value"] or next(
+                (p.key for p in printers if p.display_name == var_display.get().strip()), None
+            )
+            refresh_tree(select_key=new_key)
+            selected_key["value"] = new_key
+
+        def on_remove() -> None:
+            nonlocal printers
+            key = selected_key["value"]
+            if not key:
+                messagebox.showwarning("Impressoras", "Selecione uma impressora na lista.")
+                return
+            pr = next((p for p in printers if p.key == key), None)
+            label = pr.display_name if pr else key
+            if not messagebox.askyesno("Remover impressora", f"Remover a impressora '{label}'?"):
+                return
+            printers = remove_printer(printers, key)
+            save_printers(printers)
+            clear_form()
+            refresh_tree()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Nova", command=clear_form).pack(side="left")
+        ttk.Button(btns, text="Salvar", command=on_save).pack(side="left", padx=6)
+        ttk.Button(btns, text="Remover", command=on_remove).pack(side="left", padx=6)
+        ttk.Button(btns, text="Fechar", command=win.destroy).pack(side="right")
+
+        refresh_tree()
 
     # =========================
     # Hub prefs

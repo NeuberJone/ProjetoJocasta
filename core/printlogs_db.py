@@ -16,6 +16,7 @@ class OrderRow:
     end_time: str
     document: str
     fabric: str
+    pedido: str
     height_mm: float
     vpos_mm: float
     real_m: float
@@ -65,6 +66,7 @@ def init_schema(con: sqlite3.Connection) -> None:
             end_time TEXT,
             document TEXT,
             fabric TEXT,
+            pedido TEXT,
             height_mm REAL,
             vpos_mm REAL,
             real_m REAL,
@@ -96,9 +98,17 @@ def init_schema(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def _migrate_schema(con: sqlite3.Connection) -> None:
+    cols = [row[1] for row in con.execute("PRAGMA table_info(orders)").fetchall()]
+    if "pedido" not in cols:
+        con.execute("ALTER TABLE orders ADD COLUMN pedido TEXT")
+        con.commit()
+
+
 def ensure_schema(con: sqlite3.Connection) -> None:
     # alias para evitar “ensure_schema não definido”
     init_schema(con)
+    _migrate_schema(con)
 
 
 def make_job_hash(machine: str, end_time: str, document: str, height_mm: float) -> str:
@@ -150,7 +160,7 @@ def save_export_transactional(
     orders: list[OrderRow],
     event_type: str = "EXPORT_ROLL",
     event_payload: Optional[dict] = None,
-) -> int:
+) -> tuple[int, bool]:
     """
     Salva 1 exportação (roll + orders + evento) de forma transacional.
 
@@ -158,7 +168,8 @@ def save_export_transactional(
     - Se source_hash já existir, NÃO cria novo roll nem reinsere orders.
       Apenas grava novo evento (reexport=True) e retorna o roll_id existente.
 
-    Retorna roll_id.
+    Retorna (roll_id, is_new) — is_new=False quando o source_hash já existia
+    (reexport do mesmo conteúdo) e nada novo foi inserido.
     """
     con = connect()
     try:
@@ -187,14 +198,15 @@ def save_export_transactional(
                 con.execute(
                     """
                     INSERT OR IGNORE INTO orders(
-                        roll_id, end_time, document, fabric, height_mm, vpos_mm, real_m, source_path, job_hash
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                        roll_id, end_time, document, fabric, pedido, height_mm, vpos_mm, real_m, source_path, job_hash
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         roll_id,
                         o.end_time,
                         o.document,
                         o.fabric,
+                        o.pedido,
                         float(o.height_mm),
                         float(o.vpos_mm),
                         float(o.real_m),
@@ -206,7 +218,7 @@ def save_export_transactional(
             log_event(con, event_type, "rolls", roll_id, payload)
 
             con.commit()
-            return roll_id
+            return roll_id, True
 
         except sqlite3.IntegrityError:
             # duplicado pelo source_hash
@@ -222,7 +234,7 @@ def save_export_transactional(
             con.execute("BEGIN;")
             log_event(con, event_type, "rolls", roll_id, payload)
             con.commit()
-            return roll_id
+            return roll_id, False
 
     except Exception:
         try:
@@ -319,7 +331,7 @@ def get_roll_orders(roll_id: int) -> list[dict[str, Any]]:
         ensure_schema(con)
         rows = con.execute(
             """
-            SELECT id, end_time, document, fabric, height_mm, vpos_mm, real_m, source_path
+            SELECT id, end_time, document, fabric, pedido, height_mm, vpos_mm, real_m, source_path
             FROM orders
             WHERE roll_id = ?
             ORDER BY end_time DESC
@@ -393,5 +405,161 @@ def get_roll_summary(roll_id: int) -> dict[str, Any]:
         out.update(dict(s or {}))
         out["fabrics"] = [dict(x) for x in fabrics]
         return out
+    finally:
+        con.close()
+
+
+def find_pedido_fabric_rolls(pairs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """
+    Para cada par (pedido, tecido), retorna os rolos já salvos no banco que
+    contêm esse mesmo par — usado para detectar duplicidade entre rolos
+    (o mesmo pedido com o mesmo tecido impresso em mais de um rolo).
+    """
+    pairs = [(p.strip(), f.strip()) for p, f in pairs if p and f]
+    if not pairs:
+        return {}
+
+    con = connect()
+    try:
+        ensure_schema(con)
+
+        out: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for pedido, fabric in pairs:
+            rows = con.execute(
+                """
+                SELECT DISTINCT r.id AS roll_id, r.roll_name, r.machine, r.created_at
+                FROM orders o
+                JOIN rolls r ON r.id = o.roll_id
+                WHERE o.pedido = ? AND o.fabric = ?
+                ORDER BY r.created_at DESC
+                """,
+                (pedido, fabric),
+            ).fetchall()
+
+            if rows:
+                out[(pedido, fabric)] = [dict(row) for row in rows]
+
+        return out
+    finally:
+        con.close()
+
+
+def get_roll_latest_payload(roll_id: int) -> dict[str, Any]:
+    """
+    Payload (JSON) do evento mais recente de exportação/atualização desse
+    rolo — usado para recuperar metadados que não têm coluna própria
+    (módulo de origem, pedaço cortado associado etc.).
+    """
+    con = connect()
+    try:
+        ensure_schema(con)
+        row = con.execute(
+            """
+            SELECT payload_json
+            FROM events
+            WHERE ref_table='rolls' AND ref_id = ?
+              AND event_type IN ('EXPORT_ROLL', 'UPDATE_ROLL')
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(roll_id),),
+        ).fetchone()
+        if not row or not row["payload_json"]:
+            return {}
+        try:
+            data = json.loads(row["payload_json"])
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    finally:
+        con.close()
+
+
+def get_roll_module(roll_id: int) -> str:
+    return str(get_roll_latest_payload(roll_id).get("module", "") or "")
+
+
+def get_roll_scrap_key(roll_id: int) -> str:
+    return str(get_roll_latest_payload(roll_id).get("scrap_key", "") or "")
+
+
+def update_roll_orders(
+    roll_id: int,
+    machine: str,
+    roll_name: str,
+    export_mode: str,
+    app_version: str,
+    orders: list[OrderRow],
+    event_type: str = "UPDATE_ROLL",
+    event_payload: Optional[dict] = None,
+) -> None:
+    """
+    Atualiza um rolo já registrado (mesmo roll_id) com um novo conjunto de
+    orders — usado quando um rolo fechado é reaberto/editado (acrescentaram
+    serviços nele) em vez de ser reexportado como um rolo novo e desconexo.
+
+    Substitui por completo as orders desse roll_id pelo conjunto informado
+    e grava um evento UPDATE_ROLL (ou o event_type informado) com o payload.
+    """
+    con = connect()
+    try:
+        ensure_schema(con)
+
+        source_hash = make_source_hash(machine, roll_name, export_mode, orders)
+        # Garante unicidade mesmo se o conteúdo coincidir com outro roll —
+        # source_hash aqui é só auditoria, não é usado para dedupe no update.
+        source_hash = hashlib.sha1(f"{source_hash}|roll:{int(roll_id)}".encode("utf-8")).hexdigest()
+
+        payload = dict(event_payload or {})
+        payload.setdefault("orders_count", len(orders))
+        payload.setdefault("export_mode", export_mode)
+
+        con.execute("BEGIN;")
+        try:
+            cur = con.execute("SELECT id FROM rolls WHERE id = ?", (int(roll_id),))
+            if not cur.fetchone():
+                raise ValueError(f"Rolo {roll_id} não encontrado.")
+
+            con.execute(
+                """
+                UPDATE rolls
+                SET roll_name = ?, machine = ?, export_mode = ?, app_version = ?, source_hash = ?
+                WHERE id = ?
+                """,
+                (roll_name, machine, export_mode, app_version, source_hash, int(roll_id)),
+            )
+
+            con.execute("DELETE FROM orders WHERE roll_id = ?", (int(roll_id),))
+
+            for o in orders:
+                job_hash = make_job_hash(machine, o.end_time, o.document, o.height_mm)
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO orders(
+                        roll_id, end_time, document, fabric, pedido, height_mm, vpos_mm, real_m, source_path, job_hash
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        int(roll_id),
+                        o.end_time,
+                        o.document,
+                        o.fabric,
+                        o.pedido,
+                        float(o.height_mm),
+                        float(o.vpos_mm),
+                        float(o.real_m),
+                        o.source_path,
+                        job_hash,
+                    ),
+                )
+
+            log_event(con, event_type, "rolls", int(roll_id), payload)
+
+            con.commit()
+
+        except Exception:
+            con.rollback()
+            raise
+
     finally:
         con.close()

@@ -4,17 +4,23 @@ import os
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import List, Optional
 
 from core.format import fmt_m
-from core.printlogs_db import OrderRow, save_export_transactional
+from core.printers import find_printer_by_display_name
+from core.printlogs_db import (
+    OrderRow,
+    find_pedido_fabric_rolls,
+    save_export_transactional,
+    update_roll_orders,
+)
 from core.version import APP_VERSION
 
 from .config import load_cfg, save_cfg
-from .exporters import export_pdf, pdf_first_page_to_jpg_scaled
-from .models import Block, Job
-from .parser import build_blocks, parse_log_txt
+from .exporters import export_pdf, pdf_all_pages_to_jpg_scaled
+from .models import Block, Job, PedidoSummary
+from .parser import build_blocks, build_pedido_summary, parse_log_txt
 from .paths import MODULE_NAME, jpg_dir, pdf_dir, sanitize_filename, temp_dir, versioned_path
 
 try:
@@ -26,15 +32,49 @@ except Exception:
 
 
 class PXPrintLogsUI(ttk.Frame):
-    def __init__(self, parent):
+    def __init__(self, parent, *, preload: Optional[dict] = None):
         super().__init__(parent)
 
         self.mcfg = load_cfg()
         self.machine: Optional[str] = None
         self.Jobs: List[Job] = []
         self.blocks: List[Block] = []
+        self.pedidos: List[PedidoSummary] = []
+        self.edit_roll_id: Optional[int] = None
 
-        top = ttk.Frame(self)
+        # Container rolável: em telas pequenas o conteúdo (em especial o
+        # painel "Pedidos no rolo", no fim) não cabia na altura da janela.
+        canvas = tk.Canvas(self, highlightthickness=0)
+        vsb = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        body = ttk.Frame(canvas)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(_evt=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(evt):
+            canvas.itemconfig(body_window, width=evt.width)
+
+        body.bind("<Configure>", _on_body_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(_evt=None):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(_evt=None):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+
+        top = ttk.Frame(body)
         top.pack(fill="x", padx=10, pady=10)
 
         ttk.Label(top, text="Nome do rolo").grid(row=0, column=0, sticky="w")
@@ -106,6 +146,13 @@ class PXPrintLogsUI(ttk.Frame):
         _update_custom_state()
         self.var_jpg_mode.trace_add("write", _update_custom_state)
 
+        self.var_use_printer_jpg_path = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            top,
+            text="Usar pasta/arquivo da impressora para o JPG espelhado",
+            variable=self.var_use_printer_jpg_path,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
         btns = ttk.Frame(top)
         btns.grid(row=2, column=4, columnspan=3, sticky="e", pady=(6, 0))
 
@@ -121,27 +168,42 @@ class PXPrintLogsUI(ttk.Frame):
         ttk.Button(row_actions, text="Limpar", command=self.on_clear).pack(
             side="left", padx=4
         )
+        ttk.Button(row_actions, text="Editar tecido", command=self.on_edit_fabric).pack(
+            side="left", padx=4
+        )
+        ttk.Button(
+            row_actions, text="Arquivo(s) de espaço…", command=self.on_edit_space_filenames
+        ).pack(side="left", padx=4)
 
         row_export = ttk.Frame(btns)
         row_export.pack(anchor="e")
 
-        ttk.Button(
+        self.btn_export_normal = ttk.Button(
             row_export,
             text="Exportar PDF Normal",
             command=lambda: self.on_export(which="normal"),
-        ).pack(side="left", padx=4)
-        ttk.Button(
+        )
+        self.btn_export_normal.pack(side="left", padx=4)
+        self.btn_export_mirror = ttk.Button(
             row_export,
             text="Exportar JPG Espelhado",
             command=lambda: self.on_export(which="mirror"),
-        ).pack(side="left", padx=4)
-        ttk.Button(
+        )
+        self.btn_export_mirror.pack(side="left", padx=4)
+        self.btn_export_both = ttk.Button(
             row_export,
             text="Exportar Ambos",
             command=lambda: self.on_export(which="both"),
-        ).pack(side="left", padx=4)
+        )
+        self.btn_export_both.pack(side="left", padx=4)
 
-        drop_frame = ttk.LabelFrame(self, text="Arraste e solte logs .txt aqui")
+        self.var_edit_banner = tk.StringVar(value="")
+        self.lbl_edit_banner = ttk.Label(
+            top, textvariable=self.var_edit_banner, foreground="#8a4b00"
+        )
+        self.lbl_edit_banner.grid(row=5, column=0, columnspan=7, sticky="w", pady=(6, 0))
+
+        drop_frame = ttk.LabelFrame(body, text="Arraste e solte logs .txt aqui")
         drop_frame.pack(fill="x", padx=10, pady=(0, 10))
 
         self.drop_label = ttk.Label(drop_frame, text="Solte arquivos .txt (apenas) para importar")
@@ -158,7 +220,7 @@ class PXPrintLogsUI(ttk.Frame):
                 text="Drag & Drop indisponível (tkinterdnd2 não carregou). Use o botão Importar."
             )
 
-        details = ttk.LabelFrame(self, text="Detalhes do bloco selecionado")
+        details = ttk.LabelFrame(body, text="Detalhes do bloco selecionado")
         details.pack(fill="both", expand=False, padx=10, pady=(0, 10))
 
         self.var_detail_title = tk.StringVar(value="Selecione um tecido na lista abaixo...")
@@ -168,13 +230,14 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.tree_Jobs = ttk.Treeview(
             details,
-            columns=("end", "doc", "h", "v", "real_m"),
+            columns=("end", "doc", "pedido", "h", "v", "real_m"),
             show="headings",
             height=6,
         )
         for col, txt, w in [
             ("end", "EndTime", 140),
-            ("doc", "Documento", 420),
+            ("doc", "Documento", 320),
+            ("pedido", "Pedido", 160),
             ("h", "HeightMM", 90),
             ("v", "VPosMM", 90),
             ("real_m", "Real (m)", 90),
@@ -187,14 +250,14 @@ class PXPrintLogsUI(ttk.Frame):
         self.tree_Jobs.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
         sbj.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
 
-        blocks_box = ttk.LabelFrame(self, text="Ordem do rolo (último impresso primeiro)")
+        blocks_box = ttk.LabelFrame(body, text="Ordem do rolo (último impresso primeiro)")
         blocks_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self.tree_blocks = ttk.Treeview(
             blocks_box,
             columns=("#", "fabric", "total_m", "Jobs", "last"),
             show="headings",
-            height=12,
+            height=8,
         )
         for col, txt, w, anchor in [
             ("#", "#", 40, "w"),
@@ -212,11 +275,71 @@ class PXPrintLogsUI(ttk.Frame):
         sbb.pack(side="right", fill="y")
 
         self.tree_blocks.bind("<<TreeviewSelect>>", self.on_select_block)
+        self.tree_blocks.bind("<Double-1>", self.on_edit_fabric)
 
-        self.status = ttk.Label(self, text="Pronto.")
+        pedidos_box = ttk.LabelFrame(body, text="Pedidos no rolo (duplo clique para editar)")
+        pedidos_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        self.tree_pedidos = ttk.Treeview(
+            pedidos_box,
+            columns=("#", "pedido", "total_m", "Jobs", "last"),
+            show="headings",
+            height=8,
+        )
+        for col, txt, w, anchor in [
+            ("#", "#", 40, "w"),
+            ("pedido", "Pedido", 220, "w"),
+            ("total_m", "Total (m)", 110, "e"),
+            ("Jobs", "Qtd Peças", 90, "e"),
+            ("last", "Último EndTime", 160, "w"),
+        ]:
+            self.tree_pedidos.heading(col, text=txt)
+            self.tree_pedidos.column(col, width=w, anchor=anchor)
+
+        sbp = ttk.Scrollbar(pedidos_box, orient="vertical", command=self.tree_pedidos.yview)
+        self.tree_pedidos.configure(yscrollcommand=sbp.set)
+        self.tree_pedidos.pack(side="left", fill="both", expand=True)
+        sbp.pack(side="right", fill="y")
+
+        self.tree_pedidos.bind("<Double-1>", self.on_edit_pedido)
+
+        self.status = ttk.Label(body, text="Pronto.")
         self.status.pack(fill="x", padx=10, pady=(0, 10))
 
         self._ensure_export_dir()
+
+        if preload:
+            self._apply_preload(preload)
+
+    def _apply_preload(self, preload: dict) -> None:
+        self.edit_roll_id = int(preload["edit_roll_id"])
+        self.machine = str(preload.get("machine") or "") or None
+        self.var_roll.set(str(preload.get("roll_name") or ""))
+        self.Jobs = list(preload.get("jobs") or [])
+
+        if self.machine:
+            self.lbl_machine.configure(text=f"Máquina do lote: {self.machine}")
+
+        self.blocks = build_blocks(self.Jobs, self.machine or "")
+        self.pedidos = build_pedido_summary(self.Jobs)
+        self.refresh_blocks()
+        self.refresh_pedidos()
+        self.clear_details()
+
+        self.var_edit_banner.set(
+            f"✏ Editando rolo já registrado (ID {self.edit_roll_id}) — ao exportar, "
+            "este rolo será ATUALIZADO (não cria um novo registro)."
+        )
+        for btn, label in (
+            (self.btn_export_normal, "Atualizar PDF Normal"),
+            (self.btn_export_mirror, "Atualizar JPG Espelhado"),
+            (self.btn_export_both, "Atualizar Ambos"),
+        ):
+            btn.configure(text=label)
+
+        self.status.configure(
+            text=f"Rolo carregado para edição: {len(self.Jobs)} log(s) já registrados."
+        )
 
     # --------------------------
     # Config helpers
@@ -299,10 +422,14 @@ class PXPrintLogsUI(ttk.Frame):
             padx=12, pady=(12, 6), anchor="w"
         )
 
-        var = tk.StringVar(value="M1")
+        from core.printers import load_printers
+
+        machines = [p.display_name for p in load_printers()] or ["M1", "M2"]
+
+        var = tk.StringVar(value=machines[0])
         frm = ttk.Frame(win)
         frm.pack(padx=12, pady=6, anchor="w")
-        for machine in ("M1", "M2"):
+        for machine in machines:
             ttk.Radiobutton(frm, text=machine, value=machine, variable=var).pack(anchor="w")
 
         out = {"val": None}
@@ -322,6 +449,74 @@ class PXPrintLogsUI(ttk.Frame):
 
         win.wait_window()
         return out["val"]
+
+    def on_edit_space_filenames(self) -> None:
+        win = tk.Toplevel(self)
+        win.title("Arquivo(s) de espaço")
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+
+        ttk.Label(
+            win,
+            text=(
+                "Nome(s) de arquivo/job que a máquina imprime como espaço entre\n"
+                "tecidos (quando não há gap automático) — ao importar, esses logs\n"
+                "são marcados como ESPAÇO e não entram em \"Pedidos no rolo\"."
+            ),
+            justify="left",
+        ).pack(padx=12, pady=(12, 6), anchor="w")
+
+        names: List[str] = list(self.mcfg.get("space_filenames", []))
+
+        list_frame = ttk.Frame(win)
+        list_frame.pack(padx=12, pady=6, fill="both", expand=True)
+
+        lst = tk.Listbox(list_frame, height=6, width=40)
+        lst.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(list_frame, orient="vertical", command=lst.yview)
+        lst.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+
+        for n in names:
+            lst.insert("end", n)
+
+        entry_frame = ttk.Frame(win)
+        entry_frame.pack(padx=12, pady=(0, 6), fill="x")
+
+        var_new = tk.StringVar(value="")
+        ttk.Entry(entry_frame, textvariable=var_new, width=28).pack(side="left", fill="x", expand=True)
+
+        def add_name():
+            name = var_new.get().strip()
+            if not name:
+                return
+            lst.insert("end", name)
+            var_new.set("")
+
+        ttk.Button(entry_frame, text="Adicionar", command=add_name).pack(side="left", padx=(6, 0))
+
+        def remove_selected():
+            sel = list(lst.curselection())
+            for i in reversed(sel):
+                lst.delete(i)
+
+        ttk.Button(win, text="Remover selecionado(s)", command=remove_selected).pack(
+            padx=12, pady=(0, 6), anchor="w"
+        )
+
+        def save():
+            new_names = [lst.get(i).strip() for i in range(lst.size()) if lst.get(i).strip()]
+            self.mcfg["space_filenames"] = new_names
+            save_cfg(self.mcfg)
+            win.destroy()
+
+        btn = ttk.Frame(win)
+        btn.pack(padx=12, pady=(6, 12), fill="x")
+        ttk.Button(btn, text="Salvar", command=save).pack(side="right", padx=4)
+        ttk.Button(btn, text="Cancelar", command=win.destroy).pack(side="right", padx=4)
+
+        win.wait_window()
 
     def _auto_roll_name(self) -> str:
         machine = self.machine or "M?"
@@ -426,7 +621,7 @@ class PXPrintLogsUI(ttk.Frame):
             if path_full in existing_src:
                 continue
 
-            job = parse_log_txt(path_full)
+            job = parse_log_txt(path_full, space_filenames=self.mcfg.get("space_filenames", []))
             if not job:
                 skipped_invalid += 1
                 continue
@@ -451,8 +646,10 @@ class PXPrintLogsUI(ttk.Frame):
             self.Jobs.extend(parsed)
 
         self.blocks = build_blocks(self.Jobs, machine)
+        self.pedidos = build_pedido_summary(self.Jobs)
 
         self.refresh_blocks()
+        self.refresh_pedidos()
         self.clear_details()
 
         extra = f" | Ignorados: {skipped_invalid}" if skipped_invalid else ""
@@ -464,6 +661,8 @@ class PXPrintLogsUI(ttk.Frame):
             )
         )
 
+        self._warn_duplicates_on_import()
+
     # --------------------------
     # Clear / refresh
     # --------------------------
@@ -471,9 +670,11 @@ class PXPrintLogsUI(ttk.Frame):
         self.machine = None
         self.Jobs = []
         self.blocks = []
+        self.pedidos = []
         self.var_roll.set("")
         self.lbl_machine.configure(text="Máquina do lote: (não definida)")
         self.tree_blocks.delete(*self.tree_blocks.get_children())
+        self.tree_pedidos.delete(*self.tree_pedidos.get_children())
         self.tree_Jobs.delete(*self.tree_Jobs.get_children())
         self.var_detail_title.set("Selecione um tecido na lista abaixo...")
         self.status.configure(text="Limpo.")
@@ -491,6 +692,22 @@ class PXPrintLogsUI(ttk.Frame):
                     fmt_m(block.total_m),
                     block.job_count,
                     block.newest_end.strftime("%d/%m/%Y %H:%M:%S"),
+                ),
+            )
+
+    def refresh_pedidos(self):
+        self.tree_pedidos.delete(*self.tree_pedidos.get_children())
+        for idx, pedido in enumerate(self.pedidos, start=1):
+            self.tree_pedidos.insert(
+                "",
+                "end",
+                iid=str(idx - 1),
+                values=(
+                    idx,
+                    pedido.pedido,
+                    fmt_m(pedido.total_m),
+                    pedido.job_count,
+                    pedido.newest_end.strftime("%d/%m/%Y %H:%M:%S"),
                 ),
             )
 
@@ -518,24 +735,174 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.tree_Jobs.delete(*self.tree_Jobs.get_children())
         for job in sorted(block.Jobs, key=lambda item: item.end_time, reverse=True):
+            doc_txt = "— ESPAÇO —" if job.is_gap else job.document
+            pedido_txt = "" if job.is_gap else job.pedido
             self.tree_Jobs.insert(
                 "",
                 "end",
                 values=(
                     job.end_time.strftime("%d/%m/%Y %H:%M:%S"),
-                    job.document,
+                    doc_txt,
+                    pedido_txt,
                     f"{job.height_mm:.1f}",
                     f"{job.vpos_mm:.1f}",
                     fmt_m(job.real_m, suffix=False),
                 ),
             )
 
+    def on_edit_fabric(self, _evt=None):
+        sel = self.tree_blocks.selection()
+        if not sel:
+            messagebox.showwarning(
+                "Nenhum tecido selecionado", "Selecione um tecido na lista para editar."
+            )
+            return
+
+        block_index = int(sel[0])
+        if block_index < 0 or block_index >= len(self.blocks):
+            return
+
+        block = self.blocks[block_index]
+
+        new_name = simpledialog.askstring(
+            "Editar tecido",
+            "Novo nome do tecido:",
+            initialvalue=block.fabric,
+            parent=self.winfo_toplevel(),
+        )
+        if new_name is None:
+            return
+
+        new_name = new_name.strip().upper()
+        if not new_name:
+            messagebox.showwarning("Nome inválido", "O nome do tecido não pode ficar vazio.")
+            return
+
+        if new_name == block.fabric:
+            return
+
+        for job in block.Jobs:
+            job.fabric = new_name
+
+        self.blocks = build_blocks(self.Jobs, self.machine)
+        self.refresh_blocks()
+        self.clear_details()
+        self.status.configure(
+            text=self.status.cget("text") + f" | Tecido renomeado para '{new_name}'"
+        )
+
+    def on_edit_pedido(self, _evt=None):
+        sel = self.tree_pedidos.selection()
+        if not sel:
+            messagebox.showwarning(
+                "Nenhum pedido selecionado", "Selecione um pedido na lista para editar."
+            )
+            return
+
+        pedido_index = int(sel[0])
+        if pedido_index < 0 or pedido_index >= len(self.pedidos):
+            return
+
+        pedido = self.pedidos[pedido_index]
+
+        new_name = simpledialog.askstring(
+            "Editar pedido",
+            "Novo nome do pedido:",
+            initialvalue=pedido.pedido,
+            parent=self.winfo_toplevel(),
+        )
+        if new_name is None:
+            return
+
+        new_name = new_name.strip()
+        if not new_name:
+            messagebox.showwarning("Nome inválido", "O nome do pedido não pode ficar vazio.")
+            return
+
+        if new_name == pedido.pedido:
+            return
+
+        for job in self.Jobs:
+            if job.pedido == pedido.pedido:
+                job.pedido = new_name
+
+        self.pedidos = build_pedido_summary(self.Jobs)
+        self.refresh_pedidos()
+        self.on_select_block()
+        self.status.configure(
+            text=self.status.cget("text") + f" | Pedido renomeado para '{new_name}'"
+        )
+
+    # --------------------------
+    # Duplicidade entre rolos
+    # --------------------------
+    def _find_cross_roll_duplicates(self) -> dict:
+        pairs = {(j.pedido, j.fabric) for j in self.Jobs if not j.is_gap}
+        try:
+            return find_pedido_fabric_rolls(pairs)
+        except Exception:
+            return {}
+
+    def _format_duplicate_message(self, matches: dict) -> str:
+        lines = []
+        for (pedido, fabric), rolls in matches.items():
+            rolls_txt = ", ".join(
+                f"{r['roll_name']} ({r['machine']}, {(r['created_at'] or '')[:16].replace('T', ' ')})"
+                for r in rolls
+            )
+            lines.append(f"- Pedido \"{pedido}\" + Tecido \"{fabric}\" já impresso em: {rolls_txt}")
+        return "\n".join(lines)
+
+    def _warn_duplicates_on_import(self):
+        matches = self._find_cross_roll_duplicates()
+        if not matches:
+            return
+
+        messagebox.showwarning(
+            "Possível duplicidade",
+            "Os itens abaixo já foram impressos (mesmo pedido + mesmo tecido) em outro rolo:\n\n"
+            + self._format_duplicate_message(matches),
+        )
+
+    def _confirm_duplicates_on_export(self) -> bool:
+        matches = self._find_cross_roll_duplicates()
+        if not matches:
+            return True
+
+        return messagebox.askyesno(
+            "Possível duplicidade",
+            "Os itens abaixo já foram impressos (mesmo pedido + mesmo tecido) em outro rolo:\n\n"
+            + self._format_duplicate_message(matches)
+            + "\n\nDeseja continuar com a exportação mesmo assim?",
+        )
+
     # --------------------------
     # Export
     # --------------------------
+    def _resolve_mirror_jpg_path(self, out_jpg_dir: Path, base_name: str) -> Path:
+        if self.var_use_printer_jpg_path.get():
+            pr = find_printer_by_display_name(self.machine or "")
+            if pr and pr.jpg_output_dir.strip():
+                folder = Path(pr.jpg_output_dir.strip())
+                folder.mkdir(parents=True, exist_ok=True)
+
+                filename = pr.jpg_output_filename.strip()
+                if filename:
+                    if not filename.lower().endswith((".jpg", ".jpeg")):
+                        filename += ".jpg"
+                    return folder / filename
+
+                return versioned_path(folder / f"{base_name}.jpg")
+
+        return versioned_path(out_jpg_dir / f"{base_name}.jpg")
+
     def on_export(self, which: str):
         if not self.blocks or not self.machine:
             messagebox.showwarning("Nada para exportar", "Importe logs primeiro.")
+            return
+
+        if not self._confirm_duplicates_on_export():
+            self.status.configure(text="Exportação cancelada (duplicidade).")
             return
 
         roll = self._get_roll_name()
@@ -552,7 +919,7 @@ class PXPrintLogsUI(ttk.Frame):
         base_name = f"{date_iso}_{self.machine}_{roll_safe}_{mode_tag}"
 
         normal_path = str(versioned_path(out_pdf_dir / f"{base_name}.pdf"))
-        mirror_path = str(versioned_path(out_jpg_dir / f"{base_name}.jpg"))
+        mirror_path = str(self._resolve_mirror_jpg_path(out_jpg_dir, base_name))
         tmp_mirror_pdf = str(out_temp_dir / f"{base_name}.tmp.pdf")
 
         try:
@@ -573,11 +940,17 @@ class PXPrintLogsUI(ttk.Frame):
 
         try:
             if which == "normal":
-                export_pdf(normal_path, self.blocks, roll, self.machine, mode=mode, mirrored=False)
+                export_pdf(
+                    normal_path, self.blocks, roll, self.machine,
+                    mode=mode, mirrored=False, pedidos=self.pedidos,
+                )
 
             elif which == "mirror":
-                export_pdf(tmp_mirror_pdf, self.blocks, roll, self.machine, mode=mode, mirrored=True)
-                pdf_first_page_to_jpg_scaled(
+                export_pdf(
+                    tmp_mirror_pdf, self.blocks, roll, self.machine,
+                    mode=mode, mirrored=True, pedidos=self.pedidos,
+                )
+                pdf_all_pages_to_jpg_scaled(
                     tmp_mirror_pdf,
                     mirror_path,
                     target_width_cm=target_cm,
@@ -587,10 +960,16 @@ class PXPrintLogsUI(ttk.Frame):
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
             elif which == "both":
-                export_pdf(normal_path, self.blocks, roll, self.machine, mode=mode, mirrored=False)
+                export_pdf(
+                    normal_path, self.blocks, roll, self.machine,
+                    mode=mode, mirrored=False, pedidos=self.pedidos,
+                )
 
-                export_pdf(tmp_mirror_pdf, self.blocks, roll, self.machine, mode=mode, mirrored=True)
-                pdf_first_page_to_jpg_scaled(
+                export_pdf(
+                    tmp_mirror_pdf, self.blocks, roll, self.machine,
+                    mode=mode, mirrored=True, pedidos=self.pedidos,
+                )
+                pdf_all_pages_to_jpg_scaled(
                     tmp_mirror_pdf,
                     mirror_path,
                     target_width_cm=target_cm,
@@ -616,12 +995,14 @@ class PXPrintLogsUI(ttk.Frame):
                     end_time=job.end_time.isoformat(timespec="seconds"),
                     document=job.document,
                     fabric=job.fabric,
+                    pedido=job.pedido,
                     height_mm=float(job.height_mm),
                     vpos_mm=float(job.vpos_mm),
                     real_m=float(job.real_m),
                     source_path=job.src_file,
                 )
                 for job in self.Jobs
+                if not job.is_gap
             ]
 
             payload = {
@@ -635,17 +1016,32 @@ class PXPrintLogsUI(ttk.Frame):
                 "module": MODULE_NAME,
             }
 
-            roll_id = save_export_transactional(
-                machine=self.machine,
-                roll_name=roll,
-                export_mode=mode,
-                app_version=APP_VERSION,
-                orders=orders,
-                event_type="EXPORT_ROLL",
-                event_payload=payload,
-            )
-
-            self.status.configure(text=self.status.cget("text") + f" | DB ok (roll_id={roll_id})")
+            if self.edit_roll_id is not None:
+                update_roll_orders(
+                    self.edit_roll_id,
+                    machine=self.machine,
+                    roll_name=roll,
+                    export_mode=mode,
+                    app_version=APP_VERSION,
+                    orders=orders,
+                    event_type="UPDATE_ROLL",
+                    event_payload=payload,
+                )
+                roll_id = self.edit_roll_id
+                self.status.configure(
+                    text=self.status.cget("text") + f" | DB atualizado (roll_id={roll_id})"
+                )
+            else:
+                roll_id, _is_new = save_export_transactional(
+                    machine=self.machine,
+                    roll_name=roll,
+                    export_mode=mode,
+                    app_version=APP_VERSION,
+                    orders=orders,
+                    event_type="EXPORT_ROLL",
+                    event_payload=payload,
+                )
+                self.status.configure(text=self.status.cget("text") + f" | DB ok (roll_id={roll_id})")
 
         except Exception as e:
             self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")

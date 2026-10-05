@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from core.printlogs_db import (
     get_roll_events,
+    get_roll_module,
     get_roll_orders,
     get_roll_summary,
     list_rolls,
@@ -45,3 +46,7 @@ def load_roll_orders(roll_id: int):
 
 def load_roll_events(roll_id: int):
     return get_roll_events(int(roll_id))
+
+
+def load_roll_module(roll_id: int) -> str:
+    return get_roll_module(int(roll_id))

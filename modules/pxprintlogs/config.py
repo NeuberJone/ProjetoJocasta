@@ -16,6 +16,7 @@ DEFAULT_CFG = {
     "mirror_jpg_width_mode": "17",
     "mirror_jpg_width_cm_custom": 17.0,
     "mirror_jpg_dpi": 300,
+    "space_filenames": [],
 }
 
 

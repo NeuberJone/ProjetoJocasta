@@ -1,0 +1,454 @@
+{
+  "version": 1,
+  "saved_at": "2026-10-03T11:23:40",
+  "config": {
+    "dpi": "150",
+    "axis": "altura",
+    "speed": "1.00",
+    "setup": "2",
+    "printer": "M1",
+    "mode": "tecido",
+    "gap_between": "1.00",
+    "gap_endroll": "1.00",
+    "roll_other": "60",
+    "batch_name": "",
+    "report_mode": "full",
+    "jpg_mode": "custom",
+    "jpg_custom": "15.0",
+    "auto_fabric_order": true,
+    "manual_fabric_order": [],
+    "use_scraps": true
+  },
+  "jobs": [
+    {
+      "name": "05-10 - Dryfit - Ilacir Pereira Lima.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\05-10 - Dryfit - Ilacir Pereira Lima.jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10069,
+      "h_px": 16200,
+      "dpi_override": null,
+      "length_m": 2.7432,
+      "time_min": 4.7432
+    },
+    {
+      "name": "09-10 - Dryfit - Carnaval Levanta-Te.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\09-10 - Dryfit - Carnaval Levanta-Te.jpeg",
+      "fabric": "Dryfit",
+      "w_px": 9608,
+      "h_px": 4594,
+      "dpi_override": null,
+      "length_m": 0.7779173333333332,
+      "time_min": 2.7779173333333333
+    },
+    {
+      "name": "09-10 - Dryfit - Jusc 4.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\09-10 - Dryfit - Jusc 4.jpeg",
+      "fabric": "Dryfit",
+      "w_px": 9980,
+      "h_px": 11821,
+      "dpi_override": null,
+      "length_m": 2.001689333333333,
+      "time_min": 4.001689333333333
+    },
+    {
+      "name": "13-09 - Dryfit - Gael 7 Anos.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-09 - Dryfit - Gael 7 Anos.jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10063,
+      "h_px": 12788,
+      "dpi_override": null,
+      "length_m": 2.1654346666666666,
+      "time_min": 4.165434666666666
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Argentina).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Argentina).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10056,
+      "h_px": 25703,
+      "dpi_override": null,
+      "length_m": 4.352374666666666,
+      "time_min": 6.352374666666666
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Brasil).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Brasil).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10071,
+      "h_px": 24181,
+      "dpi_override": null,
+      "length_m": 4.094649333333334,
+      "time_min": 6.094649333333334
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Colômbia).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Colômbia).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10070,
+      "h_px": 26799,
+      "dpi_override": null,
+      "length_m": 4.537964,
+      "time_min": 6.537964
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Costa do Marfim).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Costa do Marfim).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10072,
+      "h_px": 17832,
+      "dpi_override": null,
+      "length_m": 3.0195519999999996,
+      "time_min": 5.019551999999999
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Espanha).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Espanha).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10070,
+      "h_px": 28098,
+      "dpi_override": null,
+      "length_m": 4.757928,
+      "time_min": 6.757928
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (França).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (França).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10067,
+      "h_px": 17099,
+      "dpi_override": null,
+      "length_m": 2.8954306666666665,
+      "time_min": 4.895430666666666
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Inglaterra).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Inglaterra).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10026,
+      "h_px": 18494,
+      "dpi_override": null,
+      "length_m": 3.131650666666667,
+      "time_min": 5.131650666666667
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Japão).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Japão).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10014,
+      "h_px": 26613,
+      "dpi_override": null,
+      "length_m": 4.506468,
+      "time_min": 6.506468
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (México).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (México).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10079,
+      "h_px": 29800,
+      "dpi_override": null,
+      "length_m": 5.046133333333333,
+      "time_min": 7.046133333333333
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Noruega).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Noruega).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10071,
+      "h_px": 28144,
+      "dpi_override": null,
+      "length_m": 4.765717333333333,
+      "time_min": 6.765717333333333
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (Portugal).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (Portugal).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10070,
+      "h_px": 17153,
+      "dpi_override": null,
+      "length_m": 2.9045746666666665,
+      "time_min": 4.904574666666667
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 12 (USA).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 12 (USA).jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10068,
+      "h_px": 20474,
+      "dpi_override": null,
+      "length_m": 3.466930666666667,
+      "time_min": 5.466930666666666
+    },
+    {
+      "name": "13-10 - Dryfit - Salum 13.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\13-10 - Dryfit - Salum 13.jpeg",
+      "fabric": "Dryfit",
+      "w_px": 9506,
+      "h_px": 4445,
+      "dpi_override": null,
+      "length_m": 0.7526866666666666,
+      "time_min": 2.7526866666666665
+    },
+    {
+      "name": "16-09 - Dryfit - Bom de Bola 15.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-09 - Dryfit - Bom de Bola 15.jpeg",
+      "fabric": "Dryfit",
+      "w_px": 10077,
+      "h_px": 31619,
+      "dpi_override": null,
+      "length_m": 5.3541506666666665,
+      "time_min": 7.3541506666666665
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (1).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (1).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10077,
+      "h_px": 58951,
+      "dpi_override": null,
+      "length_m": 9.982369333333333,
+      "time_min": 11.982369333333333
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (2).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (2).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10074,
+      "h_px": 58934,
+      "dpi_override": null,
+      "length_m": 9.979490666666665,
+      "time_min": 11.979490666666665
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (3).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (3).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10076,
+      "h_px": 59001,
+      "dpi_override": null,
+      "length_m": 9.990836,
+      "time_min": 11.990836
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (4).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (4).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10071,
+      "h_px": 28642,
+      "dpi_override": null,
+      "length_m": 4.850045333333333,
+      "time_min": 6.850045333333333
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (5).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (5).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10079,
+      "h_px": 59054,
+      "dpi_override": null,
+      "length_m": 9.999810666666667,
+      "time_min": 11.999810666666667
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (6).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (6).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10076,
+      "h_px": 59063,
+      "dpi_override": null,
+      "length_m": 10.001334666666667,
+      "time_min": 12.001334666666667
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (7).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (7).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10068,
+      "h_px": 12242,
+      "dpi_override": null,
+      "length_m": 2.0729786666666663,
+      "time_min": 4.072978666666666
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (8).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (8).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 9946,
+      "h_px": 58827,
+      "dpi_override": null,
+      "length_m": 9.961371999999999,
+      "time_min": 11.961371999999999
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (9).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (9).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10076,
+      "h_px": 58979,
+      "dpi_override": null,
+      "length_m": 9.987110666666666,
+      "time_min": 11.987110666666666
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (10).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (10).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10076,
+      "h_px": 58734,
+      "dpi_override": null,
+      "length_m": 9.945624,
+      "time_min": 11.945624
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (11).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (11).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10076,
+      "h_px": 59057,
+      "dpi_override": null,
+      "length_m": 10.000318666666665,
+      "time_min": 12.000318666666665
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (12).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (12).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10061,
+      "h_px": 59029,
+      "dpi_override": null,
+      "length_m": 9.995577333333332,
+      "time_min": 11.995577333333332
+    },
+    {
+      "name": "16-10 - Aeroready - Penharol BH (13).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Aeroready - Penharol BH (13).jpeg",
+      "fabric": "Aeroready",
+      "w_px": 10070,
+      "h_px": 59085,
+      "dpi_override": null,
+      "length_m": 10.005059999999999,
+      "time_min": 12.005059999999999
+    },
+    {
+      "name": "16-10 - Faixa de Capitão - Penharol BH.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Faixa de Capitão - Penharol BH.jpeg",
+      "fabric": "Faixa de Capitão",
+      "w_px": 2185,
+      "h_px": 442,
+      "dpi_override": null,
+      "length_m": 0.07484533333333333,
+      "time_min": 2.074845333333333
+    },
+    {
+      "name": "16-10 - Oxford - Penharol BH.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Oxford - Penharol BH.jpeg",
+      "fabric": "Oxford",
+      "w_px": 17716,
+      "h_px": 8562,
+      "dpi_override": null,
+      "length_m": 1.4498319999999998,
+      "time_min": 3.449832
+    },
+    {
+      "name": "16-10 - Ribana - Penharol BH (1).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Ribana - Penharol BH (1).jpeg",
+      "fabric": "Ribana",
+      "w_px": 10127,
+      "h_px": 3862,
+      "dpi_override": null,
+      "length_m": 0.6539653333333333,
+      "time_min": 2.6539653333333333
+    },
+    {
+      "name": "16-10 - Ribana - Penharol BH (2).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Ribana - Penharol BH (2).jpeg",
+      "fabric": "Ribana",
+      "w_px": 10127,
+      "h_px": 5584,
+      "dpi_override": null,
+      "length_m": 0.9455573333333332,
+      "time_min": 2.9455573333333334
+    },
+    {
+      "name": "16-10 - Ribana - Penharol BH (3).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Ribana - Penharol BH (3).jpeg",
+      "fabric": "Ribana",
+      "w_px": 10127,
+      "h_px": 5584,
+      "dpi_override": null,
+      "length_m": 0.9455573333333332,
+      "time_min": 2.9455573333333334
+    },
+    {
+      "name": "16-10 - Ribana - Penharol BH (4).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Ribana - Penharol BH (4).jpeg",
+      "fabric": "Ribana",
+      "w_px": 10129,
+      "h_px": 5584,
+      "dpi_override": null,
+      "length_m": 0.9455573333333332,
+      "time_min": 2.9455573333333334
+    },
+    {
+      "name": "16-10 - Tactel - Penharol BH.jpeg",
+      "path": "Z:\\_Rodar\\03-10\\16-10 - Tactel - Penharol BH.jpeg",
+      "fabric": "Tactel",
+      "w_px": 8407,
+      "h_px": 6972,
+      "dpi_override": null,
+      "length_m": 1.1805919999999999,
+      "time_min": 3.180592
+    },
+    {
+      "name": "19-10 - comeia  - Escolinha Reis 21 (5).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\19-10 - comeia  - Escolinha Reis 21 (5).jpeg",
+      "fabric": "Colméia",
+      "w_px": 9958,
+      "h_px": 12453,
+      "dpi_override": null,
+      "length_m": 2.108708,
+      "time_min": 4.108708
+    },
+    {
+      "name": "19-10 - Dry X - Escolinha Reis 21 (2).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\19-10 - Dry X - Escolinha Reis 21 (2).jpeg",
+      "fabric": "DryX",
+      "w_px": 9378,
+      "h_px": 5234,
+      "dpi_override": null,
+      "length_m": 0.8862906666666666,
+      "time_min": 2.8862906666666666
+    },
+    {
+      "name": "19-10 - Elastano  - Escolinha Reis 21 (4).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\19-10 - Elastano  - Escolinha Reis 21 (4).jpeg",
+      "fabric": "Elastano",
+      "w_px": 9679,
+      "h_px": 2044,
+      "dpi_override": null,
+      "length_m": 0.34611733333333333,
+      "time_min": 2.3461173333333334
+    },
+    {
+      "name": "19-10 - Madri - Escolinha Reis 21 (3).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\19-10 - Madri - Escolinha Reis 21 (3).jpeg",
+      "fabric": "Jacquard Madri",
+      "w_px": 9728,
+      "h_px": 8549,
+      "dpi_override": null,
+      "length_m": 1.4476306666666665,
+      "time_min": 3.4476306666666665
+    },
+    {
+      "name": "19-10 - Telinha  - Escolinha Reis 21 (1).jpeg",
+      "path": "Z:\\_Rodar\\03-10\\19-10 - Telinha  - Escolinha Reis 21 (1).jpeg",
+      "fabric": "Telinha",
+      "w_px": 7417,
+      "h_px": 4063,
+      "dpi_override": null,
+      "length_m": 0.6880013333333332,
+      "time_min": 2.6880013333333332
+    }
+  ]
+}

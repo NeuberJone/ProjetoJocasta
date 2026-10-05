@@ -10,10 +10,12 @@ class Job:
     end_time: datetime
     document: str
     fabric: str
+    pedido: str
     height_mm: float
     vpos_mm: float
     real_mm: float
     src_file: str
+    is_gap: bool = False
 
     @property
     def real_m(self) -> float:
@@ -41,3 +43,11 @@ class Block:
     @property
     def oldest_end(self) -> datetime:
         return min(j.end_time for j in self.Jobs)
+
+
+@dataclass
+class PedidoSummary:
+    pedido: str
+    total_m: float
+    job_count: int
+    newest_end: datetime

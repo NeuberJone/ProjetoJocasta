@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib
+import traceback
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Optional
@@ -8,10 +11,16 @@ from typing import Optional
 from .helpers import format_m, payload_summary, safe_int
 from .repository import (
     load_roll_events,
+    load_roll_module,
     load_roll_orders,
     load_roll_summary,
     search_rolls,
 )
+
+_EDIT_ROUTES = {
+    "PXPrintCalc": "modules.PXPrintCalc",
+    "PXPrintLogs": "modules.PXPrintLogs",
+}
 
 
 class PXSearchOrdersUI(ttk.Frame):
@@ -58,8 +67,11 @@ class PXSearchOrdersUI(ttk.Frame):
         ttk.Button(filtros, text="Limpar filtros", command=self.clear_filters).grid(
             row=0, column=9, sticky="w", padx=(0, 10), pady=8
         )
+        ttk.Button(filtros, text="Editar rolo", command=self.on_edit_roll).grid(
+            row=0, column=10, sticky="w", padx=(0, 10), pady=8
+        )
 
-        filtros.columnconfigure(10, weight=1)
+        filtros.columnconfigure(11, weight=1)
 
         self.ent_name_like.bind("<Return>", lambda _e: self.reload())
         self.ent_order_like.bind("<Return>", lambda _e: self.reload())
@@ -272,6 +284,120 @@ class PXSearchOrdersUI(ttk.Frame):
             self.status.configure(text=f"Copiado: {roll_name}")
         except Exception:
             pass
+
+    def on_edit_roll(self) -> None:
+        roll_id = self._current_roll_id
+        if roll_id is None:
+            messagebox.showinfo("Editar rolo", "Selecione um rolo na lista acima.")
+            return
+
+        try:
+            module = load_roll_module(roll_id)
+        except Exception as e:
+            messagebox.showerror("Editar rolo", f"Falha ao identificar o módulo de origem.\n\n{type(e).__name__}: {e}")
+            return
+
+        module_path = _EDIT_ROUTES.get(module)
+        if not module_path:
+            messagebox.showerror(
+                "Editar rolo",
+                "Não foi possível identificar em qual módulo este rolo foi gerado "
+                "(rolo antigo ou sem essa informação registrada).",
+            )
+            return
+
+        try:
+            summary = load_roll_summary(roll_id)
+            orders = load_roll_orders(roll_id)
+        except Exception as e:
+            messagebox.showerror("Editar rolo", f"Falha ao carregar o rolo.\n\n{type(e).__name__}: {e}")
+            return
+
+        if not summary:
+            messagebox.showerror("Editar rolo", "Rolo não encontrado.")
+            return
+
+        roll_name = str(summary.get("roll_name", ""))
+        machine = str(summary.get("machine", ""))
+
+        def _parse_end_time(raw) -> datetime:
+            try:
+                return datetime.fromisoformat(str(raw))
+            except Exception:
+                return datetime.now()
+
+        try:
+            mod = importlib.import_module(module_path)
+            build_ui = getattr(mod, "build_ui", None)
+            if not callable(build_ui):
+                raise RuntimeError(f"{module_path} não possui build_ui(parent).")
+
+            if module == "PXPrintCalc":
+                preload = {
+                    "edit_roll_id": roll_id,
+                    "batch_name": roll_name,
+                    "jobs": [
+                        {
+                            "name": str(o.get("document", "")),
+                            "path": str(o.get("source_path") or "") or None,
+                            "fabric": str(o.get("fabric", "Outro")),
+                            "length_m": float(o.get("real_m", 0.0) or 0.0),
+                        }
+                        for o in orders
+                    ],
+                }
+            else:
+                from modules.pxprintlogs.models import Job as PrintLogsJob
+
+                preload = {
+                    "edit_roll_id": roll_id,
+                    "roll_name": roll_name,
+                    "machine": machine,
+                    "jobs": [
+                        PrintLogsJob(
+                            end_time=_parse_end_time(o.get("end_time")),
+                            document=str(o.get("document", "")),
+                            fabric=str(o.get("fabric", "")),
+                            pedido=str(o.get("pedido") or ""),
+                            height_mm=float(o.get("height_mm", 0.0) or 0.0),
+                            vpos_mm=float(o.get("vpos_mm", 0.0) or 0.0),
+                            real_mm=float(o.get("real_m", 0.0) or 0.0) * 1000.0,
+                            src_file=str(o.get("source_path") or ""),
+                        )
+                        for o in orders
+                    ],
+                }
+        except Exception as e:
+            messagebox.showerror(
+                "Editar rolo",
+                f"Falha ao preparar os dados do rolo para edição.\n\n{traceback.format_exc()}",
+            )
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Editar rolo #{roll_id} — {module}")
+        win.geometry("1200x800")
+
+        try:
+            ui = build_ui(win, preload=preload)
+            # Alguns módulos (ex.: PXPrintCalc) já se empacotam sozinhos; outros
+            # (ex.: PXPrintLogsUI) retornam o próprio frame esperando que quem
+            # chamou faça o pack — igual ao que o JocastaHub faz em _add_tab.
+            if isinstance(ui, tk.Widget) and not ui.winfo_manager():
+                ui.pack(fill="both", expand=True)
+        except Exception:
+            win.destroy()
+            messagebox.showerror(
+                "Editar rolo",
+                f"Falha ao abrir o módulo para edição.\n\n{traceback.format_exc()}",
+            )
+            return
+
+        def _on_close():
+            win.destroy()
+            self.reload()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
 
     def on_select_roll(self, _evt=None) -> None:
         sel = self.tree_rolls.selection()
