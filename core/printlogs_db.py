@@ -41,7 +41,11 @@ def connect() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row  # permite dict(row)
 
     con.execute("PRAGMA foreign_keys = ON;")
-    con.execute("PRAGMA journal_mode = WAL;")
+    # DELETE (journal tradicional, baseado em lock de arquivo) em vez de WAL —
+    # WAL depende de memória compartilhada (mmap) que não funciona de forma
+    # confiável em pastas de rede, e o base_dir pode apontar pra uma pasta de
+    # rede compartilhada entre vários computadores.
+    con.execute("PRAGMA journal_mode = DELETE;")
     con.execute("PRAGMA synchronous = NORMAL;")
     return con
 
@@ -92,6 +96,10 @@ def init_schema(con: sqlite3.Connection) -> None:
             reason TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS roll_sequence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT
         );
         """
     )
@@ -150,6 +158,32 @@ def log_event(
         "INSERT INTO events(created_at, event_type, ref_table, ref_id, payload_json) VALUES(?,?,?,?,?)",
         (_now_iso(), event_type, ref_table, int(ref_id), json.dumps(payload or {}, ensure_ascii=False)),
     )
+
+
+def next_roll_sequence() -> int:
+    """
+    Próximo número sequencial de rolo/lote, de forma atômica — seguro mesmo
+    com vários computadores usando o mesmo banco compartilhado (base_dir
+    apontando pra uma pasta de rede), já que o AUTOINCREMENT do SQLite
+    garante que cada INSERT recebe um id novo e único, mesmo sob escrita
+    concorrente no mesmo arquivo.
+    """
+    con = connect()
+    try:
+        ensure_schema(con)
+        con.execute("BEGIN IMMEDIATE;")
+        cur = con.execute("INSERT INTO roll_sequence DEFAULT VALUES")
+        seq = int(cur.lastrowid)
+        con.commit()
+        return seq
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        con.close()
 
 
 def save_export_transactional(

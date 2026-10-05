@@ -35,13 +35,15 @@ def _config_path() -> Path:
 def _ensure_dirs(cfg: PXCoreConfig) -> None:
     base = Path(cfg.base_dir)
 
-    # Estrutura padrão
-    (base / "lists").mkdir(parents=True, exist_ok=True)
-    (base / "json").mkdir(parents=True, exist_ok=True)
-    (base / "logs").mkdir(parents=True, exist_ok=True)
-    (base / "exports").mkdir(parents=True, exist_ok=True)
-    (base / "temp").mkdir(parents=True, exist_ok=True)
-    (base / "data").mkdir(parents=True, exist_ok=True)
+    # Estrutura padrão. Falhas aqui (ex.: base_dir numa pasta de rede
+    # momentaneamente fora do ar) não devem derrubar load_config() — isso
+    # faria o caller tratar como "config corrompido" e resetar base_dir pro
+    # padrão, apagando a configuração do usuário.
+    for sub in ("lists", "json", "logs", "exports", "temp", "data"):
+        try:
+            (base / sub).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
 
 

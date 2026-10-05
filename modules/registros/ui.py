@@ -17,9 +17,19 @@ from .repository import (
     search_rolls,
 )
 
+# Mapeia tanto os nomes antigos (rolos já exportados antes do rebrand pra
+# Nexor) quanto os novos — sem isso, "Editar rolo" quebraria pra todo o
+# histórico de rolos exportados com payload["module"] = "PXPrintCalc"/"PXPrintLogs".
 _EDIT_ROUTES = {
-    "PXPrintCalc": "modules.PXPrintCalc",
-    "PXPrintLogs": "modules.PXPrintLogs",
+    "PXPrintCalc": "modules.planejador",
+    "Planejador": "modules.planejador",
+    "PXPrintLogs": "modules.operacao",
+    "Operacao": "modules.operacao",
+}
+
+_DISPLAY_NAMES = {
+    "modules.planejador": "Planejador",
+    "modules.operacao": "Operação",
 }
 
 
@@ -222,7 +232,7 @@ class PXSearchOrdersUI(ttk.Frame):
             )
         except Exception as e:
             messagebox.showerror(
-                "PXSearchOrders",
+                "Registros",
                 f"Falha ao carregar rolos.\n\n{type(e).__name__}: {e}",
             )
             return
@@ -332,7 +342,7 @@ class PXSearchOrdersUI(ttk.Frame):
             if not callable(build_ui):
                 raise RuntimeError(f"{module_path} não possui build_ui(parent).")
 
-            if module == "PXPrintCalc":
+            if module_path == "modules.planejador":
                 preload = {
                     "edit_roll_id": roll_id,
                     "batch_name": roll_name,
@@ -347,7 +357,7 @@ class PXSearchOrdersUI(ttk.Frame):
                     ],
                 }
             else:
-                from modules.pxprintlogs.models import Job as PrintLogsJob
+                from modules.operacao.models import Job as PrintLogsJob
 
                 preload = {
                     "edit_roll_id": roll_id,
@@ -375,14 +385,15 @@ class PXSearchOrdersUI(ttk.Frame):
             return
 
         win = tk.Toplevel(self)
-        win.title(f"Editar rolo #{roll_id} — {module}")
+        win.title(f"Editar rolo #{roll_id} — {_DISPLAY_NAMES.get(module_path, module)}")
         win.geometry("1200x800")
 
         try:
             ui = build_ui(win, preload=preload)
-            # Alguns módulos (ex.: PXPrintCalc) já se empacotam sozinhos; outros
-            # (ex.: PXPrintLogsUI) retornam o próprio frame esperando que quem
-            # chamou faça o pack — igual ao que o JocastaHub faz em _add_tab.
+            # Alguns módulos (ex.: Planejador) já se empacotam sozinhos; outros
+            # (ex.: PXPrintLogsUI/Operação) retornam o próprio frame esperando
+            # que quem chamou faça o pack — igual ao que o Nexor faz ao montar
+            # a página de cada módulo no menu lateral.
             if isinstance(ui, tk.Widget) and not ui.winfo_manager():
                 ui.pack(fill="both", expand=True)
         except Exception:

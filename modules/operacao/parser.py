@@ -67,19 +67,41 @@ def _normalize_doc_name(name: str) -> str:
     return name.casefold()
 
 
-def is_space_document(document: str, space_filenames: Optional[Iterable[str]]) -> bool:
-    """True se `document` (nome do arquivo/job registrado no log) corresponde
-    a um dos arquivos de espaço cadastrados — usado por máquinas que não têm
-    gap automático entre tecidos e imprimem um arquivo dedicado como espaço."""
-    if not space_filenames:
-        return False
+def normalize_space_entries(raw: Optional[Iterable[object]]) -> List[dict]:
+    """Normaliza a lista de arquivos de espaço cadastrados para
+    {"filename": ..., "display_name": ...} — aceita tanto o formato novo
+    (dict) quanto o antigo (string simples, migrado com display_name
+    padrão "ESPAÇO")."""
+    out: List[dict] = []
+    for item in (raw or []):
+        if isinstance(item, dict):
+            filename = str(item.get("filename", "")).strip()
+            display_name = str(item.get("display_name", "")).strip() or "ESPAÇO"
+        else:
+            filename = str(item or "").strip()
+            display_name = "ESPAÇO"
+        if filename:
+            out.append({"filename": filename, "display_name": display_name})
+    return out
+
+
+def match_space_entry(document: str, space_entries: Optional[Iterable[dict]]) -> Optional[dict]:
+    """Entrada de arquivo de espaço cadastrada que corresponde a `document`
+    (nome do arquivo/job registrado no log), ou None — usado por máquinas
+    que não têm gap automático entre tecidos e imprimem um arquivo dedicado
+    como espaço."""
+    if not space_entries:
+        return None
     norm_doc = _normalize_doc_name(document)
     if not norm_doc:
-        return False
-    return any(_normalize_doc_name(sf) == norm_doc for sf in space_filenames if sf)
+        return None
+    for entry in space_entries:
+        if _normalize_doc_name(str(entry.get("filename", ""))) == norm_doc:
+            return entry
+    return None
 
 
-def parse_log_txt(path: str, space_filenames: Optional[Iterable[str]] = None) -> Optional[Job]:
+def parse_log_txt(path: str, space_entries: Optional[Iterable[dict]] = None) -> Optional[Job]:
     try:
         txt = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
@@ -122,10 +144,12 @@ def parse_log_txt(path: str, space_filenames: Optional[Iterable[str]] = None) ->
     vpos_mm = _f(item1.get("VPositionMM", "0"))
     real_mm = height_mm
 
-    is_gap = is_space_document(document, space_filenames)
+    space_match = match_space_entry(document, space_entries)
+    is_gap = space_match is not None
     if is_gap:
-        fabric = "ESPAÇO"
-        pedido = "ESPAÇO"
+        display_name = str(space_match.get("display_name") or "ESPAÇO")
+        fabric = display_name
+        pedido = display_name
     else:
         fabric = fabric_from_document(document)
         pedido = pedido_from_document(document)

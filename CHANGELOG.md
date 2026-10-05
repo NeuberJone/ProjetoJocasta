@@ -1,5 +1,64 @@
 # Changelog
 
+## [1.0.0] - 2026-10-05
+### Changed — Rebrand para Nexor
+- O programa foi renomeado de "Projeto Jocasta"/JocastaHub para **Nexor** (`Nexor.py`, `Nexor.spec`, título da janela, versão).
+- O programa agora tem só os 3 módulos da família de impressão, renomeados: **PXPrintLogs → Operação**, **PXPrintCalc → Planejador**, **PXSearchOrders → Registros**. Todos os outros módulos (PXFlow, PXComposer, PXDupe, PXPrint, PXOrderList, PXBridge, PXList e variantes, PXSort e variantes, PXTotaList) foram removidos do programa — o código de todos eles continua preservado em `Legado/snapshot-pre-nexor-2026-10-05/` (cópia completa do projeto como estava antes desta mudança).
+- A navegação por abas ("Fluxos de Trabalho") foi trocada por um **menu lateral fixo** com os 3 módulos (Planejador, Operação, Registros). O Modo Dev foi removido (só existia para liberar módulos que não existem mais).
+- Configurações já cadastradas (tecidos, pedaços cortados, impressoras, arquivos de espaço, preferências de PDF/JPG) são migradas automaticamente na primeira vez que o Nexor roda — nada precisa ser recadastrado.
+- Rolos já exportados antes dessa mudança continuam funcionando normalmente no "Editar rolo" do Registros (compatibilidade com o nome antigo do módulo mantida).
+
+## [0.5.0] - 2026-10-05
+### Added
+- PXPrintCalc e PXPrintLogs: o nome do rolo/lote agora usa um número sequencial (`M1_05-10-2026_0001`) no lugar do horário — o número é único e nunca se repete, mesmo com vários computadores usando o mesmo banco compartilhado (ver abaixo), já que é gerado de forma atômica no banco de dados. Se não conseguir gerar (ex.: banco inacessível), mostra um erro claro em vez de usar um nome arriscado de duplicar
+- JocastaHub: o "Diretório base do PXCore" em Configurações agora é editável (com botão "Procurar…" para escolher uma pasta de rede) — antes só mostrava o valor atual. É o que permite usar o mesmo banco/pastas de PDF-JPG em vários computadores
+
+### Changed
+- `core/printlogs_db.py`: trocado o modo de journal do SQLite de WAL para DELETE — WAL depende de memória compartilhada que não funciona de forma confiável em pastas de rede, e o banco agora pode ser apontado para uma pasta de rede compartilhada entre computadores
+
+### Fixed
+- `core/config.py`: uma falha ao criar as subpastas padrão (ex.: pasta de rede temporariamente fora do ar) fazia `load_config()` tratar como "config corrompido" e resetar silenciosamente o diretório base pro padrão, apagando a configuração do usuário. Agora essas falhas são ignoradas sem afetar o resto da configuração
+
+## [0.4.14] - 2026-10-05
+### Changed
+- PXPrintCalc e PXPrintLogs: corrigido o layout do JPG combinado (quando "Usar pasta/arquivo da impressora" está marcado) — o normal (não espelhado) e o espelhado agora ficam lado a lado (normal à esquerda, espelhado à direita), igual ao modelo de referência, em vez de empilhados um embaixo do outro
+
+## [0.4.13] - 2026-10-05
+### Changed
+- PXPrintCalc e PXPrintLogs: ao exportar o JPG espelhado com "Usar pasta/arquivo da impressora" marcado, o arquivo agora traz o JPG espelhado seguido do JPG normal (não espelhado) num único arquivo — já que é o único arquivo que a impressora recebe. Sem essa opção marcada, a exportação continua normal (só o espelhado, na pasta padrão)
+
+## [0.4.12] - 2026-10-05
+### Changed
+- PXPrintCalc: se o registro no SearchOrders falhar ao exportar, a mensagem agora mostra o erro completo (traceback) em vez de só o nome do tipo de erro, e se a fila gerada não tiver nenhum item (só espaços) isso agora aparece como aviso em vez de ficar em silêncio
+
+## [0.4.11] - 2026-10-05
+### Fixed
+- PXPrintCalc: corrigido o planejador do modo "tecido" (bin packing) — quando nenhum item cabia no limite configurado do rolo (ex.: um tecido com metragem de rolo pequena, tipo 1m, combinada com o "Gap antes fim rolo" padrão de 1m), os itens que não cabiam em nenhum rolo eram todos empilhados juntos no último rolo tentado, em vez de cada um ir para o seu próprio rolo. Agora cada item só entra num rolo já aberto se realmente couber nele; senão abre um rolo novo só para ele
+
+## [0.4.10] - 2026-10-05
+### Added
+- PXPrintCalc: menu de contexto (botão direito) na lista da fila — "Editar item…", "Definir tecido…", "Mover para cima/baixo" (modo original), "Remover item(s)" e "Atualizar"
+
+## [0.4.9] - 2026-10-05
+### Added
+- PXPrintCalc: em "Selecionar pedaços a usar…", nova opção de "Tamanho exato do pedaço" ou "Sangria" — com sangria ativa, cada pedaço cortado é considerado com alguns cm a mais do que a metragem cadastrada (padrão 5 cm, editável) ao planejar a fila, dando uma tolerância de corte
+
+## [0.4.8] - 2026-10-05
+### Fixed
+- PXPrintCalc: trocar o "Modo" (original/tecido) agora recalcula a fila na hora — antes, ao voltar de "original" para "tecido", a tabela continuava mostrando o agrupamento e as alças de arraste do modo anterior até clicar manualmente em "Gerar Fila"
+
+## [0.4.7] - 2026-10-05
+### Fixed
+- PXPrintLogs: no diálogo "Arquivo(s) de espaço…", depois de cadastrar um arquivo, clicar em "Adicionar / Atualizar" de novo sem antes limpar o formulário sobrescrevia o item recém-criado em vez de adicionar um novo. Agora o formulário limpa sozinho após um cadastro novo, e há também um botão "Novo" para começar um cadastro do zero a qualquer momento
+
+## [0.4.6] - 2026-10-05
+### Added
+- PXPrintCalc: duplo clique numa linha "— ESPAÇO —" da fila agora abre um diálogo para alterar o tamanho daquele espaço específico (padrão continua sendo o valor configurado em "Espaço entre tecidos"/"fim de rolo"), com opção de "Restaurar padrão"
+
+## [0.4.5] - 2026-10-05
+### Added
+- PXPrintLogs: cada arquivo de espaço cadastrado em "Arquivo(s) de espaço…" agora tem um "Nome de exibição" próprio, mostrado nas listagens (bloco/tecido e detalhe de pedidos) no lugar do nome do arquivo — útil quando há mais de um arquivo de espaço diferente (ex.: "Fim de rolo" vs "Troca de tecido")
+
 ## [0.4.4] - 2026-10-05
 ### Added
 - PXPrintCalc: botão "Selecionar pedaços a usar…" ao lado de "Priorizar pedaços de tecido cortados" — permite marcar quais pedaços cortados (não usados) entram no planejamento da fila atual. Útil quando há pedaços do mesmo tecido vindos de fabricantes/lotes diferentes que não podem ser misturados no mesmo rolo: basta desmarcar os que não devem ser usados nesta fila

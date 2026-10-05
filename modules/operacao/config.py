@@ -4,9 +4,13 @@ import json
 import os
 from pathlib import Path
 
-MODULE_NAME = "PXPrintLogs"
+from core.migrate import migrate_legacy_path
 
-APP_DIR = Path(os.environ.get("APPDATA") or str(Path.home())) / "ProjetoJocasta" / MODULE_NAME
+MODULE_NAME = "Operacao"
+
+_APPDATA = Path(os.environ.get("APPDATA") or str(Path.home()))
+APP_DIR = _APPDATA / "Nexor" / MODULE_NAME
+migrate_legacy_path(_APPDATA / "ProjetoJocasta" / "PXPrintLogs", APP_DIR)
 APP_DIR.mkdir(parents=True, exist_ok=True)
 
 CFG_PATH = APP_DIR / "config.json"

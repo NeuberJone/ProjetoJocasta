@@ -1,4 +1,4 @@
-APP_NAME = "Projeto Jocasta"
-APP_VERSION = "0.4.4"
+APP_NAME = "Nexor"
+APP_VERSION = "1.0.0"
 
 __version__ = APP_VERSION

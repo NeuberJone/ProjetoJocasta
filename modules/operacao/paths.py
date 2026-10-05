@@ -7,7 +7,7 @@ from pathlib import Path
 from core.config import load_config
 from core.paths import pdf_rolls_dir, print_jpg_dir, temp_module_dir
 
-MODULE_NAME = "PXPrintLogs"
+MODULE_NAME = "Operacao"
 
 
 def pxcore_base_dir() -> Path:

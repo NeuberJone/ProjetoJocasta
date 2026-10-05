@@ -5,22 +5,23 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from core.format import fmt_m
 from core.printers import find_printer_by_display_name
 from core.printlogs_db import (
     OrderRow,
     find_pedido_fabric_rolls,
+    next_roll_sequence,
     save_export_transactional,
     update_roll_orders,
 )
 from core.version import APP_VERSION
 
 from .config import load_cfg, save_cfg
-from .exporters import export_pdf, pdf_all_pages_to_jpg_scaled
+from .exporters import export_pdf, mirror_and_normal_to_jpg_scaled, pdf_all_pages_to_jpg_scaled
 from .models import Block, Job, PedidoSummary
-from .parser import build_blocks, build_pedido_summary, parse_log_txt
+from .parser import build_blocks, build_pedido_summary, normalize_space_entries, parse_log_txt
 from .paths import MODULE_NAME, jpg_dir, pdf_dir, sanitize_filename, temp_dir, versioned_path
 
 try:
@@ -462,52 +463,104 @@ class PXPrintLogsUI(ttk.Frame):
             text=(
                 "Nome(s) de arquivo/job que a máquina imprime como espaço entre\n"
                 "tecidos (quando não há gap automático) — ao importar, esses logs\n"
-                "são marcados como ESPAÇO e não entram em \"Pedidos no rolo\"."
+                "são identificados e não entram em \"Pedidos no rolo\". O \"Nome de\n"
+                "exibição\" aparece nas listagens no lugar do nome do arquivo —\n"
+                "útil quando há arquivos de espaço diferentes."
             ),
             justify="left",
         ).pack(padx=12, pady=(12, 6), anchor="w")
 
-        names: List[str] = list(self.mcfg.get("space_filenames", []))
+        entries: List[dict] = normalize_space_entries(self.mcfg.get("space_filenames", []))
 
-        list_frame = ttk.Frame(win)
-        list_frame.pack(padx=12, pady=6, fill="both", expand=True)
+        cols = ("filename", "display_name")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=8)
+        tree.heading("filename", text="Arquivo/job")
+        tree.column("filename", width=220, anchor="w")
+        tree.heading("display_name", text="Nome de exibição")
+        tree.column("display_name", width=160, anchor="w")
+        tree.pack(padx=12, pady=6, fill="both", expand=True)
 
-        lst = tk.Listbox(list_frame, height=6, width=40)
-        lst.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(list_frame, orient="vertical", command=lst.yview)
-        lst.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
+        def refresh_tree(select_index: Optional[int] = None):
+            tree.delete(*tree.get_children())
+            for i, e in enumerate(entries):
+                tree.insert("", "end", iid=str(i), values=(e["filename"], e["display_name"]))
+            if select_index is not None and 0 <= select_index < len(entries):
+                tree.selection_set(str(select_index))
 
-        for n in names:
-            lst.insert("end", n)
+        refresh_tree()
 
-        entry_frame = ttk.Frame(win)
-        entry_frame.pack(padx=12, pady=(0, 6), fill="x")
+        form = ttk.Frame(win)
+        form.pack(padx=12, pady=(0, 6), fill="x")
 
-        var_new = tk.StringVar(value="")
-        ttk.Entry(entry_frame, textvariable=var_new, width=28).pack(side="left", fill="x", expand=True)
+        ttk.Label(form, text="Arquivo/job:").grid(row=0, column=0, sticky="w")
+        var_filename = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=var_filename, width=26).grid(row=0, column=1, sticky="w", padx=6, pady=2)
 
-        def add_name():
-            name = var_new.get().strip()
-            if not name:
+        ttk.Label(form, text="Nome de exibição:").grid(row=1, column=0, sticky="w")
+        var_display = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=var_display, width=26).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+
+        selected_index: Dict[str, Optional[int]] = {"value": None}
+
+        def clear_form():
+            selected_index["value"] = None
+            var_filename.set("")
+            var_display.set("")
+            tree.selection_remove(*tree.selection())
+
+        def on_select(_evt=None):
+            sel = tree.selection()
+            if not sel:
                 return
-            lst.insert("end", name)
-            var_new.set("")
+            idx = int(sel[0])
+            selected_index["value"] = idx
+            var_filename.set(entries[idx]["filename"])
+            var_display.set(entries[idx]["display_name"])
 
-        ttk.Button(entry_frame, text="Adicionar", command=add_name).pack(side="left", padx=(6, 0))
+        tree.bind("<<TreeviewSelect>>", on_select)
+
+        def add_or_update():
+            filename = var_filename.get().strip()
+            if not filename:
+                messagebox.showwarning("Arquivo de espaço", "Informe o nome do arquivo/job.")
+                return
+            display_name = var_display.get().strip() or "ESPAÇO"
+            idx = selected_index["value"]
+            was_new = idx is None
+            if idx is not None:
+                entries[idx] = {"filename": filename, "display_name": display_name}
+            else:
+                entries.append({"filename": filename, "display_name": display_name})
+                idx = len(entries) - 1
+            refresh_tree(select_index=idx)
+            selected_index["value"] = idx
+            if was_new:
+                # Limpa o formulário para o próximo "Adicionar" não sobrescrever
+                # este item sem querer.
+                clear_form()
+
+        form_btns = ttk.Frame(form)
+        form_btns.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Button(form_btns, text="Novo", command=clear_form).pack(side="left")
+        ttk.Button(form_btns, text="Adicionar / Atualizar", command=add_or_update).pack(
+            side="left", padx=(6, 0)
+        )
 
         def remove_selected():
-            sel = list(lst.curselection())
-            for i in reversed(sel):
-                lst.delete(i)
+            idx = selected_index["value"]
+            if idx is None:
+                messagebox.showwarning("Arquivo de espaço", "Selecione um item na lista.")
+                return
+            del entries[idx]
+            clear_form()
+            refresh_tree()
 
-        ttk.Button(win, text="Remover selecionado(s)", command=remove_selected).pack(
+        ttk.Button(win, text="Remover selecionado", command=remove_selected).pack(
             padx=12, pady=(0, 6), anchor="w"
         )
 
         def save():
-            new_names = [lst.get(i).strip() for i in range(lst.size()) if lst.get(i).strip()]
-            self.mcfg["space_filenames"] = new_names
+            self.mcfg["space_filenames"] = list(entries)
             save_cfg(self.mcfg)
             win.destroy()
 
@@ -521,13 +574,24 @@ class PXPrintLogsUI(ttk.Frame):
     def _auto_roll_name(self) -> str:
         machine = self.machine or "M?"
         now = datetime.now()
-        return f"{machine}_{now.strftime('%d-%m-%Y')}_{now.strftime('%H%M%S')}"
+        # Número sequencial atômico (banco compartilhado) em vez do horário —
+        # evita duplicar entre computadores diferentes. Se não conseguir
+        # (ex.: pasta de rede fora do ar), propaga o erro — não cai de volta
+        # pro horário, que reintroduziria o risco de duplicata.
+        seq = next_roll_sequence()
+        return f"{machine}_{now.strftime('%d-%m-%Y')}_{seq:04d}"
 
     def on_refresh_roll_name(self):
         if not self.machine:
             messagebox.showwarning("Sem máquina", "Importe logs primeiro para definir a máquina.")
             return
-        self.var_roll.set(self._auto_roll_name())
+        try:
+            self.var_roll.set(self._auto_roll_name())
+        except Exception as e:
+            messagebox.showerror(
+                "Número sequencial",
+                f"Não foi possível gerar o nome do rolo.\n\n{type(e).__name__}: {e}",
+            )
 
     def _get_roll_name(self) -> str:
         name = self.var_roll.get().strip()
@@ -609,7 +673,13 @@ class PXPrintLogsUI(ttk.Frame):
             self.lbl_machine.configure(text=f"Máquina do lote: {machine}")
 
             if not self.var_roll.get().strip():
-                self.var_roll.set(self._auto_roll_name())
+                try:
+                    self.var_roll.set(self._auto_roll_name())
+                except Exception as e:
+                    messagebox.showerror(
+                        "Número sequencial",
+                        f"Não foi possível gerar o nome do rolo.\n\n{type(e).__name__}: {e}",
+                    )
 
         parsed: List[Job] = []
         skipped_invalid = 0
@@ -621,7 +691,10 @@ class PXPrintLogsUI(ttk.Frame):
             if path_full in existing_src:
                 continue
 
-            job = parse_log_txt(path_full, space_filenames=self.mcfg.get("space_filenames", []))
+            job = parse_log_txt(
+                path_full,
+                space_entries=normalize_space_entries(self.mcfg.get("space_filenames", [])),
+            )
             if not job:
                 skipped_invalid += 1
                 continue
@@ -735,7 +808,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.tree_Jobs.delete(*self.tree_Jobs.get_children())
         for job in sorted(block.Jobs, key=lambda item: item.end_time, reverse=True):
-            doc_txt = "— ESPAÇO —" if job.is_gap else job.document
+            doc_txt = f"— {job.fabric or 'ESPAÇO'} —" if job.is_gap else job.document
             pedido_txt = "" if job.is_gap else job.pedido
             self.tree_Jobs.insert(
                 "",
@@ -905,7 +978,14 @@ class PXPrintLogsUI(ttk.Frame):
             self.status.configure(text="Exportação cancelada (duplicidade).")
             return
 
-        roll = self._get_roll_name()
+        try:
+            roll = self._get_roll_name()
+        except Exception as e:
+            messagebox.showerror(
+                "Número sequencial",
+                f"Não foi possível gerar o número sequencial do rolo.\n\n{type(e).__name__}: {e}",
+            )
+            return
         mode = self.var_mode.get()
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
 
@@ -921,6 +1001,7 @@ class PXPrintLogsUI(ttk.Frame):
         normal_path = str(versioned_path(out_pdf_dir / f"{base_name}.pdf"))
         mirror_path = str(self._resolve_mirror_jpg_path(out_jpg_dir, base_name))
         tmp_mirror_pdf = str(out_temp_dir / f"{base_name}.tmp.pdf")
+        tmp_normal_pdf = str(out_temp_dir / f"{base_name}.normal.tmp.pdf")
 
         try:
             target_cm = float(self._get_mirror_target_cm())
@@ -929,6 +1010,11 @@ class PXPrintLogsUI(ttk.Frame):
             return
 
         dpi = int(self.mcfg.get("mirror_jpg_dpi", 300))
+
+        # Quando a pasta/arquivo da impressora está configurado, esse é o
+        # único arquivo que ela recebe — por isso ele traz o espelhado
+        # seguido do normal (não espelhado), em vez de só o espelhado.
+        use_printer_folder = self.var_use_printer_jpg_path.get()
 
         for job in self.Jobs:
             if job.height_mm <= 0:
@@ -950,13 +1036,28 @@ class PXPrintLogsUI(ttk.Frame):
                     tmp_mirror_pdf, self.blocks, roll, self.machine,
                     mode=mode, mirrored=True, pedidos=self.pedidos,
                 )
-                pdf_all_pages_to_jpg_scaled(
-                    tmp_mirror_pdf,
-                    mirror_path,
-                    target_width_cm=target_cm,
-                    dpi=dpi,
-                    quality=95,
-                )
+                if use_printer_folder:
+                    export_pdf(
+                        tmp_normal_pdf, self.blocks, roll, self.machine,
+                        mode=mode, mirrored=False, pedidos=self.pedidos,
+                    )
+                    mirror_and_normal_to_jpg_scaled(
+                        tmp_normal_pdf,
+                        tmp_mirror_pdf,
+                        mirror_path,
+                        target_width_cm=target_cm,
+                        dpi=dpi,
+                        quality=95,
+                    )
+                    Path(tmp_normal_pdf).unlink(missing_ok=True)
+                else:
+                    pdf_all_pages_to_jpg_scaled(
+                        tmp_mirror_pdf,
+                        mirror_path,
+                        target_width_cm=target_cm,
+                        dpi=dpi,
+                        quality=95,
+                    )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
             elif which == "both":
@@ -969,13 +1070,23 @@ class PXPrintLogsUI(ttk.Frame):
                     tmp_mirror_pdf, self.blocks, roll, self.machine,
                     mode=mode, mirrored=True, pedidos=self.pedidos,
                 )
-                pdf_all_pages_to_jpg_scaled(
-                    tmp_mirror_pdf,
-                    mirror_path,
-                    target_width_cm=target_cm,
-                    dpi=dpi,
-                    quality=95,
-                )
+                if use_printer_folder:
+                    mirror_and_normal_to_jpg_scaled(
+                        normal_path,
+                        tmp_mirror_pdf,
+                        mirror_path,
+                        target_width_cm=target_cm,
+                        dpi=dpi,
+                        quality=95,
+                    )
+                else:
+                    pdf_all_pages_to_jpg_scaled(
+                        tmp_mirror_pdf,
+                        mirror_path,
+                        target_width_cm=target_cm,
+                        dpi=dpi,
+                        quality=95,
+                    )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
             else:
@@ -984,6 +1095,7 @@ class PXPrintLogsUI(ttk.Frame):
         except Exception as e:
             try:
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
+                Path(tmp_normal_pdf).unlink(missing_ok=True)
             except Exception:
                 pass
             messagebox.showerror("Erro ao exportar", str(e))

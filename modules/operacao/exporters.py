@@ -147,6 +147,92 @@ def pdf_all_pages_to_jpg_scaled(
         doc.close()
 
 
+def mirror_and_normal_to_jpg_scaled(
+    normal_pdf_path: str | Path,
+    mirror_pdf_path: str | Path,
+    jpg_path: str | Path,
+    *,
+    target_width_cm: float,
+    dpi: int = 300,
+    quality: int = 95,
+    col_gap_px: int = 0,
+    row_gap_px: int = 0,
+) -> None:
+    """
+    Gera um único JPG com o PDF normal (não espelhado) à esquerda e o
+    espelhado à direita, lado a lado, para cada página — e empilha os pares
+    verticalmente quando o PDF tem mais de uma página. Usado quando a
+    pasta/arquivo da impressora está configurado (único arquivo que ela
+    recebe, então precisa trazer as duas versões).
+    """
+    if not _HAS_PYMUPDF or fitz is None:
+        raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
+
+    if not _HAS_PIL or Image is None:
+        raise RuntimeError("Pillow não instalado. Instale: pip install pillow")
+
+    if target_width_cm <= 0:
+        raise ValueError("target_width_cm deve ser > 0")
+
+    if dpi <= 0:
+        raise ValueError("dpi deve ser > 0")
+
+    jpg_path = str(jpg_path)
+    target_width_px = _cm_to_px(target_width_cm, dpi)
+
+    doc_normal = fitz.open(str(normal_pdf_path))
+    doc_mirror = fitz.open(str(mirror_pdf_path))
+    try:
+        page_count = max(doc_normal.page_count, doc_mirror.page_count)
+        if page_count == 0:
+            raise RuntimeError("PDF sem páginas para renderizar.")
+
+        page0_width_pt = float(
+            (doc_normal if doc_normal.page_count else doc_mirror).load_page(0).rect.width
+        )
+        if page0_width_pt <= 0:
+            raise RuntimeError("Página inválida para renderizar.")
+        zoom = target_width_px / page0_width_pt
+        mat = fitz.Matrix(zoom, zoom)
+
+        row_images = []
+        for i in range(page_count):
+            im_normal = None
+            im_mirror = None
+            if i < doc_normal.page_count:
+                pix = doc_normal.load_page(i).get_pixmap(matrix=mat, alpha=False)
+                im_normal = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            if i < doc_mirror.page_count:
+                pix = doc_mirror.load_page(i).get_pixmap(matrix=mat, alpha=False)
+                im_mirror = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+            h = max(im.height for im in (im_normal, im_mirror) if im is not None)
+            w_normal = im_normal.width if im_normal is not None else target_width_px
+            w_mirror = im_mirror.width if im_mirror is not None else target_width_px
+            row = Image.new("RGB", (w_normal + col_gap_px + w_mirror, h), "white")
+            if im_normal is not None:
+                row.paste(im_normal, (0, 0))
+            if im_mirror is not None:
+                row.paste(im_mirror, (w_normal + col_gap_px, 0))
+            row_images.append(row)
+
+        if len(row_images) == 1:
+            combined = row_images[0]
+        else:
+            total_width = max(im.width for im in row_images)
+            total_height = sum(im.height for im in row_images) + row_gap_px * (len(row_images) - 1)
+            combined = Image.new("RGB", (total_width, total_height), "white")
+            y = 0
+            for im in row_images:
+                combined.paste(im, (0, y))
+                y += im.height + row_gap_px
+
+        combined.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
+    finally:
+        doc_normal.close()
+        doc_mirror.close()
+
+
 def pdf_first_page_to_jpg_sized(
     pdf_path: str | Path,
     jpg_path: str | Path,

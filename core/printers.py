@@ -7,10 +7,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from core.migrate import migrate_legacy_path
+
 
 def _store_path() -> Path:
-    base = Path(os.environ.get("APPDATA") or str(Path.home())) / "ProjetoJocasta"
+    appdata = Path(os.environ.get("APPDATA") or str(Path.home()))
+    base = appdata / "Nexor"
     base.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_path(appdata / "ProjetoJocasta" / "printers.json", base / "printers.json")
     return base / "printers.json"
 
 

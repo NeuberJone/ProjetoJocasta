@@ -1,10 +1,11 @@
-# modules/PXPrintCalc.py
+# modules/planejador.py
 from __future__ import annotations
 
 import csv
 import json
 import os
 import re
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,17 +24,24 @@ from core.fabric_scraps import (
     unused_scraps_for_fabric,
 )
 from core.printers import Printer, find_printer_by_display_name, load_printers
-from core.config import load_config as load_pxcore_config, read_module_cfg, write_module_cfg
+from core.config import (
+    load_config as load_pxcore_config,
+    module_config_path,
+    read_module_cfg,
+    write_module_cfg,
+)
+from core.migrate import migrate_legacy_path
 from core.paths import pdf_rolls_dir, print_jpg_dir, temp_module_dir
 from core.printlogs_db import (
     OrderRow,
     get_roll_scrap_key,
+    next_roll_sequence,
     save_export_transactional,
     update_roll_orders,
 )
 from core.version import APP_VERSION
-from modules.pxprintlogs.exporters import pdf_all_pages_to_jpg_scaled
-from modules.pxprintlogs.parser import pedido_from_document
+from modules.operacao.exporters import mirror_and_normal_to_jpg_scaled, pdf_all_pages_to_jpg_scaled
+from modules.operacao.parser import pedido_from_document
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -63,7 +71,7 @@ except Exception:
     DND_FILES = None
     _HAS_DND = False
 
-MODULE_NAME = "PXPrintCalc"
+MODULE_NAME = "Planejador"
 
 
 # -----------------------------
@@ -147,7 +155,9 @@ def versioned_path(path: Path) -> Path:
 # Tecidos (cadastro + aliases)
 # -----------------------------
 def _fabrics_store_path() -> Path:
-    base = Path(os.environ.get("APPDATA") or str(Path.home())) / "ProjetoJocasta" / "PXPrintCalc"
+    appdata = Path(os.environ.get("APPDATA") or str(Path.home()))
+    base = appdata / "Nexor" / "Planejador"
+    migrate_legacy_path(appdata / "ProjetoJocasta" / "PXPrintCalc", base)
     base.mkdir(parents=True, exist_ok=True)
     return base / "fabrics.json"
 
@@ -316,6 +326,7 @@ class Job:
     is_gap: bool = False
     roll_no: int = 0
     hidden: bool = False
+    gap_index: Optional[int] = None
 
 
 # Pixels "fictícios" usados para recriar um Job a partir de uma metragem já
@@ -761,6 +772,11 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     # de chaves marcadas — útil quando há pedaços do mesmo tecido vindos de
     # fabricantes/lotes diferentes que não podem se misturar num rolo.
     selected_scrap_keys: Optional[set] = None
+    # Override manual do tamanho de um espaço específico (duplo clique na
+    # linha "— ESPAÇO —"), por posição sequencial entre os espaços visíveis
+    # (gap_between/gap_endroll) — recalculado a cada "Gerar Fila".
+    gap_overrides: Dict[int, float] = {}
+    gap_seq: int = 0
     edit_roll_id: Optional[int] = (preload or {}).get("edit_roll_id")
     last_view: str = "base"
     last_roll_summary_rows: List[Job] = []
@@ -769,6 +785,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     fabrics_map: Dict[str, List[str]] = load_fabrics()
     scraps: List[FabricScrap] = load_scraps()
 
+    migrate_legacy_path(module_config_path("PXPrintCalc"), module_config_path(MODULE_NAME))
     mcfg = read_module_cfg(MODULE_NAME, {
         "report_mode_default": "full",
         "mirror_jpg_width_mode": "17",
@@ -779,6 +796,10 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     manual_fabric_order: List[str] = []
     var_auto_fabric_order = tk.BooleanVar(value=True)
     var_use_scraps = tk.BooleanVar(value=False)
+    # Sangria: ao planejar com pedaços cortados, considera cada pedaço com
+    # alguns cm a mais do que a metragem cadastrada (tolerância de corte).
+    var_scrap_bleed = tk.BooleanVar(value=False)
+    var_scrap_bleed_cm = tk.StringVar(value="5")
 
     printers: List[Printer] = load_printers()
 
@@ -967,7 +988,14 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         btn_move_up.configure(state=state)
         btn_move_down.configure(state=state)
 
-    var_mode.trace_add("write", _update_reorder_controls_state)
+    def _on_mode_changed(*_):
+        _update_reorder_controls_state()
+        # Recalcula a fila ao trocar de modo — sem isso, a tabela ficava com
+        # o agrupamento/alças de arraste do modo anterior até o usuário
+        # clicar manualmente em "Gerar Fila".
+        generate_queue()
+
+    var_mode.trace_add("write", _on_mode_changed)
     _update_reorder_controls_state()
 
     ttk.Checkbutton(
@@ -1099,6 +1127,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     tree.column("tempo", width=120, anchor="e")
 
     tree.bind("<Double-1>", lambda _e: on_double_click())
+    tree.bind("<Button-3>", lambda e: show_context_menu(e))
 
     # ---------------- Drag & drop (reordenar pela alça à esquerda) ----------------
     drag_state: Dict[str, Optional[int]] = {"idx": None}
@@ -1586,6 +1615,67 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 tree.see(iid)
                 break
 
+    def remove_selected_jobs():
+        picked = selected_base_jobs()
+        if not picked:
+            messagebox.showinfo("Remover item", "Selecione 1 ou mais itens (não ESPAÇO) para remover.")
+            return
+        if not messagebox.askyesno("Remover item", f"Remover {len(picked)} item(ns) da fila?"):
+            return
+        picked_ids = {id(jb) for jb in picked}
+        jobs[:] = [jb for jb in jobs if id(jb) not in picked_ids]
+        generate_queue() if var_mode.get().strip().lower() == "tecido" else show_base()
+
+    def show_context_menu(event):
+        iid = tree.identify_row(event.y)
+        if iid and iid not in tree.selection():
+            tree.selection_set(iid)
+
+        picked = selected_rows()
+        has_selection = bool(picked)
+        single = len(picked) == 1
+        reorder_mode = var_mode.get().strip().lower() == "original"
+
+        def edit_single():
+            base = selected_base_jobs()
+            if base:
+                open_edit_dialog(base[0])
+
+        menu = tk.Menu(frame, tearoff=0)
+        menu.add_command(
+            label="Editar item…", command=edit_single,
+            state=("normal" if single else "disabled"),
+        )
+        menu.add_command(
+            label="Definir tecido…", command=set_fabric_selected,
+            state=("normal" if has_selection else "disabled"),
+        )
+        menu.add_separator()
+        if reorder_mode:
+            menu.add_command(
+                label="Mover para cima", command=lambda: move_job(-1),
+                state=("normal" if single else "disabled"),
+            )
+            menu.add_command(
+                label="Mover para baixo", command=lambda: move_job(+1),
+                state=("normal" if single else "disabled"),
+            )
+            menu.add_separator()
+        menu.add_command(
+            label="Remover item(s)", command=remove_selected_jobs,
+            state=("normal" if has_selection else "disabled"),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Atualizar",
+            command=lambda: generate_queue() if var_mode.get().strip().lower() == "tecido" else show_base(),
+        )
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
     # ---------------- Actions ----------------
     IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
@@ -1686,6 +1776,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     def clear_all():
         jobs.clear()
+        gap_overrides.clear()
         show_base()
 
     def export_csv():
@@ -1875,6 +1966,8 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             return
         row = view_rows[idx]
         if row.is_gap:
+            if row.gap_index is not None:
+                open_edit_gap_dialog(row.gap_index, row.length_m)
             return
 
         base: Optional[Job] = None
@@ -1886,6 +1979,39 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             return
 
         open_edit_dialog(base)
+
+    def open_edit_gap_dialog(gap_index: int, current_m: float):
+        dlg = tk.Toplevel(frame)
+        dlg.title("Editar espaço")
+        dlg.transient(frame.winfo_toplevel())
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Tamanho do espaço (m):").grid(row=0, column=0, sticky="w")
+        var_len = tk.StringVar(value=f"{current_m:.2f}")
+        ttk.Entry(frm, textvariable=var_len, width=10).grid(row=0, column=1, sticky="w", padx=(6, 0))
+
+        def on_save():
+            v = safe_float(var_len.get(), -1.0)
+            if v < 0:
+                messagebox.showerror("Espaço inválido", "Informe um valor maior ou igual a 0.")
+                return
+            gap_overrides[gap_index] = v
+            dlg.destroy()
+            generate_queue()
+
+        def on_reset():
+            gap_overrides.pop(gap_index, None)
+            dlg.destroy()
+            generate_queue()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Restaurar padrão", command=on_reset).pack(side="left")
+        ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side="right")
+        ttk.Button(btns, text="Salvar", command=on_save).pack(side="right", padx=(0, 8))
 
     def open_edit_dialog(job: Job):
         dlg = tk.Toplevel(frame)
@@ -2041,7 +2167,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         dlg.title("Selecionar pedaços a usar")
         dlg.transient(frame.winfo_toplevel())
         dlg.grab_set()
-        dlg.geometry("480x520")
+        dlg.geometry("480x570")
 
         ttk.Label(
             dlg,
@@ -2052,6 +2178,22 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             ),
             justify="left",
         ).pack(padx=12, pady=(12, 6), anchor="w")
+
+        bleed_box = ttk.LabelFrame(dlg, text="Metragem considerada de cada pedaço")
+        bleed_box.pack(fill="x", padx=12, pady=(0, 6))
+
+        ttk.Radiobutton(
+            bleed_box, text="Tamanho exato do pedaço (cadastrado)",
+            value=False, variable=var_scrap_bleed,
+        ).pack(anchor="w", padx=8, pady=(6, 0))
+
+        bleed_row = ttk.Frame(bleed_box)
+        bleed_row.pack(anchor="w", padx=8, pady=(0, 6))
+        ttk.Radiobutton(
+            bleed_row, text="Sangria: contar", value=True, variable=var_scrap_bleed,
+        ).pack(side="left")
+        ttk.Entry(bleed_row, textvariable=var_scrap_bleed_cm, width=5).pack(side="left", padx=(4, 4))
+        ttk.Label(bleed_row, text="cm a mais do que o cadastrado").pack(side="left")
 
         top_bar = ttk.Frame(dlg)
         top_bar.pack(fill="x", padx=12)
@@ -2336,12 +2478,25 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             items = [s for s in items if s.key in selected_scrap_keys]
         return items
 
+    def scrap_bleed_m() -> float:
+        """Sangria: metragem extra (em m) considerada em cada pedaço cortado
+        além da metragem cadastrada, quando 'Usar sangria' está ativo."""
+        if not var_scrap_bleed.get():
+            return 0.0
+        return max(0.0, safe_float(var_scrap_bleed_cm.get(), 5.0)) / 100.0
+
+    def scrap_effective_length(sc: FabricScrap) -> float:
+        """Metragem considerada no planejamento para esse pedaço — a cadastrada,
+        ou com a sangria somada quando 'Usar sangria' está ativo."""
+        return sc.length_m + scrap_bleed_m()
+
     def limit_for_roll(fabric: str, roll_index: int) -> float:
         """roll_index começa em 0. Com 'priorizar pedaços', os primeiros rolos do
-        tecido usam a metragem dos pedaços cortados (não usados e elegíveis)
-        antes de cair para a metragem padrão de rolo cheio do tecido."""
+        tecido usam a metragem dos pedaços cortados (não usados e elegíveis,
+        com sangria se ativa) antes de cair para a metragem padrão de rolo
+        cheio do tecido."""
         if var_use_scraps.get():
-            scrap_lens = [s.length_m for s in eligible_scraps_for_fabric(fabric)]
+            scrap_lens = [scrap_effective_length(s) for s in eligible_scraps_for_fabric(fabric)]
             if roll_index < len(scrap_lens):
                 return scrap_lens[roll_index]
         return roll_limit_for(fabric) or DEFAULT_ROLL_LENGTH_M
@@ -2378,23 +2533,29 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         bin_used: List[float] = []
         bin_limit: List[float] = []
 
-        def ensure_bin(idx: int) -> None:
-            while len(bins) <= idx:
-                bins.append([])
-                bin_used.append(0.0)
-                bin_limit.append(limit_for_roll(fabric, len(bins) - 1))
-
-        safety_max = len(sorted_items) + 50
+        def open_new_bin() -> int:
+            idx = len(bins)
+            bins.append([])
+            bin_used.append(0.0)
+            bin_limit.append(limit_for_roll(fabric, idx))
+            return idx
 
         for item in sorted_items:
-            idx = 0
-            while True:
-                ensure_bin(idx)
-                extra_gap = gap_files if bins[idx] else 0.0
-                fits = (bin_used[idx] + extra_gap + item.length_m + gap_endroll) <= bin_limit[idx]
-                if fits or idx >= safety_max:
+            # Primeiro rolo já aberto em que o item CABE (considerando o que já
+            # está nele). Só abre um rolo novo se não couber em nenhum dos já
+            # abertos — nunca empilha num rolo "de sobra" junto com itens que
+            # não cabem juntos (isso misturava itens de rolos diferentes
+            # quando nenhum item cabia no limite configurado, ex.: gap de fim
+            # de rolo maior que a própria metragem do rolo).
+            idx = None
+            for i in range(len(bins)):
+                extra_gap = gap_files if bins[i] else 0.0
+                if (bin_used[i] + extra_gap + item.length_m + gap_endroll) <= bin_limit[i]:
+                    idx = i
                     break
-                idx += 1
+
+            if idx is None:
+                idx = open_new_bin()
 
             extra_gap = gap_files if bins[idx] else 0.0
             bins[idx].append(item)
@@ -2404,8 +2565,19 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         return [(i, b) for i, b in enumerate(bins) if b]
 
     def add_gap(rows: List[Job], fabric: str, gap_m: float, speed: float, hidden: bool = False):
-        if gap_m <= 0:
+        nonlocal gap_seq
+
+        gap_index: Optional[int] = None
+        use_m = gap_m
+        if not hidden:
+            gap_index = gap_seq
+            gap_seq += 1
+            if gap_index in gap_overrides:
+                use_m = gap_overrides[gap_index]
+
+        if use_m <= 0:
             return
+
         g = Job(
             name="ESPAÇO",
             path=None,
@@ -2416,8 +2588,9 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             is_gap=True,
             roll_no=0,
             hidden=hidden,
+            gap_index=gap_index,
         )
-        g.length_m = float(gap_m)
+        g.length_m = float(use_m)
         g.time_min = float((g.length_m / speed) if speed > 0 else 0.0)  # gap não tem setup
         rows.append(g)
 
@@ -2450,10 +2623,11 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         return list(manual_fabric_order)
 
     def generate_queue():
-        nonlocal view_rows, last_view
+        nonlocal view_rows, last_view, gap_seq
 
         roll_scrap_labels.clear()
         roll_scrap_keys.clear()
+        gap_seq = 0
 
         if not jobs:
             show_base()
@@ -2632,10 +2806,21 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     def _auto_batch_name() -> str:
         machine = var_printer.get() or "M?"
         now = datetime.now()
-        return f"{machine}_{now.strftime('%d-%m-%Y')}_{now.strftime('%H%M%S')}"
+        # Número sequencial atômico (banco compartilhado) em vez do horário —
+        # evita duplicar entre computadores diferentes. Se não conseguir
+        # (ex.: pasta de rede fora do ar), propaga o erro — não cai de volta
+        # pro horário, que reintroduziria o risco de duplicata.
+        seq = next_roll_sequence()
+        return f"{machine}_{now.strftime('%d-%m-%Y')}_{seq:04d}"
 
     def on_refresh_batch_name():
-        var_batch_name.set(_auto_batch_name())
+        try:
+            var_batch_name.set(_auto_batch_name())
+        except Exception as e:
+            messagebox.showerror(
+                "Número sequencial",
+                f"Não foi possível gerar o nome do lote.\n\n{type(e).__name__}: {e}",
+            )
 
     def _get_batch_name() -> str:
         name = var_batch_name.get().strip()
@@ -2717,7 +2902,14 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         machine = var_printer.get() or "?"
         mode = var_report_mode.get()
         mode_tag = "FULL" if mode == "full" else "SUMMARY"
-        batch = _get_batch_name()
+        try:
+            batch = _get_batch_name()
+        except Exception as e:
+            messagebox.showerror(
+                "Número sequencial",
+                f"Não foi possível gerar o número sequencial do lote.\n\n{type(e).__name__}: {e}",
+            )
+            return
         title = f"Fila de Impressão - {batch}"
 
         dt = datetime.now()
@@ -2732,6 +2924,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         normal_path = str(versioned_path(out_pdf_dir / f"{base_name}.pdf"))
         mirror_path = str(_resolve_mirror_jpg_path(out_jpg_dir, base_name, machine))
         tmp_mirror_pdf = str(out_temp_dir / f"{base_name}.tmp.pdf")
+        tmp_normal_pdf = str(out_temp_dir / f"{base_name}.normal.tmp.pdf")
 
         try:
             target_cm = float(_get_mirror_target_cm())
@@ -2742,6 +2935,11 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         dpi = int(mcfg.get("mirror_jpg_dpi", 300))
 
         scrap_labels_snapshot = dict(roll_scrap_labels)
+
+        # Quando a pasta/arquivo da impressora está configurado, esse é o
+        # único arquivo que ela recebe — por isso ele traz o espelhado
+        # seguido do normal (não espelhado), em vez de só o espelhado.
+        use_printer_folder = var_use_printer_jpg_path.get()
 
         try:
             if which == "normal":
@@ -2755,10 +2953,21 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                     tmp_mirror_pdf, rows, title, machine,
                     mode=mode, mirrored=True, scrap_labels=scrap_labels_snapshot,
                 )
-                pdf_all_pages_to_jpg_scaled(
-                    tmp_mirror_pdf, mirror_path,
-                    target_width_cm=target_cm, dpi=dpi, quality=95,
-                )
+                if use_printer_folder:
+                    export_queue_pdf(
+                        tmp_normal_pdf, rows, title, machine,
+                        mode=mode, mirrored=False, scrap_labels=scrap_labels_snapshot,
+                    )
+                    mirror_and_normal_to_jpg_scaled(
+                        tmp_normal_pdf, tmp_mirror_pdf, mirror_path,
+                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                    )
+                    Path(tmp_normal_pdf).unlink(missing_ok=True)
+                else:
+                    pdf_all_pages_to_jpg_scaled(
+                        tmp_mirror_pdf, mirror_path,
+                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                    )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
             elif which == "both":
@@ -2771,10 +2980,16 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                     tmp_mirror_pdf, rows, title, machine,
                     mode=mode, mirrored=True, scrap_labels=scrap_labels_snapshot,
                 )
-                pdf_all_pages_to_jpg_scaled(
-                    tmp_mirror_pdf, mirror_path,
-                    target_width_cm=target_cm, dpi=dpi, quality=95,
-                )
+                if use_printer_folder:
+                    mirror_and_normal_to_jpg_scaled(
+                        normal_path, tmp_mirror_pdf, mirror_path,
+                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                    )
+                else:
+                    pdf_all_pages_to_jpg_scaled(
+                        tmp_mirror_pdf, mirror_path,
+                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                    )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
             else:
@@ -2783,6 +2998,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         except Exception as e:
             try:
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
+                Path(tmp_normal_pdf).unlink(missing_ok=True)
             except Exception:
                 pass
             messagebox.showerror("Erro ao exportar", str(e))
@@ -2811,7 +3027,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 scrap_reverted = False
                 if old_scrap_key:
                     sc = next((s for s in scraps if s.key == old_scrap_key), None)
-                    if sc and total_m > sc.length_m:
+                    if sc and total_m > scrap_effective_length(sc):
                         scraps = set_scrap_used(scraps, old_scrap_key, False)
                         save_scraps(scraps)
                         new_scrap_key = ""
@@ -2895,8 +3111,13 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
                 if roll_ids:
                     db_status = f"\n\nRegistrado no SearchOrders: {len(roll_ids)} rolo(s) (ids {roll_ids})."
+                else:
+                    db_status = (
+                        "\n\nAviso: nenhum rolo foi registrado no SearchOrders "
+                        "(a fila gerada não tinha nenhum item, só espaços)."
+                    )
         except Exception as e:
-            db_status = f"\n\nAviso: falha ao registrar no SearchOrders ({type(e).__name__})."
+            db_status = f"\n\nAviso: falha ao registrar no SearchOrders.\n\n{traceback.format_exc()}"
 
         if which == "both":
             messagebox.showinfo(
