@@ -9,7 +9,9 @@ from tkinter import messagebox, ttk
 from typing import Optional
 
 from .helpers import format_m, payload_summary, safe_int
+from core.ui import page_heading
 from .repository import (
+    load_distinct_tipos,
     load_roll_events,
     load_roll_module,
     load_roll_orders,
@@ -37,13 +39,19 @@ class PXSearchOrdersUI(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
 
+        page_heading(self, "Registros de produção",
+                     "Encontre rolos, pedidos e o histórico de cada exportação.",
+                     action=self.reload, action_text="⟳ Recarregar").pack(
+                         fill="x", padx=22, pady=(22, 0)
+                     )
+
         self._current_roll_id: Optional[int] = None
 
         # ------------------------
         # Filtros
         # ------------------------
         filtros = ttk.LabelFrame(self, text="Filtros")
-        filtros.pack(fill="x", padx=10, pady=(10, 8))
+        filtros.pack(fill="x", padx=22, pady=(0, 10))
 
         ttk.Label(filtros, text="Máquina").grid(row=0, column=0, sticky="w", padx=(10, 4), pady=8)
         self.var_machine = tk.StringVar(value="")
@@ -66,19 +74,26 @@ class PXSearchOrdersUI(ttk.Frame):
         self.ent_order_like = ttk.Entry(filtros, textvariable=self.var_order_like, width=26)
         self.ent_order_like.grid(row=0, column=5, sticky="w", padx=(0, 14), pady=8)
 
-        ttk.Label(filtros, text="Limite").grid(row=0, column=6, sticky="w", padx=(0, 6), pady=8)
+        ttk.Label(filtros, text="Tipo").grid(row=0, column=6, sticky="w", padx=(0, 6), pady=8)
+        self.var_tipo = tk.StringVar(value="")
+        self.cmb_tipo = ttk.Combobox(
+            filtros, textvariable=self.var_tipo, values=[""], width=16, state="readonly"
+        )
+        self.cmb_tipo.grid(row=0, column=7, sticky="w", padx=(0, 14), pady=8)
+
+        ttk.Label(filtros, text="Limite").grid(row=1, column=0, sticky="w", padx=(10, 4), pady=(0, 8))
         self.var_limit = tk.StringVar(value="300")
         self.ent_limit = ttk.Entry(filtros, textvariable=self.var_limit, width=6)
-        self.ent_limit.grid(row=0, column=7, sticky="w", padx=(0, 14), pady=8)
+        self.ent_limit.grid(row=1, column=1, sticky="w", padx=(0, 14), pady=(0, 8))
 
         ttk.Button(filtros, text="Recarregar", command=self.reload).grid(
-            row=0, column=8, sticky="w", padx=(0, 8), pady=8
+            row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 8)
         )
         ttk.Button(filtros, text="Limpar filtros", command=self.clear_filters).grid(
-            row=0, column=9, sticky="w", padx=(0, 10), pady=8
+            row=1, column=3, sticky="w", padx=(0, 10), pady=(0, 8)
         )
         ttk.Button(filtros, text="Editar rolo", command=self.on_edit_roll).grid(
-            row=0, column=10, sticky="w", padx=(0, 10), pady=8
+            row=1, column=4, sticky="w", padx=(0, 10), pady=(0, 8)
         )
 
         filtros.columnconfigure(11, weight=1)
@@ -86,12 +101,13 @@ class PXSearchOrdersUI(ttk.Frame):
         self.ent_name_like.bind("<Return>", lambda _e: self.reload())
         self.ent_order_like.bind("<Return>", lambda _e: self.reload())
         self.ent_limit.bind("<Return>", lambda _e: self.reload())
+        self.cmb_tipo.bind("<<ComboboxSelected>>", lambda _e: self.reload())
 
         # ------------------------
         # Lista de rolos
         # ------------------------
         box_rolls = ttk.LabelFrame(self, text="Rolos exportados")
-        box_rolls.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        box_rolls.pack(fill="both", expand=True, padx=22, pady=(0, 10))
 
         cols = ("id", "roll", "machine", "created", "total_m", "orders", "events")
         self.tree_rolls = ttk.Treeview(box_rolls, columns=cols, show="headings", height=10)
@@ -130,7 +146,7 @@ class PXSearchOrdersUI(ttk.Frame):
         # Detalhes
         # ------------------------
         box_details = ttk.LabelFrame(self, text="Detalhes do roll selecionado")
-        box_details.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        box_details.pack(fill="both", expand=True, padx=22, pady=(0, 14))
 
         self.nb = ttk.Notebook(box_details)
         self.nb.pack(fill="both", expand=True, padx=10, pady=10)
@@ -147,17 +163,20 @@ class PXSearchOrdersUI(ttk.Frame):
         self.tab_orders = ttk.Frame(self.nb)
         self.nb.add(self.tab_orders, text="Pedidos")
 
-        order_cols = ("end_time", "document", "fabric", "height_mm", "vpos_mm", "real_m", "source")
+        order_cols = ("end_time", "document", "fabric", "tipo", "height_mm", "vpos_mm", "real_m", "source")
         self.tree_orders = ttk.Treeview(self.tab_orders, columns=order_cols, show="headings", height=8)
 
         self.tree_orders.heading("end_time", text="EndTime")
         self.tree_orders.column("end_time", width=160, anchor="w")
 
         self.tree_orders.heading("document", text="Documento")
-        self.tree_orders.column("document", width=420, anchor="w")
+        self.tree_orders.column("document", width=360, anchor="w")
 
         self.tree_orders.heading("fabric", text="Tecido")
-        self.tree_orders.column("fabric", width=140, anchor="w")
+        self.tree_orders.column("fabric", width=120, anchor="w")
+
+        self.tree_orders.heading("tipo", text="Tipo")
+        self.tree_orders.column("tipo", width=110, anchor="w")
 
         self.tree_orders.heading("height_mm", text="HeightMM")
         self.tree_orders.column("height_mm", width=90, anchor="e")
@@ -214,14 +233,25 @@ class PXSearchOrdersUI(ttk.Frame):
         self.var_machine.set("")
         self.var_name_like.set("")
         self.var_order_like.set("")
+        self.var_tipo.set("")
         self.var_limit.set("300")
         self.reload()
 
+    def _refresh_tipo_options(self) -> None:
+        try:
+            tipos = load_distinct_tipos()
+        except Exception:
+            tipos = []
+        self.cmb_tipo.configure(values=[""] + tipos)
+
     def reload(self) -> None:
+        self._refresh_tipo_options()
+
         limit = safe_int(self.var_limit.get(), default=300)
         machine = (self.var_machine.get() or "").strip() or None
         name_like = (self.var_name_like.get() or "").strip() or None
         order_like = (self.var_order_like.get() or "").strip() or None
+        tipo = (self.var_tipo.get() or "").strip() or None
 
         try:
             rows = search_rolls(
@@ -229,6 +259,7 @@ class PXSearchOrdersUI(ttk.Frame):
                 machine=machine,
                 name_like=name_like,
                 order_like=order_like,
+                tipo=tipo,
             )
         except Exception as e:
             messagebox.showerror(
@@ -373,6 +404,11 @@ class PXSearchOrdersUI(ttk.Frame):
                             vpos_mm=float(o.get("vpos_mm", 0.0) or 0.0),
                             real_mm=float(o.get("real_m", 0.0) or 0.0) * 1000.0,
                             src_file=str(o.get("source_path") or ""),
+                            tipo=str(o.get("tipo") or ""),
+                            # Já veio resolvido do banco — não deixa o botão
+                            # "Salvar" do diálogo de regras reclassificar
+                            # história já exportada sem o usuário pedir.
+                            tipo_manual=True,
                         )
                         for o in orders
                     ],
@@ -387,6 +423,9 @@ class PXSearchOrdersUI(ttk.Frame):
         win = tk.Toplevel(self)
         win.title(f"Editar rolo #{roll_id} — {_DISPLAY_NAMES.get(module_path, module)}")
         win.geometry("1200x800")
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.focus_force()
 
         try:
             ui = build_ui(win, preload=preload)
@@ -488,6 +527,7 @@ class PXSearchOrdersUI(ttk.Frame):
             end_time = str(order.get("end_time", "") or "")
             document = str(order.get("document", "") or "")
             fabric = str(order.get("fabric", "") or "")
+            tipo = str(order.get("tipo", "") or "")
             height_mm = order.get("height_mm", 0) or 0
             vpos_mm = order.get("vpos_mm", 0) or 0
             real_m = order.get("real_m", 0) or 0
@@ -505,6 +545,7 @@ class PXSearchOrdersUI(ttk.Frame):
                     end_time,
                     document,
                     fabric,
+                    tipo,
                     f"{float(height_mm):.1f}",
                     f"{float(vpos_mm):.1f}",
                     format_m(real_m, suffix=False),

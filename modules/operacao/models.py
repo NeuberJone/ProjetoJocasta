@@ -16,6 +16,11 @@ class Job:
     real_mm: float
     src_file: str
     is_gap: bool = False
+    tipo: str = ""
+    # True quando o tipo foi definido manualmente ("Editar tipo") — impede
+    # que o botão "Salvar" das regras de detecção reclassifique por engano
+    # um item que o usuário já corrigiu na mão.
+    tipo_manual: bool = False
 
     @property
     def real_m(self) -> float:
@@ -51,3 +56,4 @@ class PedidoSummary:
     total_m: float
     job_count: int
     newest_end: datetime
+    tipo: str = ""

@@ -8,7 +8,18 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Dict, List, Optional
 
 from core.format import fmt_m
+from core.ui import card, dialog_header, page_heading
 from core.printers import find_printer_by_display_name
+from core.print_types import (
+    DEFAULT_RULES,
+    DEFAULT_SUBTYPES,
+    FALLBACK_TYPE,
+    all_type_options,
+    classify_document,
+    normalize_rules,
+    normalize_subtypes,
+    validate_pattern,
+)
 from core.printlogs_db import (
     OrderRow,
     find_pedido_fabric_rolls,
@@ -51,7 +62,7 @@ class PXPrintLogsUI(ttk.Frame):
         canvas.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        body = ttk.Frame(canvas)
+        body = ttk.Frame(canvas, padding=(28, 22, 28, 18))
         body_window = canvas.create_window((0, 0), window=body, anchor="nw")
 
         def _on_body_configure(_evt=None):
@@ -75,8 +86,16 @@ class PXPrintLogsUI(ttk.Frame):
         canvas.bind("<Enter>", _bind_mousewheel)
         canvas.bind("<Leave>", _unbind_mousewheel)
 
-        top = ttk.Frame(body)
-        top.pack(fill="x", padx=10, pady=10)
+        page_heading(body, "Confira o que foi impresso",
+                     "Importe os logs reais e gere o comprovante do rolo.",
+                     action=self.on_import_files, action_text="⇧ Importar logs").pack(
+                     fill="x", pady=(0, 14)
+                     )
+
+        top = card(body, "Nome do rolo e opções de exportação", padding=12)
+        top.pack(fill="x", pady=(0, 14))
+        for col in range(7):
+            top.columnconfigure(col, weight=1 if col in (1, 4) else 0)
 
         ttk.Label(top, text="Nome do rolo").grid(row=0, column=0, sticky="w")
         self.var_roll = tk.StringVar(value="")
@@ -172,8 +191,14 @@ class PXPrintLogsUI(ttk.Frame):
         ttk.Button(row_actions, text="Editar tecido", command=self.on_edit_fabric).pack(
             side="left", padx=4
         )
+        ttk.Button(row_actions, text="Editar tipo", command=self.on_edit_tipo).pack(
+            side="left", padx=4
+        )
         ttk.Button(
             row_actions, text="Arquivo(s) de espaço…", command=self.on_edit_space_filenames
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            row_actions, text="Tipos de impressão…", command=self.on_edit_print_types
         ).pack(side="left", padx=4)
 
         row_export = ttk.Frame(btns)
@@ -205,7 +230,7 @@ class PXPrintLogsUI(ttk.Frame):
         self.lbl_edit_banner.grid(row=5, column=0, columnspan=7, sticky="w", pady=(6, 0))
 
         drop_frame = ttk.LabelFrame(body, text="Arraste e solte logs .txt aqui")
-        drop_frame.pack(fill="x", padx=10, pady=(0, 10))
+        drop_frame.pack(fill="x", pady=(0, 14))
 
         self.drop_label = ttk.Label(drop_frame, text="Solte arquivos .txt (apenas) para importar")
         self.drop_label.pack(fill="x", padx=10, pady=12)
@@ -221,8 +246,17 @@ class PXPrintLogsUI(ttk.Frame):
                 text="Drag & Drop indisponível (tkinterdnd2 não carregou). Use o botão Importar."
             )
 
-        details = ttk.LabelFrame(body, text="Detalhes do bloco selecionado")
-        details.pack(fill="both", expand=False, padx=10, pady=(0, 10))
+        ops_tabs = ttk.Notebook(body)
+        ops_tabs.pack(fill="both", expand=True, pady=(0, 14))
+        details_tab = ttk.Frame(ops_tabs, padding=10)
+        blocks_tab = ttk.Frame(ops_tabs, padding=10)
+        orders_tab = ttk.Frame(ops_tabs, padding=10)
+        ops_tabs.add(blocks_tab, text="Ordem do rolo")
+        ops_tabs.add(details_tab, text="Detalhes do bloco")
+        ops_tabs.add(orders_tab, text="Pedidos no rolo")
+
+        details = card(details_tab, "Detalhes do bloco selecionado", padding=10)
+        details.pack(fill="both", expand=True)
 
         self.var_detail_title = tk.StringVar(value="Selecione um tecido na lista abaixo...")
         ttk.Label(details, textvariable=self.var_detail_title).pack(
@@ -231,14 +265,15 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.tree_Jobs = ttk.Treeview(
             details,
-            columns=("end", "doc", "pedido", "h", "v", "real_m"),
+            columns=("end", "doc", "pedido", "tipo", "h", "v", "real_m"),
             show="headings",
             height=6,
         )
         for col, txt, w in [
             ("end", "EndTime", 140),
-            ("doc", "Documento", 320),
-            ("pedido", "Pedido", 160),
+            ("doc", "Documento", 300),
+            ("pedido", "Pedido", 150),
+            ("tipo", "Tipo", 110),
             ("h", "HeightMM", 90),
             ("v", "VPosMM", 90),
             ("real_m", "Real (m)", 90),
@@ -251,8 +286,8 @@ class PXPrintLogsUI(ttk.Frame):
         self.tree_Jobs.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
         sbj.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
 
-        blocks_box = ttk.LabelFrame(body, text="Ordem do rolo (último impresso primeiro)")
-        blocks_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        blocks_box = card(blocks_tab, "Último impresso primeiro", padding=10)
+        blocks_box.pack(fill="both", expand=True)
 
         self.tree_blocks = ttk.Treeview(
             blocks_box,
@@ -278,18 +313,19 @@ class PXPrintLogsUI(ttk.Frame):
         self.tree_blocks.bind("<<TreeviewSelect>>", self.on_select_block)
         self.tree_blocks.bind("<Double-1>", self.on_edit_fabric)
 
-        pedidos_box = ttk.LabelFrame(body, text="Pedidos no rolo (duplo clique para editar)")
-        pedidos_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        pedidos_box = card(orders_tab, "Duplo clique para editar", padding=10)
+        pedidos_box.pack(fill="both", expand=True)
 
         self.tree_pedidos = ttk.Treeview(
             pedidos_box,
-            columns=("#", "pedido", "total_m", "Jobs", "last"),
+            columns=("#", "pedido", "tipo", "total_m", "Jobs", "last"),
             show="headings",
             height=8,
         )
         for col, txt, w, anchor in [
             ("#", "#", 40, "w"),
-            ("pedido", "Pedido", 220, "w"),
+            ("pedido", "Pedido", 200, "w"),
+            ("tipo", "Tipo", 110, "w"),
             ("total_m", "Total (m)", 110, "e"),
             ("Jobs", "Qtd Peças", 90, "e"),
             ("last", "Último EndTime", 160, "w"),
@@ -305,7 +341,7 @@ class PXPrintLogsUI(ttk.Frame):
         self.tree_pedidos.bind("<Double-1>", self.on_edit_pedido)
 
         self.status = ttk.Label(body, text="Pronto.")
-        self.status.pack(fill="x", padx=10, pady=(0, 10))
+        self.status.pack(fill="x", pady=(0, 0))
 
         self._ensure_export_dir()
 
@@ -418,6 +454,9 @@ class PXPrintLogsUI(ttk.Frame):
         win.resizable(False, False)
         win.transient(self.winfo_toplevel())
         win.grab_set()
+        dialog_header(win, "Selecionar máquina", "Escolha a origem dos logs importados.").pack(
+            fill="x", padx=12, pady=(12, 0)
+        )
 
         ttk.Label(win, text="Esses logs são de qual máquina?").pack(
             padx=12, pady=(12, 6), anchor="w"
@@ -457,6 +496,9 @@ class PXPrintLogsUI(ttk.Frame):
         win.resizable(False, False)
         win.transient(self.winfo_toplevel())
         win.grab_set()
+        dialog_header(win, "Arquivos de espaço", "Nomes reconhecidos como avanços entre tecidos.").pack(
+            fill="x", padx=12, pady=(12, 0)
+        )
 
         ttk.Label(
             win,
@@ -694,6 +736,7 @@ class PXPrintLogsUI(ttk.Frame):
             job = parse_log_txt(
                 path_full,
                 space_entries=normalize_space_entries(self.mcfg.get("space_filenames", [])),
+                type_rules=normalize_rules(self.mcfg.get("print_type_rules", DEFAULT_RULES)),
             )
             if not job:
                 skipped_invalid += 1
@@ -778,6 +821,7 @@ class PXPrintLogsUI(ttk.Frame):
                 values=(
                     idx,
                     pedido.pedido,
+                    pedido.tipo,
                     fmt_m(pedido.total_m),
                     pedido.job_count,
                     pedido.newest_end.strftime("%d/%m/%Y %H:%M:%S"),
@@ -810,6 +854,7 @@ class PXPrintLogsUI(ttk.Frame):
         for job in sorted(block.Jobs, key=lambda item: item.end_time, reverse=True):
             doc_txt = f"— {job.fabric or 'ESPAÇO'} —" if job.is_gap else job.document
             pedido_txt = "" if job.is_gap else job.pedido
+            tipo_txt = "" if job.is_gap else job.tipo
             self.tree_Jobs.insert(
                 "",
                 "end",
@@ -817,6 +862,7 @@ class PXPrintLogsUI(ttk.Frame):
                     job.end_time.strftime("%d/%m/%Y %H:%M:%S"),
                     doc_txt,
                     pedido_txt,
+                    tipo_txt,
                     f"{job.height_mm:.1f}",
                     f"{job.vpos_mm:.1f}",
                     fmt_m(job.real_m, suffix=False),
@@ -905,6 +951,284 @@ class PXPrintLogsUI(ttk.Frame):
         self.status.configure(
             text=self.status.cget("text") + f" | Pedido renomeado para '{new_name}'"
         )
+
+    # --------------------------
+    # Tipos de impressão (Pedido / Reposição / Fora do padrão...)
+    # --------------------------
+    def _ask_tipo(self, *, initial: str, options: List[str]) -> Optional[str]:
+        win = tk.Toplevel(self)
+        win.title("Editar tipo")
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        dialog_header(win, "Editar tipo", "Escolha ou digite o tipo deste pedido.").pack(
+            fill="x", padx=12, pady=(12, 0)
+        )
+
+        ttk.Label(win, text="Tipo:").pack(padx=12, pady=(12, 4), anchor="w")
+        var = tk.StringVar(value=initial)
+        cmb = ttk.Combobox(win, textvariable=var, values=options, width=30)
+        cmb.pack(padx=12, pady=(0, 12), anchor="w")
+
+        out: Dict[str, Optional[str]] = {"val": None}
+
+        def ok():
+            val = var.get().strip()
+            if not val:
+                messagebox.showwarning("Editar tipo", "Informe um tipo.")
+                return
+            out["val"] = val
+            win.destroy()
+
+        def cancel():
+            out["val"] = None
+            win.destroy()
+
+        btn = ttk.Frame(win)
+        btn.pack(padx=12, pady=(0, 12), fill="x")
+        ttk.Button(btn, text="OK", command=ok).pack(side="right", padx=4)
+        ttk.Button(btn, text="Cancelar", command=cancel).pack(side="right", padx=4)
+
+        win.wait_window()
+        return out["val"]
+
+    def on_edit_tipo(self, _evt=None):
+        sel = self.tree_pedidos.selection()
+        if not sel:
+            messagebox.showwarning(
+                "Nenhum pedido selecionado", "Selecione um pedido na lista para editar."
+            )
+            return
+
+        pedido_index = int(sel[0])
+        if pedido_index < 0 or pedido_index >= len(self.pedidos):
+            return
+
+        pedido = self.pedidos[pedido_index]
+
+        options = all_type_options(
+            self.mcfg.get("print_type_rules", DEFAULT_RULES),
+            self.mcfg.get("print_type_subtypes", DEFAULT_SUBTYPES),
+        )
+        new_tipo = self._ask_tipo(initial=pedido.tipo, options=options)
+        if new_tipo is None or new_tipo == pedido.tipo:
+            return
+
+        for job in self.Jobs:
+            if job.pedido == pedido.pedido:
+                job.tipo = new_tipo
+                job.tipo_manual = True
+
+        self.pedidos = build_pedido_summary(self.Jobs)
+        self.refresh_pedidos()
+        self.on_select_block()
+        self.status.configure(
+            text=self.status.cget("text") + f" | Tipo definido como '{new_tipo}'"
+        )
+
+    def on_edit_print_types(self) -> None:
+        win = tk.Toplevel(self)
+        win.title("Tipos de impressão")
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        dialog_header(
+            win, "Tipos de impressão",
+            "Regras para identificar Pedido, Reposição e outros tipos pelo nome do arquivo.",
+        ).pack(fill="x", padx=12, pady=(12, 0))
+
+        ttk.Label(
+            win,
+            text=(
+                "Cada regra tem um nome e um padrão (regex) comparado ao começo\n"
+                "do nome do arquivo/documento — a primeira regra que combinar\n"
+                "define o tipo. O que não combinar com nenhuma regra cai em\n"
+                "'Fora do padrão', e pode ser marcado manualmente (botão\n"
+                "'Editar tipo') com um dos subtipos cadastrados abaixo (Teste,\n"
+                "Terceirizado, ou outro que você adicionar)."
+            ),
+            justify="left",
+        ).pack(padx=12, pady=(10, 8), anchor="w")
+
+        rules: List[dict] = normalize_rules(self.mcfg.get("print_type_rules", DEFAULT_RULES))
+        subtypes: List[str] = normalize_subtypes(
+            self.mcfg.get("print_type_subtypes", DEFAULT_SUBTYPES)
+        )
+
+        rules_box = ttk.LabelFrame(win, text="Regras de detecção automática (ordem importa)")
+        rules_box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        cols = ("name", "pattern")
+        tree = ttk.Treeview(rules_box, columns=cols, show="headings", height=6)
+        tree.heading("name", text="Nome")
+        tree.column("name", width=140, anchor="w")
+        tree.heading("pattern", text="Padrão (regex)")
+        tree.column("pattern", width=320, anchor="w")
+        tree.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+
+        def refresh_rules_tree(select_index: Optional[int] = None):
+            tree.delete(*tree.get_children())
+            for i, r in enumerate(rules):
+                tree.insert("", "end", iid=str(i), values=(r["name"], r["pattern"]))
+            if select_index is not None and 0 <= select_index < len(rules):
+                tree.selection_set(str(select_index))
+
+        refresh_rules_tree()
+
+        form = ttk.Frame(rules_box)
+        form.pack(fill="x", padx=8, pady=(0, 4))
+
+        ttk.Label(form, text="Nome:").grid(row=0, column=0, sticky="w")
+        var_rule_name = tk.StringVar()
+        ttk.Entry(form, textvariable=var_rule_name, width=18).grid(
+            row=0, column=1, sticky="w", padx=6, pady=2
+        )
+
+        ttk.Label(form, text="Padrão (regex):").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        var_rule_pattern = tk.StringVar()
+        ttk.Entry(form, textvariable=var_rule_pattern, width=36).grid(
+            row=0, column=3, sticky="w", padx=6, pady=2
+        )
+
+        selected_rule: Dict[str, Optional[int]] = {"value": None}
+
+        def clear_rule_form():
+            selected_rule["value"] = None
+            var_rule_name.set("")
+            var_rule_pattern.set("")
+            tree.selection_remove(*tree.selection())
+
+        def on_select_rule(_evt=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = int(sel[0])
+            selected_rule["value"] = idx
+            var_rule_name.set(rules[idx]["name"])
+            var_rule_pattern.set(rules[idx]["pattern"])
+
+        tree.bind("<<TreeviewSelect>>", on_select_rule)
+
+        def add_or_update_rule():
+            name = var_rule_name.get().strip()
+            pattern = var_rule_pattern.get().strip()
+            if not name or not pattern:
+                messagebox.showwarning("Tipos de impressão", "Informe nome e padrão.")
+                return
+            if name == FALLBACK_TYPE:
+                messagebox.showwarning(
+                    "Tipos de impressão",
+                    f"'{FALLBACK_TYPE}' é reservado para o que não combinar com nenhuma regra.",
+                )
+                return
+            try:
+                validate_pattern(pattern)
+            except ValueError as e:
+                messagebox.showerror("Tipos de impressão", str(e))
+                return
+            idx = selected_rule["value"]
+            if idx is not None:
+                rules[idx] = {"name": name, "pattern": pattern}
+            else:
+                rules.append({"name": name, "pattern": pattern})
+                idx = len(rules) - 1
+            refresh_rules_tree(select_index=idx)
+            selected_rule["value"] = idx
+
+        def remove_rule():
+            idx = selected_rule["value"]
+            if idx is None:
+                messagebox.showwarning("Tipos de impressão", "Selecione uma regra na lista.")
+                return
+            del rules[idx]
+            clear_rule_form()
+            refresh_rules_tree()
+
+        def move_rule(delta: int):
+            idx = selected_rule["value"]
+            if idx is None:
+                return
+            j = idx + delta
+            if j < 0 or j >= len(rules):
+                return
+            rules[idx], rules[j] = rules[j], rules[idx]
+            refresh_rules_tree(select_index=j)
+            selected_rule["value"] = j
+
+        btns_rules = ttk.Frame(rules_box)
+        btns_rules.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns_rules, text="Nova", command=clear_rule_form).pack(side="left")
+        ttk.Button(btns_rules, text="Adicionar / Atualizar", command=add_or_update_rule).pack(
+            side="left", padx=6
+        )
+        ttk.Button(btns_rules, text="Remover", command=remove_rule).pack(side="left", padx=6)
+        ttk.Button(btns_rules, text="Subir", command=lambda: move_rule(-1)).pack(
+            side="left", padx=(16, 4)
+        )
+        ttk.Button(btns_rules, text="Descer", command=lambda: move_rule(1)).pack(side="left")
+
+        subtypes_box = ttk.LabelFrame(win, text="Subtipos manuais para 'Fora do padrão'")
+        subtypes_box.pack(fill="x", padx=12, pady=(0, 8))
+
+        lb_subtypes = tk.Listbox(subtypes_box, height=4)
+        lb_subtypes.pack(side="left", fill="both", expand=True, padx=(8, 4), pady=8)
+
+        def refresh_subtypes():
+            lb_subtypes.delete(0, tk.END)
+            for s in subtypes:
+                lb_subtypes.insert(tk.END, s)
+
+        refresh_subtypes()
+
+        sub_form = ttk.Frame(subtypes_box)
+        sub_form.pack(side="left", fill="y", padx=(4, 8), pady=8)
+
+        ttk.Label(sub_form, text="Novo subtipo:").pack(anchor="w")
+        var_subtype_new = tk.StringVar()
+        ttk.Entry(sub_form, textvariable=var_subtype_new, width=18).pack(anchor="w")
+
+        def add_subtype():
+            name = var_subtype_new.get().strip()
+            if not name:
+                return
+            if name not in subtypes:
+                subtypes.append(name)
+                refresh_subtypes()
+            var_subtype_new.set("")
+
+        def remove_subtype():
+            sel = lb_subtypes.curselection()
+            if not sel:
+                messagebox.showwarning("Tipos de impressão", "Selecione um subtipo na lista.")
+                return
+            del subtypes[sel[0]]
+            refresh_subtypes()
+
+        ttk.Button(sub_form, text="Adicionar", command=add_subtype).pack(anchor="w", pady=(4, 2))
+        ttk.Button(sub_form, text="Remover selecionado", command=remove_subtype).pack(anchor="w")
+
+        def save():
+            self.mcfg["print_type_rules"] = list(rules)
+            self.mcfg["print_type_subtypes"] = list(subtypes)
+            save_cfg(self.mcfg)
+
+            for job in self.Jobs:
+                if job.is_gap or job.tipo_manual:
+                    continue
+                job.tipo = classify_document(job.document, rules)
+
+            self.pedidos = build_pedido_summary(self.Jobs)
+            self.refresh_pedidos()
+            self.on_select_block()
+
+            win.destroy()
+
+        btn = ttk.Frame(win)
+        btn.pack(padx=12, pady=(6, 12), fill="x")
+        ttk.Button(btn, text="Salvar", command=save).pack(side="right", padx=4)
+        ttk.Button(btn, text="Cancelar", command=win.destroy).pack(side="right", padx=4)
+
+        win.wait_window()
 
     # --------------------------
     # Duplicidade entre rolos
@@ -1112,6 +1436,7 @@ class PXPrintLogsUI(ttk.Frame):
                     vpos_mm=float(job.vpos_mm),
                     real_m=float(job.real_m),
                     source_path=job.src_file,
+                    tipo=job.tipo,
                 )
                 for job in self.Jobs
                 if not job.is_gap

@@ -21,6 +21,7 @@ from core.fabric_scraps import (
     remove_scrap,
     save_scraps,
     set_scrap_used,
+    totals_by_fabric_tipo,
     unused_scraps_for_fabric,
 )
 from core.printers import Printer, find_printer_by_display_name, load_printers
@@ -40,6 +41,7 @@ from core.printlogs_db import (
     update_roll_orders,
 )
 from core.version import APP_VERSION
+from core.ui import card, dialog_header, page_heading
 from modules.operacao.exporters import mirror_and_normal_to_jpg_scaled, pdf_all_pages_to_jpg_scaled
 from modules.operacao.parser import pedido_from_document
 
@@ -728,7 +730,7 @@ def export_queue_pdf(
 # MAIN ENTRY
 # -----------------------------
 def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
-    frame = ttk.Frame(parent, padding=10)
+    frame = ttk.Frame(parent, padding=(28, 22, 28, 18))
     frame.pack(fill="both", expand=True)
 
     # Container rolável: em telas pequenas o conteúdo (em especial o painel
@@ -762,6 +764,10 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     canvas.bind("<Enter>", _bind_mousewheel)
     canvas.bind("<Leave>", _unbind_mousewheel)
+
+    page_heading(body, "Planeje a próxima impressão",
+                 "Organize arquivos, aproveite tecidos e confira cada rolo.",
+                 action=lambda: import_images(), action_text="＋ Importar imagens").pack(fill="x")
 
     jobs: List[Job] = []
     view_rows: List[Job] = []
@@ -832,7 +838,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     var_fabric_pick = tk.StringVar(value="Dryfit" if "Dryfit" in fabric_options else fabric_options[0])
 
     # ---------------- UI TOP ----------------
-    top = ttk.Frame(body)
+    top = card(body, "Ações do planejamento", padding=10)
     top.pack(fill="x")
 
     ttk.Button(top, text="Importar imagens", command=lambda: import_images()).pack(side="left")
@@ -873,24 +879,29 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     ttk.Separator(body).pack(fill="x", pady=10)
 
     # Config row
-    config = ttk.Frame(body)
-    config.pack(fill="x")
+    config = card(body, "Configuração de impressão", padding=12)
+    config.pack(fill="x", pady=(8, 0))
 
-    ttk.Label(config, text="DPI:").pack(side="left")
-    ttk.Entry(config, width=8, textvariable=var_dpi).pack(side="left", padx=5)
+    for col in range(4):
+        config.columnconfigure(col, weight=1)
+    ttk.Label(config, text="Impressora").grid(row=0, column=0, sticky="w", padx=10, pady=(2, 4))
+    ttk.Label(config, text="DPI global").grid(row=0, column=1, sticky="w", padx=10, pady=(2, 4))
+    ttk.Label(config, text="Eixo do comprimento").grid(row=0, column=2, sticky="w", padx=10, pady=(2, 4))
+    ttk.Label(config, text="Velocidade (m/min)").grid(row=0, column=3, sticky="w", padx=10, pady=(2, 4))
 
-    ttk.Label(config, text="Eixo:").pack(side="left")
+    ttk.Entry(config, textvariable=var_dpi).grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 10))
+
     ttk.Combobox(
-        config, width=10, values=["altura", "largura", "maior"],
+        config, values=["altura", "largura", "maior"],
         state="readonly", textvariable=var_axis
-    ).pack(side="left", padx=5)
+    ).grid(row=1, column=2, sticky="ew", padx=10, pady=(0, 10))
 
-    ttk.Label(config, text="Impressora:").pack(side="left")
+
     cb_printer = ttk.Combobox(
-        config, width=14, values=_printer_options(),
+        config, values=_printer_options(),
         state="readonly", textvariable=var_printer
     )
-    cb_printer.pack(side="left", padx=5)
+    cb_printer.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
 
     def on_printer_selected(_evt=None):
         pr = next((p for p in printers if p.display_name == var_printer.get()), None)
@@ -907,35 +918,37 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         on_printer_selected()
 
     cb_printer.bind("<<ComboboxSelected>>", on_printer_selected)
-    ttk.Button(config, text="↻", width=3, command=refresh_printers).pack(side="left", padx=(0, 5))
+    ttk.Button(config, text="Atualizar", command=refresh_printers).grid(
+        row=2, column=1, sticky="w", padx=10, pady=(0, 4)
+    )
 
-    ttk.Label(config, text="Vel (m/min):").pack(side="left")
-    ttk.Entry(config, width=8, textvariable=var_speed).pack(side="left", padx=5)
-
-    ttk.Label(config, text="Setup (min/job):").pack(side="left")
-    ttk.Entry(config, width=8, textvariable=var_setup).pack(side="left", padx=5)
+    ttk.Entry(config, textvariable=var_speed).grid(row=1, column=3, sticky="ew", padx=10, pady=(0, 10))
+    ttk.Label(config, text="Setup (min/job)").grid(row=2, column=0, sticky="w", padx=10, pady=(0, 4))
+    ttk.Entry(config, textvariable=var_setup).grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
 
     # Fabric tools row
-    tools = ttk.Frame(body)
+    tools = card(body, "Arquivos e ordenação", padding=12)
     tools.pack(fill="x", pady=(8, 0))
 
-    ttk.Label(tools, text="Tecido:").pack(side="left")
+    for col in range(4):
+        tools.columnconfigure(col, weight=1)
+    ttk.Label(tools, text="Tecido").grid(row=0, column=0, sticky="w", padx=10, pady=(2, 4))
     cb_fab = ttk.Combobox(
-        tools, width=18, values=fabric_options,
+        tools, values=fabric_options,
         state="readonly", textvariable=var_fabric_pick
     )
-    cb_fab.pack(side="left", padx=5)
+    cb_fab.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
 
     ttk.Button(
         tools,
         text="Definir tecido (selecionados)",
         command=lambda: set_fabric_selected()
-    ).pack(side="left", padx=6)
+    ).grid(row=1, column=1, sticky="ew", padx=6, pady=(0, 8))
 
     btn_move_up = ttk.Button(tools, text="▲ Mover acima", command=lambda: move_job(-1))
-    btn_move_up.pack(side="left", padx=(16, 0))
+    btn_move_up.grid(row=1, column=2, sticky="ew", padx=6, pady=(0, 8))
     btn_move_down = ttk.Button(tools, text="▼ Mover abaixo", command=lambda: move_job(+1))
-    btn_move_down.pack(side="left", padx=4)
+    btn_move_down.grid(row=1, column=3, sticky="ew", padx=6, pady=(0, 8))
 
     def refresh_fabric_options(select: Optional[str] = None):
         nonlocal fabric_options
@@ -974,7 +987,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         return canonical
 
     # Mode and planning row
-    plan = ttk.Frame(body)
+    plan = card(body, "Ajustes de fila, espaços e aproveitamento", padding=12)
     plan.pack(fill="x", pady=(8, 0))
 
     ttk.Label(plan, text="Modo:").pack(side="left")
@@ -1018,8 +1031,8 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     ttk.Button(plan, text="Voltar visão base", command=lambda: show_base()).pack(side="left", padx=10)
 
-    plan2 = ttk.Frame(body)
-    plan2.pack(fill="x", pady=(4, 0))
+    plan2 = ttk.Frame(plan)
+    plan2.pack(fill="x", pady=(8, 0))
 
     ttk.Checkbutton(
         plan2,
@@ -1032,7 +1045,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     ).pack(side="left", padx=(10, 0))
 
     # ---------------- Exportação (PDF / JPG espelhado) ----------------
-    export_box = ttk.LabelFrame(body, text="Exportação (PDF / JPG espelhado)")
+    export_box = card(body, "Opções de exportação · PDF e JPG espelhado", padding=12)
     export_box.pack(fill="x", pady=(8, 0))
 
     exp_row1 = ttk.Frame(export_box)
@@ -1094,8 +1107,23 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         variable=var_use_printer_jpg_path,
     ).pack(side="left")
 
-    # ---------------- TABLE ----------------
-    table_bar = ttk.Frame(body)
+    # ---------------- TABLE / TABS ----------------
+    workspace = ttk.Notebook(body)
+    workspace.pack(fill="both", expand=True, pady=(12, 0))
+    files_tab = ttk.Frame(workspace, padding=12)
+    queue_tab = ttk.Frame(workspace, padding=12)
+    rolls_tab = ttk.Frame(workspace, padding=12)
+    orders_tab = ttk.Frame(workspace, padding=12)
+    workspace.add(files_tab, text="Arquivos")
+    workspace.add(queue_tab, text="Fila de impressão")
+    workspace.add(rolls_tab, text="Resumo dos rolos")
+    workspace.add(orders_tab, text="Pedidos")
+    ttk.Label(files_tab, text="Arquivos importados", style="PageSubtitle.TLabel").pack(anchor="w")
+    ttk.Label(files_tab, text="Use a aba Fila de impressão para conferir a sequência e editar itens.",
+              style="Muted.TLabel").pack(anchor="w", pady=(8, 12))
+    ttk.Button(files_tab, text="Mostrar arquivos na fila", command=lambda: workspace.select(queue_tab)).pack(anchor="w")
+
+    table_bar = ttk.Frame(queue_tab)
     table_bar.pack(fill="x", pady=(10, 0))
     ttk.Label(table_bar, text="Fila (sequência)").pack(side="left")
     ttk.Button(
@@ -1103,7 +1131,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     ).pack(side="right")
 
     cols = ("drag", "roll", "fabric", "dpi", "arquivo", "w", "h", "metros", "tempo")
-    tree = ttk.Treeview(body, columns=cols, show="headings")
+    tree = ttk.Treeview(queue_tab, columns=cols, show="headings")
     tree.pack(fill="both", expand=True, pady=(4, 10))
 
     tree.heading("drag", text="")
@@ -1220,7 +1248,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     tree.bind("<ButtonRelease-1>", on_tree_release, add="+")
 
     # ---------------- SUMMARY ----------------
-    summary = ttk.Frame(body)
+    summary = ttk.Frame(queue_tab)
     summary.pack(fill="x")
 
     lbl_count = ttk.Label(summary, text="Itens: 0")
@@ -1233,7 +1261,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     lbl_time.pack(side="left", padx=16)
 
     # ---------------- RESUMO POR ROLO (conferência) ----------------
-    summary_box = ttk.LabelFrame(body, text="Resumo por rolo (conferência)")
+    summary_box = card(rolls_tab, "Resumo dos rolos · conferência", padding=10)
     summary_box.pack(fill="both", expand=False, pady=(10, 0))
 
     summary_bar = ttk.Frame(summary_box)
@@ -1262,7 +1290,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     sb_sum.pack(side="right", fill="y", pady=4)
 
     # ---------------- PEDIDOS NA FILA ----------------
-    pedidos_box = ttk.LabelFrame(body, text="Pedidos sendo impressos")
+    pedidos_box = card(orders_tab, "Pedidos sendo impressos", padding=10)
     pedidos_box.pack(fill="both", expand=False, pady=(10, 0))
 
     pedidos_bar = ttk.Frame(pedidos_box)
@@ -1988,10 +2016,13 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
+        dialog_header(frm, "Editar espaço", "Ajuste o avanço sem alterar a fila original.").grid(
+            row=0, column=0, columnspan=2, sticky="ew"
+        )
 
-        ttk.Label(frm, text="Tamanho do espaço (m):").grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="Tamanho do espaço (m):").grid(row=1, column=0, sticky="w")
         var_len = tk.StringVar(value=f"{current_m:.2f}")
-        ttk.Entry(frm, textvariable=var_len, width=10).grid(row=0, column=1, sticky="w", padx=(6, 0))
+        ttk.Entry(frm, textvariable=var_len, width=10).grid(row=1, column=1, sticky="w", padx=(6, 0))
 
         def on_save():
             v = safe_float(var_len.get(), -1.0)
@@ -2008,7 +2039,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             generate_queue()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=1, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Restaurar padrão", command=on_reset).pack(side="left")
         ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side="right")
         ttk.Button(btns, text="Salvar", command=on_save).pack(side="right", padx=(0, 8))
@@ -2021,15 +2052,18 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
+        dialog_header(frm, "Editar item", "Altere tecido e DPI desta imagem.").grid(
+            row=0, column=0, columnspan=3, sticky="ew"
+        )
 
-        ttk.Label(frm, text="Arquivo:").grid(row=0, column=0, sticky="w")
-        ttk.Label(frm, text=job.name).grid(row=0, column=1, sticky="w")
+        ttk.Label(frm, text="Arquivo:").grid(row=1, column=0, sticky="w")
+        ttk.Label(frm, text=job.name).grid(row=1, column=1, sticky="w")
 
-        ttk.Label(frm, text="Tecido:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frm, text="Tecido:").grid(row=2, column=0, sticky="w", pady=(8, 0))
         var_fab = tk.StringVar(value=job.fabric)
         cb = ttk.Combobox(frm, values=sorted(set(list(fabrics_map.keys()) + ["Outro"])),
                           textvariable=var_fab, state="readonly", width=22)
-        cb.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        cb.grid(row=2, column=1, sticky="w", pady=(8, 0))
 
         def on_new_fabric():
             name = simpledialog.askstring(
@@ -2047,12 +2081,12 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             var_fab.set(canonical)
 
         ttk.Button(frm, text="Novo tecido…", command=on_new_fabric).grid(
-            row=1, column=2, sticky="w", padx=(6, 0), pady=(8, 0)
+            row=2, column=2, sticky="w", padx=(6, 0), pady=(8, 0)
         )
 
-        ttk.Label(frm, text="DPI do item (vazio = DPI global):").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frm, text="DPI do item (vazio = DPI global):").grid(row=3, column=0, sticky="w", pady=(8, 0))
         var_dpi_item = tk.StringVar(value=(f"{job.dpi_override:.0f}" if job.dpi_override else ""))
-        ttk.Entry(frm, textvariable=var_dpi_item, width=10).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Entry(frm, textvariable=var_dpi_item, width=10).grid(row=3, column=1, sticky="w", pady=(8, 0))
 
         def on_save():
             job.fabric = var_fab.get().strip() or "Outro"
@@ -2076,7 +2110,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             generate_queue() if var_mode.get().strip().lower() == "tecido" else show_base()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side="right")
         ttk.Button(btns, text="Salvar", command=on_save).pack(side="right", padx=(0, 8))
 
@@ -2089,6 +2123,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
+        dialog_header(frm, "Tecidos e variações", "Aliases, metragem do rolo e tecido canônico.").pack(fill="x")
 
         ttk.Label(frm, text="Tecidos cadastrados (canonical -> aliases | metragem do rolo):").pack(anchor="w")
 
@@ -2168,6 +2203,10 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         dlg.transient(frame.winfo_toplevel())
         dlg.grab_set()
         dlg.geometry("480x570")
+
+        dialog_header(dlg, "Selecionar pedaços", "Escolha quais sobras podem entrar na próxima fila.").pack(
+            fill="x", padx=12, pady=(12, 0)
+        )
 
         ttk.Label(
             dlg,
@@ -2266,16 +2305,22 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         dlg.transient(frame.winfo_toplevel())
         dlg.grab_set()
 
+        dialog_header(dlg, "Pedaços de tecido", "Metragens disponíveis e status de utilização.").pack(
+            fill="x", padx=12, pady=(12, 0)
+        )
+
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
 
-        cols = ("name", "fabric", "length", "used")
+        cols = ("name", "fabric", "tipo", "length", "used", "obs")
         tree = ttk.Treeview(frm, columns=cols, show="headings", height=10)
         for col, txt, w in [
-            ("name", "Nome", 200),
-            ("fabric", "Tecido", 140),
-            ("length", "Metragem (m)", 110),
-            ("used", "Usado?", 70),
+            ("name", "Nome", 160),
+            ("fabric", "Tecido", 110),
+            ("tipo", "Tipo", 90),
+            ("length", "Metragem (m)", 100),
+            ("used", "Usado?", 60),
+            ("obs", "Observação", 180),
         ]:
             tree.heading(col, text=txt)
             tree.column(col, width=w, anchor="w")
@@ -2288,10 +2333,14 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             for sc in scraps:
                 tree.insert(
                     "", "end", iid=sc.key,
-                    values=(sc.name, sc.fabric, f"{sc.length_m:.1f}", "Sim" if sc.used else "Não"),
+                    values=(
+                        sc.name, sc.fabric, sc.tipo, f"{sc.length_m:.1f}",
+                        "Sim" if sc.used else "Não", sc.observacao,
+                    ),
                 )
             if select_key:
                 tree.selection_set(select_key)
+            refresh_summary()
 
         form = ttk.Frame(frm)
         form.pack(fill="x")
@@ -2311,10 +2360,22 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         var_sc_length = tk.StringVar()
         ttk.Entry(form, textvariable=var_sc_length, width=10).grid(row=1, column=1, sticky="w", padx=6, pady=2)
 
+        ttk.Label(form, text="Tipo:").grid(row=1, column=2, sticky="w", padx=(12, 0))
+        var_sc_tipo = tk.StringVar()
+        ttk.Entry(form, textvariable=var_sc_tipo, width=18).grid(row=1, column=3, sticky="w", padx=6, pady=2)
+
+        ttk.Label(form, text="Observação:").grid(row=2, column=0, sticky="w")
+        var_sc_obs = tk.StringVar()
+        ttk.Entry(form, textvariable=var_sc_obs, width=46).grid(
+            row=2, column=1, columnspan=3, sticky="we", padx=6, pady=2
+        )
+
         def clear_form():
             selected_key["value"] = None
             var_sc_name.set("")
             var_sc_length.set("")
+            var_sc_tipo.set("")
+            var_sc_obs.set("")
             tree.selection_remove(*tree.selection())
 
         def on_select(_evt=None):
@@ -2329,6 +2390,8 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             var_sc_name.set(sc.name)
             var_sc_fabric.set(sc.fabric)
             var_sc_length.set(f"{sc.length_m:.1f}")
+            var_sc_tipo.set(sc.tipo)
+            var_sc_obs.set(sc.observacao)
 
         tree.bind("<<TreeviewSelect>>", on_select)
 
@@ -2342,6 +2405,8 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                     name=var_sc_name.get(),
                     fabric=var_sc_fabric.get(),
                     length_m=length_m,
+                    tipo=var_sc_tipo.get(),
+                    observacao=var_sc_obs.get(),
                 )
             except ValueError as e:
                 messagebox.showerror("Pedaços de tecido", str(e))
@@ -2390,6 +2455,23 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         ttk.Button(btns, text="Marcar como usado", command=lambda: on_toggle_used(True)).pack(side="left", padx=(16, 6))
         ttk.Button(btns, text="Desmarcar", command=lambda: on_toggle_used(False)).pack(side="left")
         ttk.Button(btns, text="Fechar", command=on_close).pack(side="right")
+
+        summary_box = ttk.LabelFrame(frm, text="Resumo de metragens por tecido/tipo")
+        summary_box.pack(fill="x", pady=(14, 0))
+
+        summary_tree = ttk.Treeview(
+            summary_box, columns=("label", "total"), show="headings", height=5
+        )
+        summary_tree.heading("label", text="Tecido / Tipo")
+        summary_tree.heading("total", text="Metragem total (m)")
+        summary_tree.column("label", width=260, anchor="w")
+        summary_tree.column("total", width=140, anchor="w")
+        summary_tree.pack(fill="x", padx=8, pady=8)
+
+        def refresh_summary():
+            summary_tree.delete(*summary_tree.get_children())
+            for label, total in totals_by_fabric_tipo(scraps):
+                summary_tree.insert("", "end", values=(label, f"{total:.1f}"))
 
         refresh_tree()
 
@@ -3159,4 +3241,10 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     # init: já inicia em modo tecido com fila
     generate_queue()
+
+    # Hooks expostos pro Nexor (menu lateral "Gerenciamento") poder abrir
+    # estes diálogos diretamente, sem duplicar a lógica aqui.
+    frame.open_fabrics_dialog = open_fabrics_dialog
+    frame.open_scraps_dialog = open_scraps_dialog
+
     return frame

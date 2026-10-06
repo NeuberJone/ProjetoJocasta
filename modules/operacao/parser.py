@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from core.print_types import DEFAULT_RULES, classify_document
 from .models import Job, Block, PedidoSummary
 
 _RE_KV = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$")
@@ -61,6 +62,13 @@ def pedido_from_document(doc: str) -> str:
     return raw if raw else "DESCONHECIDO"
 
 
+def tipo_from_document(document: str, rules: Optional[Iterable[dict]] = None) -> str:
+    """Tipo de impressão (Pedido, Reposição, Fora do padrão, ...) conforme as
+    regras configuradas em 'Tipos de impressão…' — primeira regra que casar
+    com o nome do documento vence."""
+    return classify_document(document, rules if rules is not None else DEFAULT_RULES)
+
+
 def _normalize_doc_name(name: str) -> str:
     name = (name or "").strip()
     name = _RE_TRAILING_EXT.sub("", name)
@@ -101,7 +109,11 @@ def match_space_entry(document: str, space_entries: Optional[Iterable[dict]]) ->
     return None
 
 
-def parse_log_txt(path: str, space_entries: Optional[Iterable[dict]] = None) -> Optional[Job]:
+def parse_log_txt(
+    path: str,
+    space_entries: Optional[Iterable[dict]] = None,
+    type_rules: Optional[Iterable[dict]] = None,
+) -> Optional[Job]:
     try:
         txt = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
@@ -150,9 +162,11 @@ def parse_log_txt(path: str, space_entries: Optional[Iterable[dict]] = None) -> 
         display_name = str(space_match.get("display_name") or "ESPAÇO")
         fabric = display_name
         pedido = display_name
+        tipo = ""
     else:
         fabric = fabric_from_document(document)
         pedido = pedido_from_document(document)
+        tipo = tipo_from_document(document, type_rules)
 
     return Job(
         end_time=end_dt,
@@ -164,6 +178,7 @@ def parse_log_txt(path: str, space_entries: Optional[Iterable[dict]] = None) -> 
         real_mm=real_mm,
         src_file=str(path),
         is_gap=is_gap,
+        tipo=tipo,
     )
 
 
@@ -193,6 +208,17 @@ def build_blocks(jobs: List[Job], machine: str) -> List[Block]:
     return blocks
 
 
+def _group_tipo(jlist: List[Job]) -> str:
+    """Tipo representativo do grupo — se todos os itens do pedido tiverem o
+    mesmo tipo, usa esse; se houver mistura (raro), mostra 'Vários'."""
+    types = {j.tipo for j in jlist if j.tipo}
+    if len(types) == 1:
+        return next(iter(types))
+    if len(types) > 1:
+        return "Vários"
+    return ""
+
+
 def build_pedido_summary(jobs: List[Job]) -> List[PedidoSummary]:
     groups: dict[str, List[Job]] = {}
     for j in jobs:
@@ -206,6 +232,7 @@ def build_pedido_summary(jobs: List[Job]) -> List[PedidoSummary]:
             total_m=sum(j.real_m for j in jlist),
             job_count=len(jlist),
             newest_end=max(j.end_time for j in jlist),
+            tipo=_group_tipo(jlist),
         )
         for pedido, jlist in groups.items()
     ]

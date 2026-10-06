@@ -19,6 +19,9 @@ class PXCoreConfig:
     # Exemplo (SHA1 de "test"): a94a8fe5ccb19ba61c4c0873d391e987982fbbd3
     dev_password_hash: str = ""
 
+    # Tema visual do Nexor (ver core/theme.py) — persiste entre execuções.
+    theme_name: str = "dark"
+
 
 def _config_path() -> Path:
     """
@@ -67,6 +70,9 @@ def _merge(cfg: PXCoreConfig, raw: dict[str, Any]) -> PXCoreConfig:
 
         if "dev_password_hash" in raw and raw["dev_password_hash"]:
             cfg.dev_password_hash = str(raw["dev_password_hash"])
+
+        if "theme_name" in raw and raw["theme_name"]:
+            cfg.theme_name = str(raw["theme_name"])
 
     return cfg
 

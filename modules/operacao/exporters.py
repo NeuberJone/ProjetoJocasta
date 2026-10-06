@@ -159,8 +159,8 @@ def mirror_and_normal_to_jpg_scaled(
     row_gap_px: int = 0,
 ) -> None:
     """
-    Gera um único JPG com o PDF normal (não espelhado) à esquerda e o
-    espelhado à direita, lado a lado, para cada página — e empilha os pares
+    Gera um único JPG com o PDF espelhado à esquerda e o normal (não
+    espelhado) à direita, lado a lado, para cada página — e empilha os pares
     verticalmente quando o PDF tem mais de uma página. Usado quando a
     pasta/arquivo da impressora está configurado (único arquivo que ela
     recebe, então precisa trazer as duas versões).
@@ -209,11 +209,11 @@ def mirror_and_normal_to_jpg_scaled(
             h = max(im.height for im in (im_normal, im_mirror) if im is not None)
             w_normal = im_normal.width if im_normal is not None else target_width_px
             w_mirror = im_mirror.width if im_mirror is not None else target_width_px
-            row = Image.new("RGB", (w_normal + col_gap_px + w_mirror, h), "white")
-            if im_normal is not None:
-                row.paste(im_normal, (0, 0))
+            row = Image.new("RGB", (w_mirror + col_gap_px + w_normal, h), "white")
             if im_mirror is not None:
-                row.paste(im_mirror, (w_normal + col_gap_px, 0))
+                row.paste(im_mirror, (0, 0))
+            if im_normal is not None:
+                row.paste(im_normal, (w_mirror + col_gap_px, 0))
             row_images.append(row)
 
         if len(row_images) == 1:

@@ -5,6 +5,7 @@ from core.printlogs_db import (
     get_roll_module,
     get_roll_orders,
     get_roll_summary,
+    list_distinct_tipos,
     list_rolls,
 )
 
@@ -15,6 +16,7 @@ def search_rolls(
     machine: str | None = None,
     name_like: str | None = None,
     order_like: str | None = None,
+    tipo: str | None = None,
 ):
     """
     Wrapper fino sobre list_rolls, com fallback para versões antigas
@@ -27,6 +29,7 @@ def search_rolls(
             export_mode=None,
             name_like=name_like,
             order_like=order_like,
+            tipo=tipo,
         )
     except TypeError:
         return list_rolls(  # type: ignore[misc]
@@ -34,6 +37,10 @@ def search_rolls(
             machine=machine,
             name_like=name_like,
         )
+
+
+def load_distinct_tipos() -> list[str]:
+    return list_distinct_tipos()
 
 
 def load_roll_summary(roll_id: int):

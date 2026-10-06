@@ -21,6 +21,7 @@ class OrderRow:
     vpos_mm: float
     real_m: float
     source_path: str
+    tipo: str = ""
 
 
 def _now_iso() -> str:
@@ -71,6 +72,7 @@ def init_schema(con: sqlite3.Connection) -> None:
             document TEXT,
             fabric TEXT,
             pedido TEXT,
+            tipo TEXT,
             height_mm REAL,
             vpos_mm REAL,
             real_m REAL,
@@ -110,6 +112,9 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
     cols = [row[1] for row in con.execute("PRAGMA table_info(orders)").fetchall()]
     if "pedido" not in cols:
         con.execute("ALTER TABLE orders ADD COLUMN pedido TEXT")
+        con.commit()
+    if "tipo" not in cols:
+        con.execute("ALTER TABLE orders ADD COLUMN tipo TEXT")
         con.commit()
 
 
@@ -232,8 +237,8 @@ def save_export_transactional(
                 con.execute(
                     """
                     INSERT OR IGNORE INTO orders(
-                        roll_id, end_time, document, fabric, pedido, height_mm, vpos_mm, real_m, source_path, job_hash
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                        roll_id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, job_hash
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         roll_id,
@@ -241,6 +246,7 @@ def save_export_transactional(
                         o.document,
                         o.fabric,
                         o.pedido,
+                        o.tipo,
                         float(o.height_mm),
                         float(o.vpos_mm),
                         float(o.real_m),
@@ -287,6 +293,7 @@ def list_rolls(
     export_mode: Optional[str] = None,
     name_like: Optional[str] = None,
     order_like: Optional[str] = None,
+    tipo: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """
     Lista rolls com métricas agregadas:
@@ -297,6 +304,7 @@ def list_rolls(
     Filtros:
     - name_like: filtra pelo nome do rolo (roll_name)
     - order_like: filtra rolos que tenham ao menos 1 order cujo document contenha o texto
+    - tipo: filtra rolos que tenham ao menos 1 order com esse tipo exato (Pedido/Reposição/...)
     """
     con = connect()
     try:
@@ -329,6 +337,19 @@ def list_rolls(
                 """
             )
             params.append(f"%{order_like}%")
+
+        if tipo:
+            where.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM orders o3
+                    WHERE o3.roll_id = r.id
+                      AND o3.tipo = ?
+                )
+                """
+            )
+            params.append(tipo)
 
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
@@ -365,7 +386,7 @@ def get_roll_orders(roll_id: int) -> list[dict[str, Any]]:
         ensure_schema(con)
         rows = con.execute(
             """
-            SELECT id, end_time, document, fabric, pedido, height_mm, vpos_mm, real_m, source_path
+            SELECT id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path
             FROM orders
             WHERE roll_id = ?
             ORDER BY end_time DESC
@@ -570,8 +591,8 @@ def update_roll_orders(
                 con.execute(
                     """
                     INSERT OR IGNORE INTO orders(
-                        roll_id, end_time, document, fabric, pedido, height_mm, vpos_mm, real_m, source_path, job_hash
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                        roll_id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, job_hash
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         int(roll_id),
@@ -579,6 +600,7 @@ def update_roll_orders(
                         o.document,
                         o.fabric,
                         o.pedido,
+                        o.tipo,
                         float(o.height_mm),
                         float(o.vpos_mm),
                         float(o.real_m),
@@ -595,5 +617,23 @@ def update_roll_orders(
             con.rollback()
             raise
 
+    finally:
+        con.close()
+
+
+def list_distinct_tipos() -> list[str]:
+    """Tipos de impressão já registrados no banco (Pedido/Reposição/...) —
+    usado para preencher o filtro de 'Tipo' no Registros."""
+    con = connect()
+    try:
+        ensure_schema(con)
+        rows = con.execute(
+            """
+            SELECT DISTINCT tipo FROM orders
+            WHERE tipo IS NOT NULL AND tipo != ''
+            ORDER BY tipo
+            """
+        ).fetchall()
+        return [str(r["tipo"]) for r in rows]
     finally:
         con.close()

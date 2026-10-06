@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.3.0] - 2026-10-06
+### Added
+- Operação: novo campo **Tipo** por pedido (Pedido / Reposição / Fora do padrão / subtipos manuais), classificado automaticamente pelo nome do arquivo.
+- Operação → "Tipos de impressão…": tela para cadastrar as regras de detecção automática (nome + padrão/regex, com ordem de prioridade) e os subtipos manuais usados para marcar o que cai em "Fora do padrão" (Teste, Terceirizado, e outros que você adicionar).
+- Operação → "Editar tipo": permite corrigir manualmente o tipo de um pedido específico, escolhendo entre os tipos cadastrados.
+- O tipo agora é salvo junto com cada pedido exportado (banco de dados), e o Registros ganhou um filtro "Tipo" para pesquisar rolos já exportados por tipo de impressão.
+
+## [1.2.1] - 2026-10-06
+### Added
+- Planejador → "Pedaços de tecido…": novos campos **Tipo** e **Observação** no cadastro de cada pedaço cortado.
+- Planejador → "Pedaços de tecido…": resumo com a metragem total agrupada por tecido + tipo (ex.: "Dryfit tipo Novo", "Dryfit tipo Antigo").
+
+## [1.2.0] - 2026-10-05
+### Added
+- Nexor: motor de temas central (`core/theme.py`) com os 8 temas do protótipo HTML — Escuro (padrão), Claro, Meio-termo, Dracula, Nord, Solarized, Windows XP e Windows 98 — com cores extraídas diretamente do `Referencia/nexor-prototipo-download.html`.
+- Configurações → "Aparência": grade com os 8 temas (botão de cada um já mostra sua própria paleta), aplica na hora (sem reiniciar), marca o tema ativo com "✓", e persiste em `core/config.py` (`theme_name`), restaurando na próxima abertura.
+- O tema se propaga pra toda a aplicação: janelas/diálogos já abertos são recoloridos na hora da troca, e qualquer diálogo novo (de qualquer módulo) já nasce com o tema atual aplicado automaticamente — sem precisar alterar o código de cada diálogo individualmente.
+- XP e Windows 98 também mudam acabamento (relevo/borda mais grosso nos botões, fonte Tahoma), não só cores.
+
+## [1.1.1] - 2026-10-05
+### Fixed
+- Planejador/Operação: corrigida a ordem do JPG combinado (pasta da impressora) — o espelhado agora fica à esquerda e o normal à direita, igual ao modelo de referência atualizado (antes estava invertido)
+
+## [1.1.0] - 2026-10-05
+### Added
+- Nexor: menu lateral reorganizado em duas seções, como no protótipo de referência — "Produção têxtil" (Planejador, Operação, Registros) e "Gerenciamento" (Impressoras, Tecidos, Pedaços de tecido, Configurações), com atalhos que abrem os cadastros do Planejador direto pelo menu lateral, sem precisar navegar manualmente até lá primeiro.
+- Nexor: "Configurações" virou uma página do menu lateral (igual Planejador/Operação/Registros) em vez de um popup — mesmo conteúdo de antes (diretório base do PXCore) mais atalhos para Impressoras/Tecidos/Pedaços cortados. O item de menu "Abrir Configurações" continua funcionando, agora navegando pra essa página.
+- Nexor: cabeçalho com indicador da página atual ("Produção / {página}").
+
 ## [1.0.0] - 2026-10-05
 ### Changed — Rebrand para Nexor
 - O programa foi renomeado de "Projeto Jocasta"/JocastaHub para **Nexor** (`Nexor.py`, `Nexor.spec`, título da janela, versão).

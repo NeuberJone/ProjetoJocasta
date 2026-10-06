@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from core.migrate import migrate_legacy_path
 
@@ -25,6 +26,8 @@ class FabricScrap:
     fabric: str
     length_m: float
     used: bool = False
+    tipo: str = ""
+    observacao: str = ""
 
 
 def _slugify(s: str) -> str:
@@ -40,6 +43,8 @@ def _coerce(d: dict) -> FabricScrap:
         fabric=str(d.get("fabric", "")),
         length_m=float(d.get("length_m", 0.0) or 0.0),
         used=bool(d.get("used", False)),
+        tipo=str(d.get("tipo", "") or ""),
+        observacao=str(d.get("observacao", "") or ""),
     )
 
 
@@ -72,9 +77,13 @@ def add_or_update_scrap(
     name: str,
     fabric: str,
     length_m: float,
+    tipo: str = "",
+    observacao: str = "",
 ) -> List[FabricScrap]:
     name = name.strip()
     fabric = fabric.strip()
+    tipo = tipo.strip()
+    observacao = observacao.strip()
     if not name:
         raise ValueError("Informe um nome para o pedaço.")
     if not fabric:
@@ -90,6 +99,7 @@ def add_or_update_scrap(
                 out[i] = FabricScrap(
                     key=sc.key, name=name, fabric=fabric,
                     length_m=length_m, used=sc.used,
+                    tipo=tipo, observacao=observacao,
                 )
                 return out
         raise ValueError("Pedaço não encontrado para atualizar.")
@@ -101,7 +111,10 @@ def add_or_update_scrap(
             suffix += 1
         new_key = f"{new_key}_{suffix}"
 
-    out.append(FabricScrap(key=new_key, name=name, fabric=fabric, length_m=length_m, used=False))
+    out.append(FabricScrap(
+        key=new_key, name=name, fabric=fabric, length_m=length_m, used=False,
+        tipo=tipo, observacao=observacao,
+    ))
     return out
 
 
@@ -127,3 +140,24 @@ def unused_scraps_for_fabric(scraps: List[FabricScrap], fabric: str) -> List[Fab
 def unused_lengths_for_fabric(scraps: List[FabricScrap], fabric: str) -> List[float]:
     """Metragens (desc.) dos pedaços não usados de um tecido — usado pelo planejador de fila."""
     return [s.length_m for s in unused_scraps_for_fabric(scraps, fabric)]
+
+
+def scrap_label(fabric: str, tipo: str) -> str:
+    """Rótulo do grupo tecido+tipo, ex.: 'Dryfit tipo Novo'. Sem tipo, só o tecido."""
+    tipo = (tipo or "").strip()
+    return f"{fabric} tipo {tipo}" if tipo else fabric
+
+
+def totals_by_fabric_tipo(
+    scraps: List[FabricScrap], *, only_unused: bool = False
+) -> List[Tuple[str, float]]:
+    """Resumo com a metragem total por combinação tecido+tipo, ex.:
+    [('Dryfit tipo Novo', 12.5), ('Dryfit tipo Antigo', 3.0)].
+    Ordenado pela ordem de aparição (tecido, depois tipo)."""
+    totals: "OrderedDict[Tuple[str, str], float]" = OrderedDict()
+    for sc in scraps:
+        if only_unused and sc.used:
+            continue
+        group = (sc.fabric, sc.tipo)
+        totals[group] = totals.get(group, 0.0) + sc.length_m
+    return [(scrap_label(fabric, tipo), total) for (fabric, tipo), total in totals.items()]
