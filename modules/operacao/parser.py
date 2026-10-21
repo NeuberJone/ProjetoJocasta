@@ -3,9 +3,11 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
-from core.print_types import DEFAULT_RULES, classify_document
+from core.fabrics import FabricEntry, canonical_fabric_name
+from core.operators import operator_name_for_code
+from core.print_types import DEFAULT_RULES, classify_document, pedido_override_for_type
 from .models import Job, Block, PedidoSummary
 
 _RE_KV = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$")
@@ -27,10 +29,41 @@ def parse_datetime(s: str) -> Optional[datetime]:
     return None
 
 
-def fabric_from_document(doc: str) -> str:
+def _strip_trailing_parens(raw: str) -> tuple[str, bool]:
+    """Remove parênteses no fim (um ou mais, ex.: "Dryfit (2)" ou
+    "Salum 12 (Argentina) (2)"), que marcam ruído/observação e não fazem
+    parte da identidade (nome do tecido ou do pedido) — ex.: "Dryfit (2).jpeg"
+    é só "Dryfit", e "Salum 12 (Argentina)"/"Salum 12 (Brasil)" são o mesmo
+    pedido "Salum 12". A observação em si continua visível no nome completo
+    do documento, exibido nos relatórios."""
+    had_paren = False
+    while True:
+        stripped = _RE_TRAILING_PAREN.sub("", raw).strip()
+        if stripped == raw:
+            break
+        raw = stripped
+        had_paren = True
+    return raw, had_paren
+
+
+def fabric_from_document(doc: str, fabrics_map: Optional[Dict[str, FabricEntry]] = None) -> str:
+    """Nome do tecido extraído do documento — se `fabrics_map` for passado
+    (cadastro de 'Tecidos e variações'), o nome extraído é canonicalizado por
+    ele, de forma que aliases do mesmo tecido (ex.: "Dryfit", "Dry Fit",
+    "Drifit") sejam sempre agrupados sob o mesmo nome, em vez de aparecerem
+    como tecidos diferentes só porque o arquivo foi nomeado de outro jeito."""
     parts = [p.strip() for p in (doc or "").split(" - ")]
     if len(parts) >= 2 and parts[1].strip():
-        return parts[1].strip().upper()
+        fabric = _RE_TRAILING_EXT.sub("", parts[1].strip()).strip()
+        fabric, _ = _strip_trailing_parens(fabric)
+        fabric = fabric.strip()
+        if not fabric:
+            return "DESCONHECIDO"
+        if fabrics_map:
+            canonical = canonical_fabric_name(fabric, fabrics_map)
+            if canonical:
+                fabric = canonical
+        return fabric.upper()
     return "DESCONHECIDO"
 
 
@@ -42,17 +75,9 @@ def pedido_from_document(doc: str) -> str:
     raw = " - ".join(parts[2:]).strip()
     raw = _RE_TRAILING_EXT.sub("", raw)
 
-    # Parênteses no fim já marcam onde o "ruído" termina (ex.: "Salum 12 (Argentina)"
-    # e "Salum 12 (Brasil)" são o mesmo pedido "Salum 12" — o "12" faz parte do nome).
     # Sem parênteses, um número solto no fim (ex.: "Escolinha Reis 21") é tratado
     # como contador de peça e é removido.
-    had_paren = False
-    while True:
-        stripped = _RE_TRAILING_PAREN.sub("", raw).strip()
-        if stripped == raw:
-            break
-        raw = stripped
-        had_paren = True
+    raw, had_paren = _strip_trailing_parens(raw)
 
     if not had_paren:
         raw = _RE_TRAILING_NUM.sub("", raw)
@@ -60,6 +85,22 @@ def pedido_from_document(doc: str) -> str:
     raw = raw.strip()
 
     return raw if raw else "DESCONHECIDO"
+
+
+_RE_OPERATOR_CODE = re.compile(r"^([A-Za-z]+)\s*\d+$")
+
+
+def operator_code_from_document(doc: str) -> str:
+    """Identificador do operador (ex.: 'N' em 'N1 - Dryfit', 'NJ' em
+    'NJ2 - Tactel') — só quando o primeiro segmento do documento é
+    iniciais + número (formato de Reposição). Em outros formatos (ex.:
+    Pedido, que começa com uma data) não há operador, e a função retorna ""."""
+    parts = [p.strip() for p in (doc or "").split(" - ")]
+    if not parts:
+        return ""
+    first = _RE_TRAILING_EXT.sub("", parts[0].strip()).strip()
+    m = _RE_OPERATOR_CODE.match(first)
+    return m.group(1).upper() if m else ""
 
 
 def tipo_from_document(document: str, rules: Optional[Iterable[dict]] = None) -> str:
@@ -113,6 +154,8 @@ def parse_log_txt(
     path: str,
     space_entries: Optional[Iterable[dict]] = None,
     type_rules: Optional[Iterable[dict]] = None,
+    operators: Optional[Iterable[dict]] = None,
+    fabrics_map: Optional[Dict[str, FabricEntry]] = None,
 ) -> Optional[Job]:
     try:
         txt = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -143,6 +186,8 @@ def parse_log_txt(
     if not end_dt:
         return None
 
+    start_dt = parse_datetime(general.get("StartTime", ""))
+
     document = general.get("Document") or item1.get("Name") or Path(path).stem
 
     def _f(x: str) -> float:
@@ -153,6 +198,7 @@ def parse_log_txt(
             return 0.0
 
     height_mm = _f(item1.get("HeightMM", "0"))
+    width_mm = _f(item1.get("WidthMM", "0"))
     vpos_mm = _f(item1.get("VPositionMM", "0"))
     real_mm = height_mm
 
@@ -163,10 +209,13 @@ def parse_log_txt(
         fabric = display_name
         pedido = display_name
         tipo = ""
+        operador = ""
     else:
-        fabric = fabric_from_document(document)
-        pedido = pedido_from_document(document)
+        fabric = fabric_from_document(document, fabrics_map)
         tipo = tipo_from_document(document, type_rules)
+        pedido_fixed = pedido_override_for_type(tipo, type_rules)
+        pedido = pedido_fixed if pedido_fixed is not None else pedido_from_document(document)
+        operador = operator_name_for_code(operator_code_from_document(document), operators)
 
     return Job(
         end_time=end_dt,
@@ -179,6 +228,9 @@ def parse_log_txt(
         src_file=str(path),
         is_gap=is_gap,
         tipo=tipo,
+        operador=operador,
+        width_mm=width_mm,
+        start_time=start_dt,
     )
 
 

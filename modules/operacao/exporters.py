@@ -559,9 +559,10 @@ def export_pdf(
         return
 
     # completo
-    w_end = 120
-    w_doc = 260
-    w_fab = 95
+    w_end = 110
+    w_doc = 200
+    w_fab = 85
+    w_op = 80
     w_size = 40
 
     font = "Helvetica"
@@ -587,6 +588,8 @@ def export_pdf(
         xh += w_doc
         c.drawString(xh, y0, "Tecido")
         xh += w_fab
+        c.drawString(xh, y0, "Operador")
+        xh += w_op
         c.drawString(xh, y0, "Tamanho")
         y0 -= 14
 
@@ -612,12 +615,14 @@ def export_pdf(
             end_txt = job.end_time.strftime("%d/%m/%Y %H:%M:%S")
             doc_txt = job.document
             fab_txt = job.fabric
+            op_txt = job.operador
             size_txt = fmt_m(job.real_m, suffix=False)
 
             doc_lines = _wrap_text(doc_txt, w_doc - 6, font, fs_row)
             fab_lines = _wrap_text(fab_txt, w_fab - 6, font, fs_row)
+            op_lines = _wrap_text(op_txt, w_op - 6, font, fs_row)
 
-            row_lines = max(len(doc_lines), len(fab_lines), 1)
+            row_lines = max(len(doc_lines), len(fab_lines), len(op_lines), 1)
             row_h = row_lines * line_h
 
             if _pdf_need_new_page(y - row_h, min_y=95):
@@ -633,8 +638,9 @@ def export_pdf(
             c.drawString(x0, y, end_txt)
             _draw_wrapped_cell(c, x0 + w_end, y, doc_lines, font, fs_row, line_h)
             _draw_wrapped_cell(c, x0 + w_end + w_doc, y, fab_lines, font, fs_row, line_h)
+            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab, y, op_lines, font, fs_row, line_h)
             c.drawRightString(
-                x0 + w_end + w_doc + w_fab + w_size - 2,
+                x0 + w_end + w_doc + w_fab + w_op + w_size - 2,
                 y,
                 size_txt,
             )
@@ -652,9 +658,11 @@ def export_pdf(
     c.line(40, y, page_w - 40, y)
     y -= 22
 
-    y = _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
-
+    # Pedidos no rolo aparece antes do resumo — resumo do rolo é o fechamento
+    # do relatório (PDF e JPG, já que o JPG é renderizado a partir deste PDF).
     if pedidos:
+        y = _pdf_draw_pedidos_table(c, pedidos, y, page_w, page_h, roll_name, machine, mode, mirrored)
+
         y -= 10
         if _pdf_need_new_page(y, min_y=90):
             _end_page()
@@ -662,7 +670,7 @@ def export_pdf(
             y = page_h - 40
             y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
 
-        _pdf_draw_pedidos_table(c, pedidos, y, page_w, page_h, roll_name, machine, mode, mirrored)
+    _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
 
     _end_page()
     c.save()

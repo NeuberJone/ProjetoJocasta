@@ -4,7 +4,7 @@ import json
 import os
 import re
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -126,7 +126,7 @@ def set_scrap_used(scraps: List[FabricScrap], key: str, used: bool) -> List[Fabr
     out = list(scraps)
     for i, sc in enumerate(out):
         if sc.key == key:
-            out[i] = FabricScrap(key=sc.key, name=sc.name, fabric=sc.fabric, length_m=sc.length_m, used=used)
+            out[i] = replace(sc, used=used)
             break
     return out
 

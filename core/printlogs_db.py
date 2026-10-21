@@ -22,6 +22,7 @@ class OrderRow:
     real_m: float
     source_path: str
     tipo: str = ""
+    observacao: str = ""
 
 
 def _now_iso() -> str:
@@ -77,6 +78,7 @@ def init_schema(con: sqlite3.Connection) -> None:
             vpos_mm REAL,
             real_m REAL,
             source_path TEXT,
+            observacao TEXT,
             job_hash TEXT NOT NULL,
             FOREIGN KEY (roll_id) REFERENCES rolls(id) ON DELETE CASCADE,
             UNIQUE (roll_id, job_hash)
@@ -115,6 +117,9 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
         con.commit()
     if "tipo" not in cols:
         con.execute("ALTER TABLE orders ADD COLUMN tipo TEXT")
+        con.commit()
+    if "observacao" not in cols:
+        con.execute("ALTER TABLE orders ADD COLUMN observacao TEXT")
         con.commit()
 
 
@@ -237,8 +242,8 @@ def save_export_transactional(
                 con.execute(
                     """
                     INSERT OR IGNORE INTO orders(
-                        roll_id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, job_hash
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        roll_id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, observacao, job_hash
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         roll_id,
@@ -251,6 +256,7 @@ def save_export_transactional(
                         float(o.vpos_mm),
                         float(o.real_m),
                         o.source_path,
+                        o.observacao,
                         job_hash,
                     ),
                 )
@@ -363,7 +369,8 @@ def list_rolls(
             r.app_version,
             COALESCE(SUM(o.real_m), 0) AS total_m,
             COUNT(DISTINCT o.id) AS orders_count,
-            COUNT(DISTINCT e.id) AS events_count
+            COUNT(DISTINCT e.id) AS events_count,
+            COUNT(DISTINCT CASE WHEN o.observacao IS NOT NULL AND o.observacao != '' THEN o.id END) AS obs_count
         FROM rolls r
         LEFT JOIN orders o ON o.roll_id = r.id
         LEFT JOIN events e ON e.ref_table='rolls' AND e.ref_id = r.id
@@ -386,7 +393,7 @@ def get_roll_orders(roll_id: int) -> list[dict[str, Any]]:
         ensure_schema(con)
         rows = con.execute(
             """
-            SELECT id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path
+            SELECT id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, observacao
             FROM orders
             WHERE roll_id = ?
             ORDER BY end_time DESC
@@ -591,8 +598,8 @@ def update_roll_orders(
                 con.execute(
                     """
                     INSERT OR IGNORE INTO orders(
-                        roll_id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, job_hash
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        roll_id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, observacao, job_hash
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         int(roll_id),
@@ -605,6 +612,7 @@ def update_roll_orders(
                         float(o.vpos_mm),
                         float(o.real_m),
                         o.source_path,
+                        o.observacao,
                         job_hash,
                     ),
                 )
@@ -635,5 +643,33 @@ def list_distinct_tipos() -> list[str]:
             """
         ).fetchall()
         return [str(r["tipo"]) for r in rows]
+    finally:
+        con.close()
+
+def reclassify_unmatched_orders(classify) -> int:
+    """Reaplica as regras de tipo aos pedidos gravados como 'Fora do padrão'
+    (ou sem tipo). Subtipos escolhidos à mão (Teste, Terceirizado...) não são
+    tocados. `classify(document) -> tipo`. Retorna quantos foram alterados."""
+    from core.print_types import FALLBACK_TYPE
+
+    con = connect()
+    try:
+        ensure_schema(con)
+        rows = con.execute(
+            """
+            SELECT id, document FROM orders
+            WHERE (tipo IS NULL OR tipo = '' OR tipo = ?)
+              AND document IS NOT NULL AND document != ''
+            """,
+            (FALLBACK_TYPE,),
+        ).fetchall()
+        changed = 0
+        for r in rows:
+            new_tipo = classify(str(r["document"]))
+            if new_tipo and new_tipo != FALLBACK_TYPE:
+                con.execute("UPDATE orders SET tipo = ? WHERE id = ?", (new_tipo, int(r["id"])))
+                changed += 1
+        con.commit()
+        return changed
     finally:
         con.close()

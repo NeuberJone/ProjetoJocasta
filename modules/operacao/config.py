@@ -21,9 +21,11 @@ DEFAULT_CFG = {
     "mirror_jpg_width_mode": "17",
     "mirror_jpg_width_cm_custom": 17.0,
     "mirror_jpg_dpi": 300,
+    "use_printer_jpg_path_default": False,
     "space_filenames": [],
     "print_type_rules": [dict(r) for r in DEFAULT_RULES],
     "print_type_subtypes": list(DEFAULT_SUBTYPES),
+    "operators": [],
 }
 
 

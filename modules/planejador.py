@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import re
 import traceback
 from dataclasses import dataclass
@@ -28,8 +27,6 @@ from core.printers import Printer, find_printer_by_display_name, load_printers
 from core.config import (
     load_config as load_pxcore_config,
     module_config_path,
-    read_module_cfg,
-    write_module_cfg,
 )
 from core.migrate import migrate_legacy_path
 from core.paths import pdf_rolls_dir, print_jpg_dir, temp_module_dir
@@ -44,6 +41,7 @@ from core.version import APP_VERSION
 from core.ui import card, dialog_header, page_heading
 from modules.operacao.exporters import mirror_and_normal_to_jpg_scaled, pdf_all_pages_to_jpg_scaled
 from modules.operacao.parser import pedido_from_document
+from modules.configuracoes import load_planner_cfg
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -156,153 +154,18 @@ def versioned_path(path: Path) -> Path:
 # -----------------------------
 # Tecidos (cadastro + aliases)
 # -----------------------------
-def _fabrics_store_path() -> Path:
-    appdata = Path(os.environ.get("APPDATA") or str(Path.home()))
-    base = appdata / "Nexor" / "Planejador"
-    migrate_legacy_path(appdata / "ProjetoJocasta" / "PXPrintCalc", base)
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "fabrics.json"
-
-
-DEFAULT_ROLL_LENGTH_M = 60.0
-
-# Cada tecido é um dict: {"aliases": [...], "roll_length_m": float}
-FabricEntry = Dict[str, object]
-
-
-def fabric_aliases(entry: FabricEntry) -> List[str]:
-    v = entry.get("aliases") if isinstance(entry, dict) else None
-    return [str(x) for x in v] if isinstance(v, list) else []
-
-
-def fabric_roll_length(entry: FabricEntry) -> float:
-    v = entry.get("roll_length_m") if isinstance(entry, dict) else None
-    try:
-        v = float(v)
-        return v if v > 0 else DEFAULT_ROLL_LENGTH_M
-    except Exception:
-        return DEFAULT_ROLL_LENGTH_M
-
-
-def _default_fabrics() -> Dict[str, FabricEntry]:
-    base = {
-        "Dryfit": (["dryfit", "dry fit", "dry-fit", "drifit"], 90.0),
-        "Ribana": (["ribana"], DEFAULT_ROLL_LENGTH_M),
-        "Elastano": (["elastano"], 60.0),
-        "Poliamida": (["poliamida"], DEFAULT_ROLL_LENGTH_M),
-        "Crepe": (["crepe"], DEFAULT_ROLL_LENGTH_M),
-        "Malha": (["malha"], DEFAULT_ROLL_LENGTH_M),
-        "Helanca": (["helanca"], DEFAULT_ROLL_LENGTH_M),
-        "Tactel": (["tactel"], DEFAULT_ROLL_LENGTH_M),
-        "Microfibra": (["microfibra"], DEFAULT_ROLL_LENGTH_M),
-        "Aeroready": (["aeroready", "aero ready", "aero-ready"], DEFAULT_ROLL_LENGTH_M),
-        "Oxford": (["oxford"], DEFAULT_ROLL_LENGTH_M),
-        "Faixa de Capitão": (["Faixa de Capitão", "faixa cap"], DEFAULT_ROLL_LENGTH_M),
-        "DryX": (["dryx", "dry x"], DEFAULT_ROLL_LENGTH_M),
-        "Jaquard Corinthians": (["CORINTHIANS"], DEFAULT_ROLL_LENGTH_M),
-        "Telinha": (["telinha"], DEFAULT_ROLL_LENGTH_M),
-    }
-    return {
-        name: {"aliases": aliases, "roll_length_m": roll_m}
-        for name, (aliases, roll_m) in base.items()
-    }
-
-
-def _normalize_fabrics(data: Dict[str, object]) -> Dict[str, FabricEntry]:
-    """Aceita o formato antigo (lista de aliases) e o novo (dict com aliases/roll_length_m)."""
-    out: Dict[str, FabricEntry] = {}
-    for k, v in data.items():
-        if not isinstance(k, str):
-            continue
-        if isinstance(v, dict):
-            out[k] = {
-                "aliases": fabric_aliases(v),
-                "roll_length_m": fabric_roll_length(v),
-            }
-        elif isinstance(v, list):
-            default_roll = 90.0 if k.strip().lower() == "dryfit" else DEFAULT_ROLL_LENGTH_M
-            out[k] = {
-                "aliases": [str(x) for x in v if str(x).strip()],
-                "roll_length_m": default_roll,
-            }
-        else:
-            out[k] = {"aliases": [], "roll_length_m": DEFAULT_ROLL_LENGTH_M}
-    return out
-
-
-def save_fabrics(data: Dict[str, FabricEntry]) -> None:
-    p = _fabrics_store_path()
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _legacy_fabrics_path() -> Path:
-    # Local antigo (quebrava em build congelado via PyInstaller; mantido só para migração)
-    return Path(__file__).with_suffix(".fabrics.json")
-
-
-def load_fabrics() -> Dict[str, FabricEntry]:
-    p = _fabrics_store_path()
-    if not p.exists():
-        legacy = _legacy_fabrics_path()
-        if legacy.exists():
-            try:
-                legacy_data = json.loads(legacy.read_text(encoding="utf-8"))
-                if isinstance(legacy_data, dict) and legacy_data:
-                    normalized = _normalize_fabrics(legacy_data)
-                    save_fabrics(normalized)
-                    return normalized
-            except Exception:
-                pass
-
-        data = _default_fabrics()
-        save_fabrics(data)
-        return data
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(raw, dict) and raw:
-            return _normalize_fabrics(raw)
-        raise ValueError("vazio")
-    except Exception:
-        data = _default_fabrics()
-        save_fabrics(data)
-        return data
-
-
-_DASHES = ["–", "—", "-", "-"]  # en dash, em dash, hyphen, non-breaking hyphen
-
-
-def _normalize_name(s: str) -> str:
-    s = (s or "").lower()
-    for d in _DASHES:
-        s = s.replace(d, "-")
-    s = s.replace("_", " ")
-    s = s.replace(".", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def infer_fabric_from_filename(filename: str, fabrics_map: Dict[str, FabricEntry]) -> str:
-    s = _normalize_name(filename)
-    parts = re.split(r"[\s\-]+", s)
-    tokens = [p.strip() for p in parts if p.strip()]
-
-    alias_index: Dict[str, str] = {}
-    for canonical, entry in fabrics_map.items():
-        alias_index[_normalize_name(canonical)] = canonical
-        for a in fabric_aliases(entry):
-            alias_index[_normalize_name(a)] = canonical
-
-    # token exato
-    for t in tokens:
-        if t in alias_index:
-            return alias_index[t]
-
-    # substring
-    for alias, canonical in alias_index.items():
-        if alias and alias in s:
-            return canonical
-
-    return "Outro"
+# Movido para core/fabrics.py (usado também pela classificação de tipos de
+# impressão em modules/operacao, que não pode importar deste módulo sem
+# criar um import circular). Os nomes continuam acessíveis aqui como antes.
+from core.fabrics import (  # noqa: E402
+    DEFAULT_ROLL_LENGTH_M,
+    FabricEntry,
+    fabric_aliases,
+    fabric_roll_length,
+    infer_fabric_from_filename,
+    load_fabrics,
+    save_fabrics,
+)
 
 
 def safe_image_size(path: Path) -> Tuple[int, int]:
@@ -329,6 +192,9 @@ class Job:
     roll_no: int = 0
     hidden: bool = False
     gap_index: Optional[int] = None
+    # Anotação livre do operador sobre esse item (ex.: "o papel manchou
+    # aqui") — editável na tela e salva junto do rolo no banco.
+    observacao: str = ""
 
 
 # Pixels "fictícios" usados para recriar um Job a partir de uma metragem já
@@ -341,7 +207,9 @@ class Job:
 _PRESERVE_PX = 100_000
 
 
-def job_from_known_length(name: str, path: Optional[Path], fabric: str, length_m: float) -> "Job":
+def job_from_known_length(
+    name: str, path: Optional[Path], fabric: str, length_m: float, observacao: str = ""
+) -> "Job":
     length_m = float(length_m or 0.0)
     if length_m > 0:
         dpi_override = (_PRESERVE_PX * 0.0254) / length_m
@@ -355,6 +223,7 @@ def job_from_known_length(name: str, path: Optional[Path], fabric: str, length_m
         h_px=_PRESERVE_PX,
         dpi_override=dpi_override,
         length_m=length_m,
+        observacao=observacao,
     )
 
 
@@ -469,6 +338,7 @@ def _build_order_rows(roll_rows: List["Job"], export_time_iso: str) -> Tuple[Lis
             vpos_mm=cumulative_mm,
             real_m=float(x.length_m),
             source_path=str(x.path) if x.path else "",
+            observacao=x.observacao,
         ))
         cumulative_mm += length_mm
     return order_rows, total_m
@@ -792,20 +662,20 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     scraps: List[FabricScrap] = load_scraps()
 
     migrate_legacy_path(module_config_path("PXPrintCalc"), module_config_path(MODULE_NAME))
-    mcfg = read_module_cfg(MODULE_NAME, {
-        "report_mode_default": "full",
-        "mirror_jpg_width_mode": "17",
-        "mirror_jpg_width_cm_custom": 17.0,
-        "mirror_jpg_dpi": 300,
-    })
+    # Valores fixos (DPI, eixo, setup, gaps, padrões de exportação...) vêm da
+    # página Configurações; aqui ficam só as escolhas de cada planejamento.
+    mcfg = load_planner_cfg()
+
+    def _cfg_num(key: str) -> str:
+        return f"{float(mcfg[key]):g}"
 
     manual_fabric_order: List[str] = []
-    var_auto_fabric_order = tk.BooleanVar(value=True)
+    var_auto_fabric_order = tk.BooleanVar(value=bool(mcfg.get("auto_fabric_order", True)))
     var_use_scraps = tk.BooleanVar(value=False)
     # Sangria: ao planejar com pedaços cortados, considera cada pedaço com
     # alguns cm a mais do que a metragem cadastrada (tolerância de corte).
     var_scrap_bleed = tk.BooleanVar(value=False)
-    var_scrap_bleed_cm = tk.StringVar(value="5")
+    var_scrap_bleed_cm = tk.StringVar(value=_cfg_num("scrap_bleed_cm"))
 
     printers: List[Printer] = load_printers()
 
@@ -814,94 +684,51 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     var_printer = tk.StringVar(value=_printer_options()[0])
 
-    var_dpi = tk.StringVar(value="150")
-    var_axis = tk.StringVar(value="altura")
+    var_dpi = tk.StringVar(value=_cfg_num("dpi"))
+    var_axis = tk.StringVar(value=str(mcfg.get("axis", "altura")))
     var_speed = tk.StringVar(
         value=f"{printers[0].speed_m_min:.2f}" if printers else "1.50"
     )
-    var_setup = tk.StringVar(value="2")
+    var_setup = tk.StringVar(value=_cfg_num("setup_min"))
 
-    # ✅ padrão: modo tecido
-    var_mode = tk.StringVar(value="tecido")
-    var_gap_between = tk.StringVar(value="1.00")
-    var_gap_endroll = tk.StringVar(value="1.00")
-    var_gap_files = tk.StringVar(value="0.00")
-    var_roll_other = tk.StringVar(value=str(int(DEFAULT_ROLL_LENGTH_M)))
+    var_mode = tk.StringVar(value=str(mcfg.get("mode", "tecido")))
+    var_gap_between = tk.StringVar(value=_cfg_num("gap_between"))
+    var_gap_endroll = tk.StringVar(value=_cfg_num("gap_endroll"))
+    var_gap_files = tk.StringVar(value=_cfg_num("gap_files"))
+    var_roll_other = tk.StringVar(value=_cfg_num("roll_other"))
 
     var_batch_name = tk.StringVar(value="")
     var_report_mode = tk.StringVar(value=mcfg.get("report_mode_default", "full"))
     var_jpg_mode = tk.StringVar(value=mcfg.get("mirror_jpg_width_mode", "17"))
     var_jpg_custom = tk.StringVar(value=str(mcfg.get("mirror_jpg_width_cm_custom", 17.0)))
-    var_use_printer_jpg_path = tk.BooleanVar(value=False)
+    var_use_printer_jpg_path = tk.BooleanVar(
+        value=bool(mcfg.get("use_printer_jpg_path_default", False))
+    )
 
     fabric_options = sorted(set(list(fabrics_map.keys()) + ["Outro"]))
     var_fabric_pick = tk.StringVar(value="Dryfit" if "Dryfit" in fabric_options else fabric_options[0])
 
-    # ---------------- UI TOP ----------------
-    top = card(body, "Ações do planejamento", padding=10)
-    top.pack(fill="x")
+    # ---------------- Banner de edição (rolo já registrado) ----------------
+    # Texto fixado direto (sem textvariable): é escrito uma única vez, no
+    # preload abaixo, e uma StringVar sem nenhum trace/closure segurando
+    # referência é coletada pelo GC assim que build_ui retorna, apagando o
+    # texto já exibido (Tkinter desvincula a variável Tcl no __del__).
+    lbl_edit_banner = ttk.Label(body, text="", foreground="#8a4b00")
+    lbl_edit_banner.pack(fill="x", pady=(0, 6))
 
-    ttk.Button(top, text="Importar imagens", command=lambda: import_images()).pack(side="left")
-    ttk.Button(top, text="Recalcular (DPI/Vel/Setup)", command=lambda: recalc_all()).pack(side="left", padx=6)
-    ttk.Button(top, text="Gerar Fila (Tecidos/Rolos)", command=lambda: generate_queue()).pack(side="left", padx=6)
-    ttk.Button(top, text="Exportar CSV", command=lambda: export_csv()).pack(side="left", padx=6)
+    # ---------------- PLANEJAMENTO: o que + ação principal ----------------
+    # Hierarquia (do pedido de limpeza da tela): 1) itens a planejar,
+    # 2) parâmetros principais, 3) resultado/fila — "Gerar planejamento" é a
+    # única ação com destaque visual forte nesta tela.
+    plan_box = card(body, "Planejamento", padding=12)
+    plan_box.pack(fill="x")
+    plan_box.columnconfigure(4, weight=1)
 
-    ttk.Button(top, text="Salvar lista…", command=lambda: on_save_list()).pack(side="left", padx=6)
-    ttk.Button(top, text="Importar lista…", command=lambda: on_import_list()).pack(side="left", padx=6)
-
-    ttk.Button(top, text="Tecidos…", command=lambda: open_fabrics_dialog()).pack(side="left", padx=6)
-    ttk.Button(top, text="Ordem dos tecidos…", command=lambda: open_fabric_order_dialog()).pack(side="left", padx=6)
-    ttk.Button(top, text="Pedaços de tecido…", command=lambda: open_scraps_dialog()).pack(side="left", padx=6)
-    ttk.Button(top, text="Limpar", command=lambda: clear_all()).pack(side="left", padx=6)
-
-    var_edit_banner = tk.StringVar(value="")
-    lbl_edit_banner = ttk.Label(body, textvariable=var_edit_banner, foreground="#8a4b00")
-    lbl_edit_banner.pack(fill="x", pady=(4, 0))
-
-    # ---------------- Drag & drop (arrastar imagens para importar) ----------------
-    drop_frame = ttk.LabelFrame(body, text="Arraste e solte imagens aqui")
-    drop_frame.pack(fill="x", pady=(8, 0))
-
-    drop_label = ttk.Label(drop_frame, text="Solte arquivos de imagem (jpg/png/bmp/tif) para importar")
-    drop_label.pack(fill="x", padx=10, pady=10)
-
-    if _HAS_DND:
-        try:
-            drop_label.drop_target_register(DND_FILES)  # type: ignore
-            drop_label.dnd_bind("<<Drop>>", lambda e: on_drop_files(e))  # type: ignore
-        except Exception:
-            pass
-    else:
-        drop_label.configure(
-            text="Drag & Drop indisponível (tkinterdnd2 não carregou). Use o botão Importar imagens."
-        )
-
-    ttk.Separator(body).pack(fill="x", pady=10)
-
-    # Config row
-    config = card(body, "Configuração de impressão", padding=12)
-    config.pack(fill="x", pady=(8, 0))
-
-    for col in range(4):
-        config.columnconfigure(col, weight=1)
-    ttk.Label(config, text="Impressora").grid(row=0, column=0, sticky="w", padx=10, pady=(2, 4))
-    ttk.Label(config, text="DPI global").grid(row=0, column=1, sticky="w", padx=10, pady=(2, 4))
-    ttk.Label(config, text="Eixo do comprimento").grid(row=0, column=2, sticky="w", padx=10, pady=(2, 4))
-    ttk.Label(config, text="Velocidade (m/min)").grid(row=0, column=3, sticky="w", padx=10, pady=(2, 4))
-
-    ttk.Entry(config, textvariable=var_dpi).grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 10))
-
-    ttk.Combobox(
-        config, values=["altura", "largura", "maior"],
-        state="readonly", textvariable=var_axis
-    ).grid(row=1, column=2, sticky="ew", padx=10, pady=(0, 10))
-
-
+    ttk.Label(plan_box, text="Impressora").grid(row=0, column=0, sticky="w", padx=(10, 4))
     cb_printer = ttk.Combobox(
-        config, values=_printer_options(),
-        state="readonly", textvariable=var_printer
+        plan_box, values=_printer_options(), state="readonly", textvariable=var_printer, width=18,
     )
-    cb_printer.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+    cb_printer.grid(row=1, column=0, sticky="ew", padx=(10, 4), pady=(0, 10))
 
     def on_printer_selected(_evt=None):
         pr = next((p for p in printers if p.display_name == var_printer.get()), None)
@@ -918,37 +745,26 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         on_printer_selected()
 
     cb_printer.bind("<<ComboboxSelected>>", on_printer_selected)
-    ttk.Button(config, text="Atualizar", command=refresh_printers).grid(
-        row=2, column=1, sticky="w", padx=10, pady=(0, 4)
+    ttk.Button(plan_box, text="⟳", width=3, command=refresh_printers).grid(
+        row=1, column=1, sticky="w", padx=(0, 16), pady=(0, 10)
     )
 
-    ttk.Entry(config, textvariable=var_speed).grid(row=1, column=3, sticky="ew", padx=10, pady=(0, 10))
-    ttk.Label(config, text="Setup (min/job)").grid(row=2, column=0, sticky="w", padx=10, pady=(0, 4))
-    ttk.Entry(config, textvariable=var_setup).grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))
-
-    # Fabric tools row
-    tools = card(body, "Arquivos e ordenação", padding=12)
-    tools.pack(fill="x", pady=(8, 0))
-
-    for col in range(4):
-        tools.columnconfigure(col, weight=1)
-    ttk.Label(tools, text="Tecido").grid(row=0, column=0, sticky="w", padx=10, pady=(2, 4))
+    ttk.Label(plan_box, text="Tecido").grid(row=0, column=2, sticky="w", padx=(0, 4))
     cb_fab = ttk.Combobox(
-        tools, values=fabric_options,
-        state="readonly", textvariable=var_fabric_pick
+        plan_box, values=fabric_options, state="readonly", textvariable=var_fabric_pick, width=16,
     )
-    cb_fab.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+    cb_fab.grid(row=1, column=2, sticky="ew", padx=(0, 4), pady=(0, 10))
+    ttk.Button(
+        plan_box, text="Definir tecido", command=lambda: set_fabric_selected()
+    ).grid(row=1, column=3, sticky="w", padx=(0, 10), pady=(0, 10))
+
+    more_btn = ttk.Menubutton(plan_box, text="Mais ações ▾")
+    more_btn.grid(row=1, column=5, sticky="e", padx=(0, 10), pady=(0, 10))
 
     ttk.Button(
-        tools,
-        text="Definir tecido (selecionados)",
-        command=lambda: set_fabric_selected()
-    ).grid(row=1, column=1, sticky="ew", padx=6, pady=(0, 8))
-
-    btn_move_up = ttk.Button(tools, text="▲ Mover acima", command=lambda: move_job(-1))
-    btn_move_up.grid(row=1, column=2, sticky="ew", padx=6, pady=(0, 8))
-    btn_move_down = ttk.Button(tools, text="▼ Mover abaixo", command=lambda: move_job(+1))
-    btn_move_down.grid(row=1, column=3, sticky="ew", padx=6, pady=(0, 8))
+        plan_box, text="▶ Gerar planejamento", style="Accent.TButton",
+        command=lambda: generate_queue(),
+    ).grid(row=1, column=6, sticky="e", padx=(0, 10), pady=(0, 10))
 
     def refresh_fabric_options(select: Optional[str] = None):
         nonlocal fabric_options
@@ -986,126 +802,98 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         refresh_fabric_options(select=canonical)
         return canonical
 
-    # Mode and planning row
-    plan = card(body, "Ajustes de fila, espaços e aproveitamento", padding=12)
-    plan.pack(fill="x", pady=(8, 0))
+    # ---------------- Drag & drop (arrastar imagens para importar) ----------------
+    drop_label = ttk.Label(
+        plan_box,
+        text="…ou arraste imagens aqui (jpg/png/bmp/tif) para importar",
+        style="Muted.TLabel",
+    )
+    drop_label.grid(row=2, column=0, columnspan=6, sticky="w", padx=10, pady=(2, 4))
 
-    ttk.Label(plan, text="Modo:").pack(side="left")
+    if _HAS_DND:
+        try:
+            drop_label.drop_target_register(DND_FILES)  # type: ignore
+            drop_label.dnd_bind("<<Drop>>", lambda e: on_drop_files(e))  # type: ignore
+        except Exception:
+            pass
+    else:
+        drop_label.configure(
+            text="Drag & Drop indisponível (tkinterdnd2 não carregou). Use \"＋ Importar imagens\" no topo da página."
+        )
+
+    # ---------------- PARÂMETROS do planejamento (principais + avançados) ----------------
+    params_box = card(body, "Parâmetros do planejamento", padding=12)
+    params_box.pack(fill="x", pady=(8, 0))
+    params_box.columnconfigure(3, weight=1)
+
+    ttk.Label(params_box, text="Modo:").grid(row=0, column=0, sticky="w", padx=(10, 4), pady=4)
     ttk.Combobox(
-        plan, width=12, values=["original", "tecido"],
-        state="readonly", textvariable=var_mode
-    ).pack(side="left", padx=5)
+        params_box, width=12, values=["original", "tecido"],
+        state="readonly", textvariable=var_mode,
+    ).grid(row=0, column=1, sticky="w", pady=4)
 
-    def _update_reorder_controls_state(*_):
-        state = "normal" if var_mode.get().strip().lower() == "original" else "disabled"
-        btn_move_up.configure(state=state)
-        btn_move_down.configure(state=state)
+    ttk.Checkbutton(
+        params_box, text="Ordem automática (menores no fim)",
+        variable=var_auto_fabric_order,
+    ).grid(row=0, column=2, sticky="w", padx=(16, 0), pady=4)
 
     def _on_mode_changed(*_):
-        _update_reorder_controls_state()
         # Recalcula a fila ao trocar de modo — sem isso, a tabela ficava com
         # o agrupamento/alças de arraste do modo anterior até o usuário
-        # clicar manualmente em "Gerar Fila".
+        # clicar manualmente em "Gerar planejamento".
         generate_queue()
 
     var_mode.trace_add("write", _on_mode_changed)
-    _update_reorder_controls_state()
+
+    # Resumo dos valores fixos — editados em Configurações (ou trazidos por
+    # uma lista salva com "Importar lista…").
+    var_fixed_summary = tk.StringVar()
+    ttk.Label(params_box, textvariable=var_fixed_summary, style="Muted.TLabel", justify="left").grid(
+        row=1, column=0, columnspan=4, sticky="w", padx=10, pady=(4, 2)
+    )
+
+    def _update_fixed_summary(*_):
+        var_fixed_summary.set(
+            f"DPI {var_dpi.get()} · eixo {var_axis.get()} · {var_speed.get()} m/min · "
+            f"setup {var_setup.get()} min/job\n"
+            f"Gaps: entre tecidos {var_gap_between.get()} m · fim do rolo {var_gap_endroll.get()} m · "
+            f"entre arquivos {var_gap_files.get()} m · rolo sem metragem {var_roll_other.get()} m"
+            "  —  altere em Configurações"
+        )
+
+    for _var in (var_dpi, var_axis, var_speed, var_setup, var_gap_between,
+                 var_gap_endroll, var_gap_files, var_roll_other):
+        _var.trace_add("write", _update_fixed_summary)
+    _update_fixed_summary()
+
+    # Parâmetros avançados/ocasionais (pedaços de tecido cortados) atrás de
+    # disclosure progressivo — ficam escondidos por padrão.
+    adv_params_state = {"open": False}
+    adv_params_frame = ttk.Frame(params_box)
+
+    def toggle_adv_params():
+        adv_params_state["open"] = not adv_params_state["open"]
+        if adv_params_state["open"]:
+            adv_params_frame.grid(row=3, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 0))
+            btn_adv_params.configure(text="Configurações avançadas ▾")
+        else:
+            adv_params_frame.grid_remove()
+            btn_adv_params.configure(text="Configurações avançadas ▸")
+
+    btn_adv_params = ttk.Button(params_box, text="Configurações avançadas ▸", command=toggle_adv_params)
+    btn_adv_params.grid(row=2, column=0, sticky="w", padx=10, pady=(6, 0))
 
     ttk.Checkbutton(
-        plan,
-        text="Ordem automática (menores no fim)",
-        variable=var_auto_fabric_order
-    ).pack(side="left", padx=10)
-
-    ttk.Label(plan, text="Gap entre tecidos (m):").pack(side="left")
-    ttk.Entry(plan, width=7, textvariable=var_gap_between).pack(side="left", padx=5)
-
-    ttk.Label(plan, text="Gap antes fim rolo (m):").pack(side="left")
-    ttk.Entry(plan, width=7, textvariable=var_gap_endroll).pack(side="left", padx=5)
-
-    ttk.Label(plan, text="Gap entre arquivos (m):").pack(side="left")
-    ttk.Entry(plan, width=7, textvariable=var_gap_files).pack(side="left", padx=5)
-
-    ttk.Label(plan, text="Padrão p/ tecido sem metragem (m):").pack(side="left")
-    ttk.Entry(plan, width=6, textvariable=var_roll_other).pack(side="left", padx=5)
-
-    ttk.Button(plan, text="Voltar visão base", command=lambda: show_base()).pack(side="left", padx=10)
-
-    plan2 = ttk.Frame(plan)
-    plan2.pack(fill="x", pady=(8, 0))
-
-    ttk.Checkbutton(
-        plan2,
+        adv_params_frame,
         text="Priorizar pedaços de tecido cortados (não usados)",
         variable=var_use_scraps,
         command=lambda: generate_queue() if var_mode.get().strip().lower() == "tecido" else None,
     ).pack(side="left")
     ttk.Button(
-        plan2, text="Selecionar pedaços a usar…", command=lambda: open_scrap_selection_dialog()
+        adv_params_frame, text="Selecionar pedaços a usar…", command=lambda: open_scrap_selection_dialog()
     ).pack(side="left", padx=(10, 0))
 
-    # ---------------- Exportação (PDF / JPG espelhado) ----------------
-    export_box = card(body, "Opções de exportação · PDF e JPG espelhado", padding=12)
-    export_box.pack(fill="x", pady=(8, 0))
-
-    exp_row1 = ttk.Frame(export_box)
-    exp_row1.pack(fill="x", padx=8, pady=(8, 4))
-
-    ttk.Label(exp_row1, text="Nome do lote:").pack(side="left")
-    ttk.Entry(exp_row1, textvariable=var_batch_name, width=26).pack(side="left", padx=(6, 6))
-    ttk.Button(exp_row1, text="Atualizar nome", command=lambda: on_refresh_batch_name()).pack(
-        side="left", padx=(0, 16)
-    )
-
-    ttk.Label(exp_row1, text="Modo do PDF:").pack(side="left")
-    ttk.Radiobutton(exp_row1, text="Completo", value="full", variable=var_report_mode).pack(
-        side="left", padx=(6, 0)
-    )
-    ttk.Radiobutton(exp_row1, text="Resumido", value="summary", variable=var_report_mode).pack(
-        side="left", padx=(6, 12)
-    )
-    ttk.Button(exp_row1, text="Definir como padrão", command=lambda: on_set_default_mode()).pack(
-        side="left"
-    )
-
-    exp_row2 = ttk.Frame(export_box)
-    exp_row2.pack(fill="x", padx=8, pady=(0, 8))
-
-    ttk.Label(exp_row2, text="JPG espelhado:").pack(side="left")
-    ttk.Radiobutton(exp_row2, text="17 cm", value="17", variable=var_jpg_mode).pack(side="left", padx=(6, 0))
-    ttk.Radiobutton(exp_row2, text="21 cm", value="21", variable=var_jpg_mode).pack(side="left", padx=(6, 0))
-    ttk.Radiobutton(exp_row2, text="Personalizado", value="custom", variable=var_jpg_mode).pack(
-        side="left", padx=(6, 0)
-    )
-    ent_jpg_custom = ttk.Entry(exp_row2, textvariable=var_jpg_custom, width=6)
-    ent_jpg_custom.pack(side="left", padx=(6, 0))
-    ttk.Label(exp_row2, text="cm").pack(side="left", padx=(4, 12))
-
-    def _update_jpg_custom_state(*_):
-        ent_jpg_custom.configure(state=("normal" if var_jpg_mode.get() == "custom" else "disabled"))
-
-    _update_jpg_custom_state()
-    var_jpg_mode.trace_add("write", _update_jpg_custom_state)
-
-    ttk.Button(exp_row2, text="Definir JPG como padrão", command=lambda: on_set_default_jpg()).pack(
-        side="left", padx=(0, 16)
-    )
-
-    btn_export_normal = ttk.Button(exp_row2, text="Exportar PDF Normal", command=lambda: on_export("normal"))
-    btn_export_normal.pack(side="left", padx=4)
-    btn_export_mirror = ttk.Button(exp_row2, text="Exportar JPG Espelhado", command=lambda: on_export("mirror"))
-    btn_export_mirror.pack(side="left", padx=4)
-    btn_export_both = ttk.Button(exp_row2, text="Exportar Ambos", command=lambda: on_export("both"))
-    btn_export_both.pack(side="left", padx=4)
-
-    exp_row3 = ttk.Frame(export_box)
-    exp_row3.pack(fill="x", padx=8, pady=(0, 8))
-
-    ttk.Checkbutton(
-        exp_row3,
-        text="Usar pasta/arquivo da impressora para o JPG espelhado",
-        variable=var_use_printer_jpg_path,
-    ).pack(side="left")
+    ttk.Separator(body).pack(fill="x", pady=(12, 0))
 
     # ---------------- TABLE / TABS ----------------
     workspace = ttk.Notebook(body)
@@ -1119,9 +907,15 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     workspace.add(rolls_tab, text="Resumo dos rolos")
     workspace.add(orders_tab, text="Pedidos")
     ttk.Label(files_tab, text="Arquivos importados", style="PageSubtitle.TLabel").pack(anchor="w")
-    ttk.Label(files_tab, text="Use a aba Fila de impressão para conferir a sequência e editar itens.",
-              style="Muted.TLabel").pack(anchor="w", pady=(8, 12))
-    ttk.Button(files_tab, text="Mostrar arquivos na fila", command=lambda: workspace.select(queue_tab)).pack(anchor="w")
+    ttk.Label(
+        files_tab,
+        text="Mostra os arquivos na ordem em que foram importados, sem agrupar por tecido/rolo.",
+        style="Muted.TLabel",
+    ).pack(anchor="w", pady=(8, 12))
+    ttk.Button(
+        files_tab, text="Ver arquivos importados",
+        command=lambda: (show_base(), workspace.select(queue_tab)),
+    ).pack(anchor="w")
 
     table_bar = ttk.Frame(queue_tab)
     table_bar.pack(fill="x", pady=(10, 0))
@@ -1130,7 +924,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         table_bar, text="⤢ Abrir em janela", command=lambda: open_queue_window()
     ).pack(side="right")
 
-    cols = ("drag", "roll", "fabric", "dpi", "arquivo", "w", "h", "metros", "tempo")
+    cols = ("drag", "roll", "fabric", "dpi", "arquivo", "w", "h", "metros", "tempo", "obs")
     tree = ttk.Treeview(queue_tab, columns=cols, show="headings")
     tree.pack(fill="both", expand=True, pady=(4, 10))
 
@@ -1143,6 +937,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     tree.heading("h", text="Altura px")
     tree.heading("metros", text="Comprimento")
     tree.heading("tempo", text="Tempo")
+    tree.heading("obs", text="Observação")
 
     tree.column("drag", width=26, minwidth=26, anchor="center", stretch=False)
     tree.column("roll", width=70, anchor="center")
@@ -1153,6 +948,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     tree.column("h", width=100, anchor="e")
     tree.column("metros", width=120, anchor="e")
     tree.column("tempo", width=120, anchor="e")
+    tree.column("obs", width=180, anchor="w")
 
     tree.bind("<Double-1>", lambda _e: on_double_click())
     tree.bind("<Button-3>", lambda e: show_context_menu(e))
@@ -1359,10 +1155,13 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         dpi_txt = ""
         if not j.is_gap and j.dpi_override:
             dpi_txt = f"{j.dpi_override:.0f}"
+        obs_txt = ""
+        if j.observacao:
+            obs_txt = f"📝 {j.observacao.splitlines()[0]}"
         return (
             roll_txt, j.fabric, dpi_txt, name,
             j.w_px if j.w_px else "", j.h_px if j.h_px else "",
-            fmt_m(j.length_m), fmt_min(j.time_min),
+            fmt_m(j.length_m), fmt_min(j.time_min), obs_txt,
         )
 
     def refresh_table(rows: List[Job]):
@@ -1489,6 +1288,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 ("h", "Altura px", 100, "e"),
                 ("metros", "Comprimento", 120, "e"),
                 ("tempo", "Tempo", 120, "e"),
+                ("obs", "Observação", 180, "w"),
             ],
         )
 
@@ -2052,7 +1852,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
-        dialog_header(frm, "Editar item", "Altere tecido e DPI desta imagem.").grid(
+        dialog_header(frm, "Editar item", "Altere tecido, DPI e observações desta imagem.").grid(
             row=0, column=0, columnspan=3, sticky="ew"
         )
 
@@ -2088,6 +1888,11 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         var_dpi_item = tk.StringVar(value=(f"{job.dpi_override:.0f}" if job.dpi_override else ""))
         ttk.Entry(frm, textvariable=var_dpi_item, width=10).grid(row=3, column=1, sticky="w", pady=(8, 0))
 
+        ttk.Label(frm, text="Observação:").grid(row=4, column=0, sticky="nw", pady=(8, 0))
+        txt_obs = tk.Text(frm, width=40, height=4, wrap="word")
+        txt_obs.grid(row=4, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        txt_obs.insert("1.0", job.observacao or "")
+
         def on_save():
             job.fabric = var_fab.get().strip() or "Outro"
             dpi_txt = var_dpi_item.get().strip()
@@ -2099,6 +1904,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                     messagebox.showerror("DPI inválido", "Informe um DPI > 0 ou deixe vazio.")
                     return
                 job.dpi_override = float(v)
+            job.observacao = txt_obs.get("1.0", "end-1c").strip()
 
             try:
                 recompute_job(job)
@@ -2110,7 +1916,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             generate_queue() if var_mode.get().strip().lower() == "tecido" else show_base()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side="right")
         ttk.Button(btns, text="Salvar", command=on_save).pack(side="right", padx=(0, 8))
 
@@ -2442,6 +2248,25 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             save_scraps(scraps)
             refresh_tree(select_key=key)
 
+        def on_remove_used():
+            nonlocal scraps
+            used = [s for s in scraps if s.used]
+            if not used:
+                messagebox.showinfo("Pedaços de tecido", "Nenhum pedaço marcado como usado.")
+                return
+            total = sum(s.length_m for s in used)
+            if not messagebox.askyesno(
+                "Remover tecidos usados",
+                f"Remover {len(used)} pedaço(s) marcado(s) como usado ({total:.1f} m)?\n\n"
+                "Os rolos já registrados não são alterados.",
+                parent=dlg,
+            ):
+                return
+            scraps = [s for s in scraps if not s.used]
+            save_scraps(scraps)
+            clear_form()
+            refresh_tree()
+
         def on_close():
             dlg.destroy()
             if var_mode.get().strip().lower() == "tecido":
@@ -2452,6 +2277,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         ttk.Button(btns, text="Novo", command=clear_form).pack(side="left")
         ttk.Button(btns, text="Salvar", command=on_save).pack(side="left", padx=6)
         ttk.Button(btns, text="Remover", command=on_remove).pack(side="left", padx=6)
+        ttk.Button(btns, text="Remover tecidos usados", command=on_remove_used).pack(side="left", padx=6)
         ttk.Button(btns, text="Marcar como usado", command=lambda: on_toggle_used(True)).pack(side="left", padx=(16, 6))
         ttk.Button(btns, text="Desmarcar", command=lambda: on_toggle_used(False)).pack(side="left")
         ttk.Button(btns, text="Fechar", command=on_close).pack(side="right")
@@ -2926,23 +2752,6 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             raise ValueError("Use entre 8 cm e 40 cm.")
         return value
 
-    def on_set_default_mode():
-        mcfg["report_mode_default"] = var_report_mode.get()
-        write_module_cfg(MODULE_NAME, mcfg)
-        messagebox.showinfo("Padrão salvo", "O modo de PDF foi definido como padrão.")
-
-    def on_set_default_jpg():
-        try:
-            cm = _get_mirror_target_cm()
-        except Exception as e:
-            messagebox.showerror("JPG", str(e))
-            return
-
-        mcfg["mirror_jpg_width_mode"] = var_jpg_mode.get()
-        mcfg["mirror_jpg_width_cm_custom"] = float(cm)
-        write_module_cfg(MODULE_NAME, mcfg)
-        messagebox.showinfo("JPG", f"Padrão salvo: {cm:.1f} cm")
-
     def _resolve_mirror_jpg_path(out_jpg_dir: Path, base_name: str, machine: str) -> Path:
         if var_use_printer_jpg_path.get():
             pr = find_printer_by_display_name(machine)
@@ -3219,6 +3028,73 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 "Exportado", f"JPG (operação):\n{out_jpg_dir}\n\n{Path(mirror_path).name}{db_status}"
             )
 
+    # ---------------- Exportar… (nome do lote, formato, PDF/JPG) ----------------
+    def open_export_dialog():
+        dlg = tk.Toplevel(frame)
+        dlg.title("Exportar")
+        dlg.transient(frame.winfo_toplevel())
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=14)
+        frm.pack(fill="both", expand=True)
+        dialog_header(
+            frm, "Exportar PDF / JPG espelhado", "Nome do lote e formato de exportação."
+        ).pack(fill="x")
+
+        row1 = ttk.Frame(frm)
+        row1.pack(fill="x", pady=(10, 4))
+        ttk.Label(row1, text="Nome do lote:").pack(side="left")
+        ttk.Entry(row1, textvariable=var_batch_name, width=28).pack(side="left", padx=(6, 6))
+        ttk.Button(row1, text="Atualizar nome", command=on_refresh_batch_name).pack(side="left")
+
+        mode_txt = "Completo" if var_report_mode.get() == "full" else "Resumido"
+        jpg_mode = var_jpg_mode.get()
+        jpg_txt = f"{var_jpg_custom.get()} cm (personalizado)" if jpg_mode == "custom" else f"{jpg_mode} cm"
+        printer_txt = "pasta da impressora" if var_use_printer_jpg_path.get() else "pasta padrão"
+        ttk.Label(
+            frm,
+            text=(
+                f"Modo do PDF: {mode_txt} · JPG espelhado: {jpg_txt} ({printer_txt})"
+                "  —  altere em Configurações"
+            ),
+            style="Muted.TLabel", justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        is_editing = edit_roll_id is not None
+        actions = ttk.Frame(frm)
+        actions.pack(fill="x")
+        ttk.Button(
+            actions, text=("Atualizar PDF Normal" if is_editing else "Exportar PDF Normal"),
+            command=lambda: on_export("normal"),
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            actions, text=("Atualizar JPG Espelhado" if is_editing else "Exportar JPG Espelhado"),
+            command=lambda: on_export("mirror"),
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            actions, text=("Atualizar Ambos" if is_editing else "Exportar Ambos"),
+            style="Accent.TButton", command=lambda: on_export("both"),
+        ).pack(side="left", padx=6)
+
+        ttk.Button(frm, text="Fechar", command=dlg.destroy).pack(anchor="e", pady=(12, 0))
+
+    # ---------------- Mais ações (ocasionais/administrativas) ----------------
+    more_menu = tk.Menu(frame, tearoff=0)
+    more_menu.add_command(label="Exportar…", command=open_export_dialog)
+    more_menu.add_command(label="Exportar CSV", command=export_csv)
+    more_menu.add_separator()
+    more_menu.add_command(label="Recalcular (DPI/Vel/Setup)", command=recalc_all)
+    more_menu.add_separator()
+    more_menu.add_command(label="Salvar lista…", command=on_save_list)
+    more_menu.add_command(label="Importar lista…", command=on_import_list)
+    more_menu.add_separator()
+    more_menu.add_command(label="Tecidos…", command=open_fabrics_dialog)
+    more_menu.add_command(label="Ordem dos tecidos…", command=open_fabric_order_dialog)
+    more_menu.add_command(label="Pedaços de tecido…", command=open_scraps_dialog)
+    more_menu.add_separator()
+    more_menu.add_command(label="Limpar", command=clear_all)
+    more_btn.configure(menu=more_menu)
+
     if preload:
         jobs.clear()
         for jd in preload.get("jobs", []):
@@ -3227,17 +3103,15 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 path=Path(jd["path"]) if jd.get("path") else None,
                 fabric=str(jd.get("fabric", "Outro")),
                 length_m=float(jd.get("length_m", 0.0) or 0.0),
+                observacao=str(jd.get("observacao", "") or ""),
             ))
         if preload.get("batch_name"):
             var_batch_name.set(str(preload["batch_name"]))
 
-        var_edit_banner.set(
-            f"✏ Editando rolo já registrado (ID {edit_roll_id}) — ao exportar, "
+        lbl_edit_banner.configure(
+            text=f"✏ Editando rolo já registrado (ID {edit_roll_id}) — ao exportar, "
             "este rolo será ATUALIZADO (não cria um novo registro)."
         )
-        btn_export_normal.configure(text="Atualizar PDF Normal")
-        btn_export_mirror.configure(text="Atualizar JPG Espelhado")
-        btn_export_both.configure(text="Atualizar Ambos")
 
     # init: já inicia em modo tecido com fila
     generate_queue()
@@ -3246,5 +3120,30 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     # estes diálogos diretamente, sem duplicar a lógica aqui.
     frame.open_fabrics_dialog = open_fabrics_dialog
     frame.open_scraps_dialog = open_scraps_dialog
+
+    def reload_settings():
+        """Chamado pela página Configurações: aplica os novos padrões e
+        recalcula a fila aberta."""
+        nonlocal mcfg
+        mcfg = load_planner_cfg()
+        var_dpi.set(_cfg_num("dpi"))
+        var_axis.set(str(mcfg.get("axis", "altura")))
+        var_setup.set(_cfg_num("setup_min"))
+        var_gap_between.set(_cfg_num("gap_between"))
+        var_gap_endroll.set(_cfg_num("gap_endroll"))
+        var_gap_files.set(_cfg_num("gap_files"))
+        var_roll_other.set(_cfg_num("roll_other"))
+        var_scrap_bleed_cm.set(_cfg_num("scrap_bleed_cm"))
+        var_auto_fabric_order.set(bool(mcfg.get("auto_fabric_order", True)))
+        var_report_mode.set(mcfg.get("report_mode_default", "full"))
+        var_jpg_mode.set(mcfg.get("mirror_jpg_width_mode", "17"))
+        var_jpg_custom.set(str(mcfg.get("mirror_jpg_width_cm_custom", 17.0)))
+        var_use_printer_jpg_path.set(bool(mcfg.get("use_printer_jpg_path_default", False)))
+        if var_mode.get() != str(mcfg.get("mode", "tecido")):
+            var_mode.set(str(mcfg.get("mode", "tecido")))  # o trace já regera a fila
+        else:
+            recalc_all()
+
+    frame.reload_settings = reload_settings
 
     return frame

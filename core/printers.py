@@ -27,6 +27,12 @@ class Printer:
     notes: str = ""
     jpg_output_dir: str = ""
     jpg_output_filename: str = ""
+    # "Log adicional": algumas máquinas (ex.: M1) só registram o
+    # processamento no log por-arquivo — quem imprime de fato é outro
+    # programa, que grava um log diário separado nessa pasta. Quando
+    # marcado, a Operação cruza os dois logs pra confirmar a impressão real.
+    secondary_log_enabled: bool = False
+    secondary_log_folder: str = ""
 
 
 def _slugify(s: str) -> str:
@@ -51,6 +57,8 @@ def _coerce(d: dict) -> Printer:
         notes=str(d.get("notes", "")),
         jpg_output_dir=str(d.get("jpg_output_dir", "") or ""),
         jpg_output_filename=str(d.get("jpg_output_filename", "") or ""),
+        secondary_log_enabled=bool(d.get("secondary_log_enabled", False)),
+        secondary_log_folder=str(d.get("secondary_log_folder", "") or ""),
     )
 
 
@@ -91,6 +99,8 @@ def add_or_update_printer(
     notes: str = "",
     jpg_output_dir: str = "",
     jpg_output_filename: str = "",
+    secondary_log_enabled: bool = False,
+    secondary_log_folder: str = "",
 ) -> List[Printer]:
     """
     Retorna uma NOVA lista com o printer adicionado (key vazio/None) ou
@@ -100,12 +110,15 @@ def add_or_update_printer(
     display_name = display_name.strip()
     jpg_output_dir = (jpg_output_dir or "").strip()
     jpg_output_filename = (jpg_output_filename or "").strip()
+    secondary_log_folder = (secondary_log_folder or "").strip()
     if not name:
         raise ValueError("Informe o nome da impressora.")
     if not display_name:
         raise ValueError("Informe o nome de exibição (ex.: M1).")
     if speed_m_min <= 0:
         raise ValueError("Velocidade deve ser maior que zero.")
+    if secondary_log_enabled and not secondary_log_folder:
+        raise ValueError("Informe a pasta do log adicional, ou desmarque a opção.")
 
     out = list(printers)
 
@@ -116,6 +129,8 @@ def add_or_update_printer(
                     key=pr.key, name=name, display_name=display_name,
                     speed_m_min=speed_m_min, notes=notes,
                     jpg_output_dir=jpg_output_dir, jpg_output_filename=jpg_output_filename,
+                    secondary_log_enabled=secondary_log_enabled,
+                    secondary_log_folder=secondary_log_folder,
                 )
                 _check_unique_display_name(out)
                 return out
@@ -132,6 +147,8 @@ def add_or_update_printer(
         key=new_key, name=name, display_name=display_name,
         speed_m_min=speed_m_min, notes=notes,
         jpg_output_dir=jpg_output_dir, jpg_output_filename=jpg_output_filename,
+        secondary_log_enabled=secondary_log_enabled,
+        secondary_log_folder=secondary_log_folder,
     ))
     _check_unique_display_name(out)
     return out

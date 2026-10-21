@@ -9,7 +9,7 @@ from tkinter import messagebox, ttk
 from typing import Optional
 
 from .helpers import format_m, payload_summary, safe_int
-from core.ui import page_heading
+from core.ui import card, page_heading
 from .repository import (
     load_distinct_tipos,
     load_roll_events,
@@ -50,7 +50,7 @@ class PXSearchOrdersUI(ttk.Frame):
         # ------------------------
         # Filtros
         # ------------------------
-        filtros = ttk.LabelFrame(self, text="Filtros")
+        filtros = card(self, "Filtros", padding=14)
         filtros.pack(fill="x", padx=22, pady=(0, 10))
 
         ttk.Label(filtros, text="Máquina").grid(row=0, column=0, sticky="w", padx=(10, 4), pady=8)
@@ -86,14 +86,13 @@ class PXSearchOrdersUI(ttk.Frame):
         self.ent_limit = ttk.Entry(filtros, textvariable=self.var_limit, width=6)
         self.ent_limit.grid(row=1, column=1, sticky="w", padx=(0, 14), pady=(0, 8))
 
-        ttk.Button(filtros, text="Recarregar", command=self.reload).grid(
+        # "Recarregar" já existe como ação principal no cabeçalho da página
+        # ("⟳ Recarregar"), sempre visível — sem duplicar o botão aqui.
+        ttk.Button(filtros, text="Limpar filtros", command=self.clear_filters).grid(
             row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 8)
         )
-        ttk.Button(filtros, text="Limpar filtros", command=self.clear_filters).grid(
-            row=1, column=3, sticky="w", padx=(0, 10), pady=(0, 8)
-        )
         ttk.Button(filtros, text="Editar rolo", command=self.on_edit_roll).grid(
-            row=1, column=4, sticky="w", padx=(0, 10), pady=(0, 8)
+            row=1, column=3, sticky="w", padx=(0, 10), pady=(0, 8)
         )
 
         filtros.columnconfigure(11, weight=1)
@@ -106,11 +105,11 @@ class PXSearchOrdersUI(ttk.Frame):
         # ------------------------
         # Lista de rolos
         # ------------------------
-        box_rolls = ttk.LabelFrame(self, text="Rolos exportados")
+        box_rolls = card(self, "Rolos exportados", padding=10)
         box_rolls.pack(fill="both", expand=True, padx=22, pady=(0, 10))
 
-        cols = ("id", "roll", "machine", "created", "total_m", "orders", "events")
-        self.tree_rolls = ttk.Treeview(box_rolls, columns=cols, show="headings", height=10)
+        cols = ("id", "roll", "machine", "created", "total_m", "orders", "events", "obs")
+        self.tree_rolls = ttk.Treeview(box_rolls, columns=cols, show="headings", height=5)
 
         self.tree_rolls.heading("id", text="ID")
         self.tree_rolls.column("id", width=60, anchor="w")
@@ -133,6 +132,9 @@ class PXSearchOrdersUI(ttk.Frame):
         self.tree_rolls.heading("events", text="Eventos")
         self.tree_rolls.column("events", width=90, anchor="e")
 
+        self.tree_rolls.heading("obs", text="Observações")
+        self.tree_rolls.column("obs", width=100, anchor="e")
+
         sb_rolls = ttk.Scrollbar(box_rolls, orient="vertical", command=self.tree_rolls.yview)
         self.tree_rolls.configure(yscrollcommand=sb_rolls.set)
 
@@ -145,8 +147,11 @@ class PXSearchOrdersUI(ttk.Frame):
         # ------------------------
         # Detalhes
         # ------------------------
-        box_details = ttk.LabelFrame(self, text="Detalhes do roll selecionado")
-        box_details.pack(fill="both", expand=True, padx=22, pady=(0, 14))
+        # A página não rola: os detalhes entram na fila do pack antes da lista
+        # de rolos para não ficarem sem altura em janelas de 800 px.
+        box_details = card(self, "Detalhes do rolo selecionado", padding=10)
+        box_details.pack(side="bottom", fill="both", expand=True, padx=22, pady=(0, 8),
+                         before=box_rolls)
 
         self.nb = ttk.Notebook(box_details)
         self.nb.pack(fill="both", expand=True, padx=10, pady=10)
@@ -155,7 +160,7 @@ class PXSearchOrdersUI(ttk.Frame):
         self.tab_summary = ttk.Frame(self.nb)
         self.nb.add(self.tab_summary, text="Resumo")
 
-        self.txt_summary = tk.Text(self.tab_summary, wrap="word", height=8)
+        self.txt_summary = tk.Text(self.tab_summary, wrap="word", height=4)
         self.txt_summary.pack(fill="both", expand=True)
         self.txt_summary.configure(state="disabled")
 
@@ -163,8 +168,8 @@ class PXSearchOrdersUI(ttk.Frame):
         self.tab_orders = ttk.Frame(self.nb)
         self.nb.add(self.tab_orders, text="Pedidos")
 
-        order_cols = ("end_time", "document", "fabric", "tipo", "height_mm", "vpos_mm", "real_m", "source")
-        self.tree_orders = ttk.Treeview(self.tab_orders, columns=order_cols, show="headings", height=8)
+        order_cols = ("end_time", "document", "fabric", "tipo", "height_mm", "vpos_mm", "real_m", "source", "observacao")
+        self.tree_orders = ttk.Treeview(self.tab_orders, columns=order_cols, show="headings", height=4)
 
         self.tree_orders.heading("end_time", text="EndTime")
         self.tree_orders.column("end_time", width=160, anchor="w")
@@ -190,6 +195,9 @@ class PXSearchOrdersUI(ttk.Frame):
         self.tree_orders.heading("source", text="Arquivo")
         self.tree_orders.column("source", width=220, anchor="w")
 
+        self.tree_orders.heading("observacao", text="Observação")
+        self.tree_orders.column("observacao", width=220, anchor="w")
+
         sb_orders = ttk.Scrollbar(self.tab_orders, orient="vertical", command=self.tree_orders.yview)
         self.tree_orders.configure(yscrollcommand=sb_orders.set)
 
@@ -201,7 +209,7 @@ class PXSearchOrdersUI(ttk.Frame):
         self.nb.add(self.tab_events, text="Eventos")
 
         ev_cols = ("created_at", "event_type", "summary")
-        self.tree_events = ttk.Treeview(self.tab_events, columns=ev_cols, show="headings", height=8)
+        self.tree_events = ttk.Treeview(self.tab_events, columns=ev_cols, show="headings", height=4)
 
         self.tree_events.heading("created_at", text="Data/Hora")
         self.tree_events.column("created_at", width=170, anchor="w")
@@ -221,8 +229,8 @@ class PXSearchOrdersUI(ttk.Frame):
         # ------------------------
         # Status
         # ------------------------
-        self.status = ttk.Label(self, text="Pronto.")
-        self.status.pack(fill="x", padx=10, pady=(0, 10))
+        self.status = ttk.Label(self, text="Pronto.", style="Muted.TLabel")
+        self.status.pack(side="bottom", fill="x", padx=22, pady=(0, 8), before=box_details)
 
         self.reload()
 
@@ -243,6 +251,10 @@ class PXSearchOrdersUI(ttk.Frame):
         except Exception:
             tipos = []
         self.cmb_tipo.configure(values=[""] + tipos)
+
+    def reload_settings(self) -> None:
+        """Chamado pela página Configurações após reclassificar os registros."""
+        self.reload()
 
     def reload(self) -> None:
         self._refresh_tipo_options()
@@ -280,6 +292,7 @@ class PXSearchOrdersUI(ttk.Frame):
                 total_m = float(row.get("total_m", 0.0) or 0.0)
                 orders_count = int(row.get("orders_count", 0) or 0)
                 events_count = int(row.get("events_count", 0) or 0)
+                obs_count = int(row.get("obs_count", 0) or 0)
             except Exception:
                 continue
 
@@ -295,6 +308,7 @@ class PXSearchOrdersUI(ttk.Frame):
                     format_m(total_m, suffix=False),
                     orders_count,
                     events_count,
+                    f"📝 {obs_count}" if obs_count else "",
                 ),
             )
             count += 1
@@ -383,6 +397,7 @@ class PXSearchOrdersUI(ttk.Frame):
                             "path": str(o.get("source_path") or "") or None,
                             "fabric": str(o.get("fabric", "Outro")),
                             "length_m": float(o.get("real_m", 0.0) or 0.0),
+                            "observacao": str(o.get("observacao") or ""),
                         }
                         for o in orders
                     ],
@@ -405,6 +420,7 @@ class PXSearchOrdersUI(ttk.Frame):
                             real_mm=float(o.get("real_m", 0.0) or 0.0) * 1000.0,
                             src_file=str(o.get("source_path") or ""),
                             tipo=str(o.get("tipo") or ""),
+                            observacao=str(o.get("observacao") or ""),
                             # Já veio resolvido do banco — não deixa o botão
                             # "Salvar" do diálogo de regras reclassificar
                             # história já exportada sem o usuário pedir.
@@ -532,6 +548,7 @@ class PXSearchOrdersUI(ttk.Frame):
             vpos_mm = order.get("vpos_mm", 0) or 0
             real_m = order.get("real_m", 0) or 0
             source_path = str(order.get("source_path", "") or "")
+            observacao = str(order.get("observacao", "") or "").splitlines()[0] if order.get("observacao") else ""
 
             try:
                 source_path = Path(source_path).name
@@ -550,6 +567,7 @@ class PXSearchOrdersUI(ttk.Frame):
                     f"{float(vpos_mm):.1f}",
                     format_m(real_m, suffix=False),
                     source_path,
+                    observacao,
                 ),
             )
 

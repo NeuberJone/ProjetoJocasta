@@ -1,5 +1,139 @@
 # Changelog
 
+## [1.6.13] - 2026-10-21
+### Added
+- Configurações → Tipos de impressão: cada regra ganhou a opção "Nome do pedido" — "Detectar pelo nome do arquivo" (padrão, comportamento de sempre) ou "Nome fixo", com um nome configurável pra usar em todo arquivo daquele tipo (ex.: Reposição → sempre "Variados", em vez de ficar "DESCONHECIDO" quando o nome do arquivo não tem pedido de verdade). A lista de regras mostra o modo escolhido em cada uma.
+
+## [1.6.12] - 2026-10-21
+### Added
+- Configurações → Tipos de impressão: cada regra (Pedido, Reposição, ...) ganhou a opção "Avisar duplicidade entre rolos" — controla se itens desse tipo entram na verificação de pedido+tecido já impresso em outro rolo. Vem desligada de fábrica para Reposição (o nome do arquivo quase sempre se repete entre reposições, o que gerava aviso o tempo todo sem necessidade) e ligada para Pedido; totalmente ajustável por tipo na lista de regras.
+
+## [1.6.11] - 2026-10-20
+### Changed
+- Operação: "Editar tecido" e "Editar pedido" agora mostram, dentro do próprio diálogo, a lista dos arquivos de origem daquele grupo (com contagem quando repetido) — antes, ao corrigir um "DESCONHECIDO" causado por erro de digitação no nome do arquivo, não tinha como saber a qual arquivo aquele nome se referia só pelo diálogo de renomear.
+
+## [1.6.10] - 2026-10-18
+### Added
+- Operação: ao importar logs de uma impressora com "Log adicional" habilitado, se a pasta configurada não tiver nenhuma linha no formato esperado (log diário no mesmo padrão da M1), o Nexor não fica mais mostrando "sem correspondência" silenciosamente pra tudo — avisa "formato do log adicional não reconhecido" na barra de status e na coluna de impressão, pra ficar claro que a pasta apontada provavelmente está errada.
+- Registros: a lista de rolos exportados ganhou a coluna "Observações", com a contagem de itens anotados ("📝 3") — dá pra ver de cara quais rolos têm alguma observação registrada sem abrir cada um.
+
+## [1.6.9] - 2026-10-18
+### Changed
+- Gerenciar Impressoras: nova opção "Log adicional" por máquina — quando marcada, informa a pasta de um log diário externo (como o da M1) e a Operação passa a cruzar os dois logs automaticamente para confirmar a impressão real, em qualquer impressora cadastrada assim (antes era fixo pra "M1"). A pasta que antes ficava em Configurações → Operação saiu de lá; quem já tinha configurado precisa reconfigurar em Gerenciar Impressoras → "Log adicional".
+
+## [1.6.8] - 2026-10-18
+### Added
+- Operação e Planejador: o operador agora pode anotar observações livres em qualquer item (ex.: "o papel manchou aqui"). Em Operação, clique duas vezes (ou botão direito → "Observação…") num item em "Detalhes do bloco"; em Planejador, abra "Editar item…" (duplo clique ou botão direito) na fila de impressão. As observações aparecem numa coluna própria nas duas telas e ficam salvas junto do rolo no banco — continuam visíveis depois de reabrir o rolo para edição ou consultar em Registros.
+
+## [1.6.7] - 2026-10-18
+### Added
+- Operação: verificação de impressão real da M1. A M1 só registra o processamento (RIP) no log .txt de cada arquivo — quem realmente comanda a impressora e sabe se deu erro é outro programa, que grava um log diário próprio. Configurações → Operação ganhou um campo pra apontar a pasta desse log diário; ao importar logs de M1, cada arquivo é cruzado com ele (pelo horário em que o processamento terminou — vários arquivos processados em sequência são enviados juntos num mesmo lote físico à impressora, então o resultado do lote vale para todos os arquivos dele) e aparece uma coluna "Impressão (M1)" em "Detalhes do bloco", além de um aviso na barra de status quando algum lote veio com erro.
+
+## [1.6.6] - 2026-10-16
+### Added
+- Configurações → Tipos de impressão: o editor de padrão (Nova/Editar) agora tem dois modos. **Simples** (padrão ao criar um tipo novo): só pede Tipo, Correspondência e uma palavra-chave que deve aparecer no nome do arquivo — sem exemplos nem regex. **Avançado** (botão "Modo avançado ▸"): o fluxo completo de exemplos → estrutura sugerida → regex, como já era. Uma regra existente reabre no modo certo automaticamente (simples se for só uma palavra-chave, avançado se tiver mais partes ou regex manual); ao trocar de simples pra avançado, a palavra-chave já digitada vira o primeiro exemplo.
+
+## [1.6.5] - 2026-10-16
+### Changed
+- Configurações: a opção "Usar pasta/arquivo da impressora para o JPG espelhado" saiu dos diálogos de exportação do Planejador e da Operação e virou um padrão salvo em Configurações (junto de "Modo do PDF" e "JPG espelhado"), igual já era feito com os outros padrões de exportação. Os diálogos de exportação agora só mostram o botão de exportar e um resumo somente leitura (incluindo se vai usar a pasta da impressora), com "altere em Configurações".
+- Operação e Planejador: o botão "Mais ações ▾" saiu do rodapé da tela (abaixo das listas/tabelas, de difícil percepção) e foi para o cartão principal do topo ("Rolo" em Operação, "Planejamento" em Planejador), ao lado do botão de ação principal.
+
+## [1.6.4] - 2026-10-16
+### Changed
+- Configurações: removidos os cartões "Impressoras" e "Tecidos e aproveitamento" — eram duplicata exata dos atalhos já sempre visíveis no menu lateral ("Gerenciamento"); ficou só um aviso apontando pra lá.
+- Configurações: a grade de temas ("Aparência") agora vem recolhida por padrão, atrás de "Mudar tema ▸" — é uma escolha ocasional e estava empurrando o resto da página pra baixo. O nome do tema atual continua sempre visível.
+- Configurações: removido o botão "Editar selecionada" de Tipos de impressão — duplo clique na regra já abria o editor (como nas demais listas do app); a dica "duplo clique para editar" foi pro rótulo da lista.
+
+## [1.6.3] - 2026-10-16
+### Fixed
+- O botão "Mais ações ▾" (Operação e Planejador) não tinha estilo próprio definido no tema — ficava com a aparência padrão clara do Windows (destoando do resto da tela escura) e virava branco ao passar o mouse por cima. Agora usa o mesmo visual dos demais botões, em todos os temas.
+
+## [1.6.2] - 2026-10-16
+### Changed
+- Planejador: removido o indicador de etapas "1 Arquivos · 2 Configuração · 3 Fila e rolos · 4 Exportação" no topo da tela — era somente decorativo (não navegava nem refletia o passo atual) e não orientava o fluxo de trabalho.
+- Operação: mesma reorganização visual já feita no Planejador. O cartão "Nome do rolo e opções de exportação" (10 botões + checkbox) e o cartão separado de arrastar-e-soltar viraram um único cartão "Rolo", com nome do rolo, máquina, o aviso de arrastar-e-soltar e o resumo de modo do PDF/JPG — e um botão "▶ Exportar…" em destaque. A exportação (PDF Normal/JPG Espelhado/Ambos, "usar pasta da impressora", pasta de destino) virou um diálogo próprio, igual ao do Planejador. "Importar pasta", "Abrir pasta PDF/JPG" e "Limpar" foram para um menu "Mais ações ▾" no rodapé. "Editar tecido"/"Editar tipo"/"Editar pedido" saíram da barra de botões — continuam disponíveis por duplo clique (como já era) e agora também por clique direito nas listas "Ordem do rolo" e "Pedidos no rolo".
+- Registros: removido o botão "Recarregar" duplicado no cartão de filtros — a ação já existe, sempre visível, no cabeçalho da página ("⟳ Recarregar").
+
+## [1.6.1] - 2026-10-16
+### Fixed
+- Operação: o tecido identificado no nome do arquivo agora é comparado com o cadastro de "Tecidos e variações" (Configurações), então aliases do mesmo tecido (ex.: "Dryfit", "Dry Fit", "Drifit") são agrupados sob um único nome em vez de aparecerem como tecidos diferentes na fila/resumo. Vale tanto para a importação de novos logs quanto para logs já abertos (reclassificados ao salvar Configurações), respeitando renomeações manuais feitas em "Editar tecido".
+- Menu lateral: os atalhos "Tecidos" e "Pedaços de tecido" abriam o respectivo cadastro, mas também trocavam a tela principal para o Planejador — mesmo estando em Operação ou Registros. Agora só o diálogo abre; a tela visível não muda.
+
+## [1.6.0] - 2026-10-15
+### Changed
+- Planejador: reorganização visual completa da tela, para reduzir a poluição de botões/cartões. De ~23 controles soltos em 6 cartões para 2 cartões no topo ("Planejamento": impressora, tecido, "▶ Gerar planejamento"; "Parâmetros do planejamento": modo, ordem automática, resumo de DPI/gaps, com "Configurações avançadas ▸" escondendo os ajustes de pedaços de tecido cortados), as abas Arquivos/Fila/Rolos/Pedidos já existentes como área principal, e um menu "Mais ações ▾" (Exportar…, Exportar CSV, Recalcular, Salvar/Importar lista, Tecidos…, Ordem dos tecidos…, Pedaços de tecido…, Limpar) no rodapé para o que é usado com menos frequência.
+- A exportação (nome do lote, modo PDF/JPG, "usar pasta da impressora", botões Exportar PDF/JPG/Ambos) virou um diálogo próprio ("Exportar…", em Mais ações) em vez de ficar sempre visível na tela.
+- "Mover acima/abaixo" saiu da barra de botões — continua disponível pelo menu de contexto (botão direito) da fila, igual já funcionava.
+- "Voltar visão base" foi incorporado ao botão da aba "Arquivos" ("Ver arquivos importados").
+
+### Fixed
+- Planejador: o aviso "Editando rolo já registrado" (ao reabrir um rolo salvo para edição) podia não aparecer porque a variável de texto não tinha nenhuma referência mantendo-a viva — corrigido escrevendo o texto direto no rótulo.
+
+## [1.5.2] - 2026-10-15
+### Changed
+- Configurações: os botões "Salvar tipos de impressão", "Salvar padrões da Operação" e "Salvar padrões do Planejador" foram substituídos por um único botão "Salvar todas as configurações" no final da página. Cada seção continua validando os próprios campos (um erro numa seção não impede as demais de salvar).
+
+## [1.5.1] - 2026-10-15
+### Added
+- Configurações → Operação: cadastro de Operadores (identificador + nome) — o identificador é a letra que aparece no nome do arquivo de reposição (ex.: "N" em "N1 - Dryfit").
+- PDF e JPG (modo Completo): nova coluna "Operador" na listagem de pedidos no rolo, identificando quem imprimiu cada reposição a partir do identificador cadastrado.
+
+## [1.5.0] - 2026-10-15
+### Added
+- Configurações → Tipos de impressão: editor visual de padrão. Em vez de digitar regex, o usuário dá um ou mais exemplos de nome de arquivo e o Nexor sugere a estrutura (texto fixo, texto variável, data, número, letras, letras+número, número+letras, tecido cadastrado, separador) — cada bloco é confirmado/ajustado antes de salvar. A regex continua existindo, mas vira um detalhe técnico gerado automaticamente, com edição manual disponível no modo "Avançado".
+- Bloco "Tecido cadastrado": ao invés de aceitar qualquer texto, usa o cadastro de tecidos e aliases do Planejador para montar a regex — e é recalculado contra o cadastro atual a cada classificação, então não fica desatualizado se o cadastro mudar depois.
+- Testador de nome de arquivo (Configurações): agora avisa quando mais de uma regra combina com o mesmo nome, e explica que a de cima na lista vence.
+- Detecção de conflito: ao salvar um padrão, o Nexor avisa (sem bloquear) se algum dos exemplos informados também combina com outra regra já cadastrada.
+
+### Fixed
+- Classificação de tipo de impressão (Pedido/Reposição/Fora do padrão/...) agora ignora a extensão do arquivo (.jpg/.jpeg/.png/...) antes de comparar, em vez de deixá-la vazar para dentro da regra.
+
+### Changed
+- Regras antigas (Pedido, Reposição) continuam funcionando exatamente como antes — foram preservadas como "regex avançada" na migração para o novo modelo, sem tentar reinterpretar a estrutura delas.
+
+## [1.4.2] - 2026-10-15
+### Changed
+- Operação e Planejador: removidos os controles de "Modo do PDF" e "JPG espelhado" (radiobuttons e campo personalizado) das telas — esses padrões já são definidos em Configurações. As telas agora mostram só um resumo somente leitura dos valores em uso, igual ao que já acontecia com DPI/eixo/gaps.
+
+## [1.4.1] - 2026-10-15
+### Fixed
+- Identificação de tecido em Reposição: arquivos como "N1 - Dryfit (2).jpeg" ou "N1 - Dryfit.jpeg" identificavam o tecido como "DRYFIT (2).JPEG" em vez de "DRYFIT" — a extensão e o que estiver entre parênteses no final (observação ou contador de arquivo duplicado) agora são ignorados na identificação do tecido. O nome completo do arquivo, com a observação, continua aparecendo normalmente nos relatórios.
+
+## [1.4.0] - 2026-10-09
+### Fixed
+- Tipos de impressão: arquivos de pedido com data só de dia e mês (ex.: "16-10 - Dryfit - Primos e Amigos 3") eram classificados como "Fora do padrão"; agora são "Pedido". A regra antiga salva é atualizada automaticamente.
+- Reposição também aceita espaço entre inicial e número (ex.: "N 2 - Aeroready").
+- Pedaços de tecido: marcar/desmarcar como usado apagava o Tipo e a Observação do pedaço.
+
+### Added
+- Configurações → Tipos de impressão: regras (Pedido, Reposição, ...) e subtipos manuais editáveis direto na página, com teste ao vivo de nome de arquivo.
+- Configurações → Operação, Planejador e Registros: padrões de PDF/JPG, arquivos de espaço, DPI, eixo, setup, gaps, rolo padrão, sangria, modo da fila e reclassificação dos registros salvos como "Fora do padrão".
+- Pedaços de tecido: botão "Remover tecidos usados".
+
+### Changed
+- Operação e Planejador não têm mais os botões "Definir como padrão", "Arquivo(s) de espaço…" e "Tipos de impressão…", nem os campos fixos; o Planejador mostra um resumo dos valores em uso. Ao salvar em Configurações, as telas abertas recarregam sem reiniciar.
+
+## [1.3.3] - 2026-10-09
+### Fixed
+- Barra de status ocupando a largura toda (antes ficava numa fresta à direita e a página perdia ~1/3 da largura).
+- Diálogos com tamanho fixo (Impressoras, Selecionar pedaços) não cortam mais os botões do rodapé em telas com escala do Windows.
+- Registros: as abas de detalhes do rolo não ficam mais espremidas/cortadas.
+- Configurações agora rola, então todos os cartões continuam alcançáveis.
+
+### Changed
+- Temas mais fiéis ao protótipo em todas as telas e nos 8 temas: cartões, abas e diálogos sem faixas de outra cor; botões e campos com borda fina; aba ativa sublinhada; separadores chapados; menu lateral e barra superior no painel (XP com faixa azul e botão verde, Win98 com cabeçalho cinza em relevo).
+- Configurações → Aparência: cartões de tema com prévia, descrição e indicação do tema atual.
+- Planejador ganhou o indicador de etapas, e a Operação, o aviso sobre a ordem do rolo.
+
+## [1.3.2] - 2026-10-07
+### Changed
+- Operação: no PDF/JPG do modo Completo, "Pedidos no rolo" agora aparece antes do "Resumo (ordem do rolo)" — o resumo passa a ser o último bloco do relatório.
+
+## [1.3.1] - 2026-10-07
+
+- Ajustes visuais responsivos no Planejador, Operação, Registros e Configurações.
+- Reorganização das ações e exportações para evitar cortes horizontais.
+
 ## [1.3.0] - 2026-10-06
 ### Added
 - Operação: novo campo **Tipo** por pedido (Pedido / Reposição / Fora do padrão / subtipos manuais), classificado automaticamente pelo nome do arquivo.

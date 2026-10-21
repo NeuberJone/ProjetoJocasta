@@ -8,7 +8,7 @@ from tkinter import ttk, messagebox, filedialog
 from core.version import __version__
 from core.config import load_config as load_pxcore_config, save_config as save_pxcore_config
 from core import theme
-from core.ui import dialog_header, page_heading, status_bar
+from core.ui import card, dialog_header, page_heading, page_scroll_container, status_bar
 from core.printers import (
     Printer,
     load_printers,
@@ -74,6 +74,9 @@ class Nexor(RootBase):
         # de qualquer módulo, já nasçam com o tema atual aplicado.
         theme.install_toplevel_autotheme()
         theme.apply_theme(self, getattr(self.px_cfg, "theme_name", theme.DEFAULT_THEME))
+        # Mantém a grade de temas coerente mesmo quando o tema é aplicado por
+        # outro caminho que não o clique no cartão.
+        theme.on_theme_changed(lambda _key: self._mark_active_theme())
 
         # Menu
         self._build_menu()
@@ -109,48 +112,43 @@ class Nexor(RootBase):
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
 
-        sidebar = ttk.Frame(container, width=202, padding=(14, 18))
+        # Menu lateral sobre --n-panel, como .nx-side do protótipo.
+        sidebar = ttk.Frame(container, width=202, padding=(14, 24), style="Panel.TFrame")
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
-        logo_row = ttk.Frame(sidebar)
-        logo_row.pack(fill="x", pady=(0, 26))
-        ttk.Label(logo_row, text="N", style="Logo.TLabel").pack(side="left", padx=(0, 9))
-        ttk.Label(logo_row, text="nexor.", font=("TkDefaultFont", 17, "bold")).pack(side="left")
+        logo_row = ttk.Frame(sidebar, style="Panel.TFrame", padding=(10, 0))
+        logo_row.pack(fill="x", pady=(0, 28))
+        ttk.Label(logo_row, text="N", style="Logo.TLabel").pack(side="left", padx=(0, 10))
+        ttk.Label(logo_row, text="nexor.", style="SideLogo.TLabel").pack(side="left")
 
         ttk.Label(sidebar, text="PRODUÇÃO TÊXTIL", style="Kicker.TLabel").pack(
-            anchor="w", pady=(0, 4)
+            anchor="w", pady=(0, 8)
         )
         for title, _module_path in MODULES:
             btn = ttk.Button(
                 sidebar, text=title, style="Nav.TButton",
                 command=lambda t=title: self.load_module(t),
             )
-            btn.pack(fill="x", pady=(0, 5))
+            btn.pack(fill="x", pady=(0, 6))
             self._nav_buttons[title] = btn
 
-        ttk.Separator(sidebar).pack(fill="x", pady=18)
-
         ttk.Label(sidebar, text="GERENCIAMENTO", style="Kicker.TLabel").pack(
-            anchor="w", pady=(0, 4)
+            anchor="w", pady=(22, 8)
         )
-        ttk.Button(
-            sidebar, text="  Impressoras", style="Tool.TButton",
-            command=self.open_printers_dialog,
-        ).pack(fill="x", pady=(0, 4))
-        ttk.Button(
-            sidebar, text="  Tecidos", style="Tool.TButton",
-            command=self.open_fabrics_shortcut,
-        ).pack(fill="x", pady=(0, 4))
-        ttk.Button(
-            sidebar, text="Pedaços de tecido", style="Tool.TButton",
-            command=self.open_scraps_shortcut,
-        ).pack(fill="x", pady=(0, 4))
+        for text, command in (
+            ("Impressoras", self.open_printers_dialog),
+            ("Tecidos", self.open_fabrics_shortcut),
+            ("Pedaços de tecido", self.open_scraps_shortcut),
+        ):
+            ttk.Button(sidebar, text=text, style="Nav.TButton", command=command).pack(
+                fill="x", pady=(0, 6)
+            )
         settings_btn = ttk.Button(
-            sidebar, text="  Configurações", style="Nav.TButton",
+            sidebar, text="Configurações", style="Nav.TButton",
             command=lambda: self.load_module(SETTINGS_TITLE),
         )
-        settings_btn.pack(fill="x", pady=(0, 4))
+        settings_btn.pack(fill="x", pady=(0, 6))
         self._nav_buttons[SETTINGS_TITLE] = settings_btn
 
         ttk.Separator(container, orient="vertical").pack(side="left", fill="y")
@@ -158,36 +156,47 @@ class Nexor(RootBase):
         content_wrap = ttk.Frame(container)
         content_wrap.pack(side="left", fill="both", expand=True)
 
-        header = ttk.Frame(content_wrap, padding=(26, 14))
+        header = ttk.Frame(content_wrap, padding=(26, 16), style="Top.TFrame")
         header.pack(fill="x")
+        ttk.Label(header, text="Produção  /", style="TopMuted.TLabel").pack(side="left")
         self._breadcrumb_var = tk.StringVar(value="")
-        ttk.Label(
-            header, textvariable=self._breadcrumb_var, font=("TkDefaultFont", 10, "bold")
-        ).pack(side="left")
+        ttk.Label(header, textvariable=self._breadcrumb_var, style="Top.TLabel").pack(
+            side="left", padx=(6, 0)
+        )
         ttk.Label(header, text="Produção · ambiente local", style="Badge.TLabel").pack(side="right")
         ttk.Separator(content_wrap).pack(fill="x")
 
-        self.content = ttk.Frame(content_wrap)
-        self.content.pack(side="left", fill="both", expand=True)
-        self.content.pack_configure(fill="both", expand=True)
+        # A barra de status precisa ser empacotada antes do conteúdo: com o
+        # conteúdo em side="left"+expand, ela sobrava só numa fresta à direita.
         status_bar(content_wrap, self._status_var).pack(side="bottom", fill="x")
+        ttk.Separator(content_wrap).pack(side="bottom", fill="x")
+        self.content = ttk.Frame(content_wrap)
+        self.content.pack(side="top", fill="both", expand=True)
+
+    def _ensure_module_built(self, title: str) -> None:
+        """Garante que a página exista em self._pages/self._page_uis, sem
+        trocar a página visível — usado pelos atalhos de Tecidos/Pedaços de
+        tecido, que precisam da UI do Planejador montada só para acessar seus
+        diálogos, não para navegar até lá."""
+        if title in self._pages:
+            return
+        page = ttk.Frame(self.content)
+        if title == SETTINGS_TITLE:
+            self._build_settings_page(page)
+        else:
+            module_path = dict(MODULES).get(title)
+            if module_path is None:
+                messagebox.showerror("Nexor", f"Módulo desconhecido: {title}")
+                return
+            self._build_module_page(page, title, module_path)
+        self._pages[title] = page
+        # A página é construída depois da aplicação inicial do tema.
+        # Reaplicar aqui é essencial para widgets Tk clássicos (Text,
+        # Listbox e Canvas), que não herdam ttk.Style automaticamente.
+        theme.apply_theme(self, theme.current_key())
 
     def load_module(self, title: str) -> None:
-        if title not in self._pages:
-            page = ttk.Frame(self.content)
-            if title == SETTINGS_TITLE:
-                self._build_settings_page(page)
-            else:
-                module_path = dict(MODULES).get(title)
-                if module_path is None:
-                    messagebox.showerror("Nexor", f"Módulo desconhecido: {title}")
-                    return
-                self._build_module_page(page, title, module_path)
-            self._pages[title] = page
-            # A página é construída depois da aplicação inicial do tema.
-            # Reaplicar aqui é essencial para widgets Tk clássicos (Text,
-            # Listbox e Canvas), que não herdam ttk.Style automaticamente.
-            theme.apply_theme(self, theme.current_key())
+        self._ensure_module_built(title)
 
         if self.current_module is not None and self.current_module in self._pages:
             self._pages[self.current_module].pack_forget()
@@ -198,7 +207,7 @@ class Nexor(RootBase):
         if title in self._nav_buttons:
             self._nav_buttons[title].configure(style="NavSelected.TButton")
         self.current_module = title
-        self._breadcrumb_var.set(f"Produção / {title}")
+        self._breadcrumb_var.set(title)
         self.title(f"Nexor v{__version__} — {title}")
 
     def _build_module_page(self, page: ttk.Frame, title: str, module_path: str) -> None:
@@ -230,7 +239,7 @@ class Nexor(RootBase):
     # Atalhos pro Planejador (Tecidos / Pedaços de tecido)
     # =========================
     def open_fabrics_shortcut(self) -> None:
-        self.load_module("Planejador")
+        self._ensure_module_built("Planejador")
         hook = getattr(self._page_uis.get("Planejador"), "open_fabrics_dialog", None)
         if callable(hook):
             hook()
@@ -238,7 +247,7 @@ class Nexor(RootBase):
             messagebox.showerror("Tecidos", "Não foi possível abrir o cadastro de tecidos.")
 
     def open_scraps_shortcut(self) -> None:
-        self.load_module("Planejador")
+        self._ensure_module_built("Planejador")
         hook = getattr(self._page_uis.get("Planejador"), "open_scraps_dialog", None)
         if callable(hook):
             hook()
@@ -274,14 +283,20 @@ class Nexor(RootBase):
             self._render_error(page, "Config do PXCore não carregou.")
             return
 
-        outer = ttk.Frame(page, padding=(28, 22, 28, 18))
-        outer.pack(fill="both", expand=True)
+        # A grade de temas com prévias empurra os demais cartões para baixo
+        # da dobra em 800 px; a página rola como Planejador e Operação.
+        outer, canvas = page_scroll_container(page)
+        canvas.master.pack(fill="both", expand=True)
 
         page_heading(outer, "Configurações",
-                     "Pastas compartilhadas e cadastros da produção.").pack(fill="x")
+                     "Aparência, pastas, cadastros e padrões de cada módulo.").pack(fill="x")
+
+        # Aparência vem primeiro no protótipo: as escolhas ficam visíveis sem
+        # obrigar o usuário a atravessar o formulário de diretório.
+        self._build_appearance_box(outer)
 
         # ---- Diretório de trabalho ----
-        base_box = ttk.LabelFrame(outer, text="Diretório de trabalho", padding=12)
+        base_box = card(outer, "Diretório de trabalho", padding=14)
         base_box.pack(fill="x", pady=(0, 12))
 
         ttk.Label(base_box, text="Diretório base do PXCore:").pack(anchor="w")
@@ -327,73 +342,172 @@ class Nexor(RootBase):
             side="left", padx=(6, 0)
         )
 
-        # ---- Aparência (temas) ----
-        self._build_appearance_box(outer)
-
-        # ---- Atalhos de cadastro (iguais aos do menu lateral) ----
-        grid = ttk.Frame(outer)
-        grid.pack(fill="x")
-
-        printers_box = ttk.LabelFrame(grid, text="Impressoras", padding=12)
-        printers_box.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        # Cadastros de Impressoras/Tecidos/Pedaços de tecido já ficam sempre
+        # visíveis no menu lateral ("Gerenciamento") — não duplica os cartões
+        # aqui, só aponta pra lá.
         ttk.Label(
-            printers_box, text="Velocidade e destino dos JPGs por máquina.", style="Muted.TLabel"
-        ).pack(anchor="w", pady=(0, 8))
+            outer,
+            text="Cadastros de Impressoras, Tecidos e Pedaços de tecido: menu lateral → Gerenciamento.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 12))
+
+        # ---- Configurações fixas dos módulos (antes espalhadas nas telas) ----
+        try:
+            from modules import configuracoes
+        except Exception as e:  # noqa: BLE001
+            self._render_error(outer, f"Falha ao carregar configurações dos módulos:\n\n{type(e).__name__}: {e}")
+            return
+        section_boxes = []
+        for build in (
+            configuracoes.build_print_types_section,
+            configuracoes.build_operacao_section,
+            configuracoes.build_planejador_section,
+            configuracoes.build_registros_section,
+        ):
+            section_box = build(outer, self._on_module_settings_saved)
+            section_box.pack(fill="x", pady=(12, 0))
+            section_boxes.append(section_box)
+
+        save_all_row = ttk.Frame(outer)
+        save_all_row.pack(fill="x", pady=(16, 24))
         ttk.Button(
-            printers_box, text="Gerenciar impressoras", command=self.open_printers_dialog
+            save_all_row,
+            text="Salvar todas as configurações",
+            style="Accent.TButton",
+            command=lambda: self._save_all_settings(section_boxes),
         ).pack(anchor="w")
 
-        fabrics_box = ttk.LabelFrame(grid, text="Tecidos e aproveitamento", padding=12)
-        fabrics_box.pack(side="left", fill="both", expand=True, padx=(6, 0))
-        ttk.Label(
-            fabrics_box, text="Aliases, metragens e pedaços disponíveis.", style="Muted.TLabel"
-        ).pack(anchor="w", pady=(0, 8))
-        fabrics_row = ttk.Frame(fabrics_box)
-        fabrics_row.pack(anchor="w")
-        ttk.Button(fabrics_row, text="Tecidos", command=self.open_fabrics_shortcut).pack(
-            side="left"
-        )
-        ttk.Button(
-            fabrics_row, text="Pedaços cortados", command=self.open_scraps_shortcut
-        ).pack(side="left", padx=(6, 0))
+    def _save_all_settings(self, section_boxes: list) -> None:
+        """Salva de uma vez as seções de Configurações que têm algo a
+        persistir (Tipos de impressão, Operação, Planejador — Registros só
+        tem a ação de reclassificar, que já age na hora). Cada seção valida
+        os próprios campos e avisa o erro específico; esta função só agrega
+        o resultado final."""
+        any_section = False
+        all_ok = True
+        for section_box in section_boxes:
+            save_fn = getattr(section_box, "save", None)
+            if not callable(save_fn):
+                continue
+            any_section = True
+            try:
+                if save_fn() is False:
+                    all_ok = False
+            except Exception as e:  # noqa: BLE001
+                all_ok = False
+                messagebox.showerror(
+                    "Configurações", f"Falha ao salvar uma das seções.\n\n{type(e).__name__}: {e}"
+                )
+
+        if not any_section:
+            return
+
+        if all_ok:
+            self._status_var.set("Todas as configurações foram salvas")
+            messagebox.showinfo("Configurações", "Todas as configurações foram salvas.")
+        else:
+            messagebox.showwarning(
+                "Configurações",
+                "Algumas seções não foram salvas — corrija o que foi indicado e clique em "
+                "\"Salvar todas as configurações\" de novo.",
+            )
+
+    def _on_module_settings_saved(self, module_title: str) -> None:
+        """Repassa a configuração nova para a página já aberta, sem reiniciar."""
+        hook = getattr(self._page_uis.get(module_title), "reload_settings", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception as e:  # noqa: BLE001
+                messagebox.showwarning(
+                    module_title,
+                    f"Configuração salva, mas a tela aberta não recarregou.\n\n{type(e).__name__}: {e}",
+                )
+        self._status_var.set(f"Configurações de {module_title} salvas")
 
     def _build_appearance_box(self, outer: ttk.Frame) -> None:
-        box = ttk.LabelFrame(outer, text="Aparência", padding=12)
+        box = card(outer, "Aparência", padding=14)
         box.pack(fill="x", pady=(0, 12))
 
-        ttk.Label(
-            box, text="Escolha o tema visual do Nexor — aplica na hora, em todas as telas.",
-            style="Muted.TLabel",
-        ).pack(anchor="w", pady=(0, 8))
+        self._theme_current_var = tk.StringVar(value="")
+        ttk.Label(box, textvariable=self._theme_current_var, style="Muted.TLabel").pack(
+            anchor="w", pady=(0, 6)
+        )
 
-        grid = ttk.Frame(box)
-        grid.pack(fill="x")
+        # Escolha de tema é ocasional (normalmente só uma vez) — fica
+        # recolhida por padrão pra não empurrar o resto da página pra baixo.
+        self._theme_grid_state = {"open": False}
+        grid_wrap = ttk.Frame(box)
 
-        style = ttk.Style(self)
-        keys = theme.theme_keys_ordered()
-        for i, key in enumerate(keys):
+        def toggle_theme_grid() -> None:
+            self._theme_grid_state["open"] = not self._theme_grid_state["open"]
+            if self._theme_grid_state["open"]:
+                grid_wrap.pack(fill="x", pady=(4, 0))
+                btn_toggle_theme.configure(text="Mudar tema ▾")
+            else:
+                grid_wrap.pack_forget()
+                btn_toggle_theme.configure(text="Mudar tema ▸")
+
+        btn_toggle_theme = ttk.Button(box, text="Mudar tema ▸", command=toggle_theme_grid)
+        btn_toggle_theme.pack(anchor="w")
+
+        grid = ttk.Frame(grid_wrap)
+        grid.pack(fill="x", pady=(10, 0))
+
+        self._theme_check_vars: dict[str, tk.StringVar] = {}
+        for i, key in enumerate(theme.theme_keys_for_picker()):
             spec = theme.get_spec(key)
-            style_name = f"ThemePreview_{key}.TButton"
-            style.configure(
-                style_name,
-                background=spec.panel, foreground=spec.text,
-                bordercolor=spec.brand, relief=spec.relief,
-                borderwidth=max(2, spec.borderwidth), padding=(10, 14),
-                font=(spec.font_family, 9, "bold"),
-            )
-            style.map(style_name, background=[("active", spec.brand_soft)])
+            # Cartão = .nx-theme-choice; a borda vira highlight do Frame para
+            # poder ficar com 2 px da cor de destaque quando ativo.
+            choice = tk.Frame(grid, highlightthickness=1, borderwidth=0, cursor="hand2")
+            choice.grid(row=i // 3, column=i % 3, sticky="nsew", padx=(0, 14), pady=(0, 14))
 
-            btn = ttk.Button(
-                grid, text=spec.label, style=style_name,
-                command=lambda k=key: self._select_theme(k),
-            )
-            btn.grid(row=i // 3, column=i % 3, sticky="nsew", padx=4, pady=4)
-            self._theme_buttons[key] = btn
+            preview = tk.Canvas(choice, height=74, highlightthickness=0, borderwidth=0, cursor="hand2")
+            preview._nx_static = True  # cores do tema exibido, não do tema ativo
+            preview.pack(fill="x", padx=9, pady=(9, 9))
+            preview.bind("<Configure>", lambda e, c=preview, s=spec: self._draw_theme_preview(c, s))
+
+            label_row = ttk.Frame(choice)
+            label_row.pack(fill="x", padx=9)
+            name = ttk.Label(label_row, text=spec.label, style="PanelStrong.TLabel")
+            name.pack(side="left")
+            check_var = tk.StringVar(value="")
+            check = ttk.Label(label_row, textvariable=check_var, style="Panel.TLabel")
+            check.pack(side="right")
+            self._theme_check_vars[key] = check_var
+            desc = ttk.Label(choice, text=spec.description, style="PanelMuted.TLabel")
+            desc.pack(anchor="w", padx=9, pady=(2, 9))
+
+            for widget in (choice, preview, label_row, name, check, desc):
+                widget.bind("<Button-1>", lambda _e, k=key: self._select_theme(k))
+            self._theme_buttons[key] = choice
 
         for c in range(3):
-            grid.columnconfigure(c, weight=1)
+            grid.columnconfigure(c, weight=1, uniform="theme")
+
+        ttk.Label(
+            grid_wrap, text="Aplicação imediata em todas as telas. A escolha fica salva neste computador.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
 
         self._mark_active_theme()
+
+    @staticmethod
+    def _draw_theme_preview(canvas: tk.Canvas, spec: "theme.ThemeSpec") -> None:
+        w = max(canvas.winfo_width(), 60)
+        h = 74
+        side = int(w * 0.25)
+        canvas.delete("all")
+        canvas.configure(background=spec.bg)
+        canvas.create_rectangle(0, 0, side, h, fill=spec.panel, outline="")
+        canvas.create_rectangle(10, 10, side - 10, 13, fill=spec.brand, outline="")
+        for y in (21, 29, 37):
+            canvas.create_rectangle(10, y, side - 10, y + 2, fill=spec.muted, outline="")
+        canvas.create_rectangle(side + 10, 10, side + int((w - side) * 0.55), 13,
+                                fill=spec.text, outline="")
+        canvas.create_rectangle(side + 10, 21, w - 10, 39, fill=spec.panel, outline="")
+        canvas.create_rectangle(w - 10 - int((w - side) * 0.22), 58, w - 10, 63,
+                                fill=spec.brand, outline="")
 
     def _select_theme(self, key: str) -> None:
         theme.apply_theme(self, key)
@@ -403,11 +517,21 @@ class Nexor(RootBase):
         self._mark_active_theme()
 
     def _mark_active_theme(self) -> None:
+        if not self._theme_buttons:
+            return
         active = theme.current_key()
-        for key, btn in self._theme_buttons.items():
-            spec = theme.get_spec(key)
-            prefix = "✓ " if key == active else "   "
-            btn.configure(text=f"{prefix}{spec.label}")
+        current = theme.get_spec(active)
+        if hasattr(self, "_theme_current_var"):
+            self._theme_current_var.set(f"Tema atual: {current.label}")
+        for key, choice in self._theme_buttons.items():
+            is_active = key == active
+            choice.configure(
+                background=current.panel,
+                highlightthickness=2 if is_active else 1,
+                highlightbackground=current.brand if is_active else current.line,
+                highlightcolor=current.brand if is_active else current.line,
+            )
+            self._theme_check_vars[key].set("✓" if is_active else "")
 
     # =========================
     # Impressoras
@@ -426,7 +550,7 @@ class Nexor(RootBase):
         frm.pack(fill="both", expand=True)
         dialog_header(frm, "Impressoras", "Máquinas disponíveis e destino dos JPGs espelhados.").pack(fill="x")
 
-        cols = ("display_name", "name", "speed", "jpg_dir", "jpg_filename", "notes")
+        cols = ("display_name", "name", "speed", "jpg_dir", "jpg_filename", "sec_log", "notes")
         tree = ttk.Treeview(frm, columns=cols, show="headings", height=8)
         for col, txt, w in [
             ("display_name", "Nome de exibição", 100),
@@ -434,6 +558,7 @@ class Nexor(RootBase):
             ("speed", "Velocidade (m/min)", 100),
             ("jpg_dir", "Pasta do JPG espelhado", 190),
             ("jpg_filename", "Nome do arquivo", 120),
+            ("sec_log", "Log adicional", 110),
             ("notes", "Observações", 120),
         ]:
             tree.heading(col, text=txt)
@@ -485,6 +610,34 @@ class Nexor(RootBase):
             style="Muted.TLabel",
         ).grid(row=4, column=1, columnspan=3, sticky="w", padx=6)
 
+        var_sec_enabled = tk.BooleanVar(value=False)
+        var_sec_folder = tk.StringVar()
+
+        ttk.Checkbutton(
+            form, text="Log adicional (cruza com outro log pra confirmar a impressão real)",
+            variable=var_sec_enabled,
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        ttk.Label(form, text="Pasta do log adicional:").grid(row=6, column=0, sticky="w", pady=(2, 0))
+        ent_sec_folder = ttk.Entry(form, textvariable=var_sec_folder, width=46)
+        ent_sec_folder.grid(row=6, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0))
+
+        def on_browse_sec_folder() -> None:
+            folder = filedialog.askdirectory(title="Pasta do log adicional (log diário da impressão real)")
+            if folder:
+                var_sec_folder.set(folder)
+
+        btn_sec_folder = ttk.Button(form, text="Procurar…", command=on_browse_sec_folder)
+        btn_sec_folder.grid(row=6, column=3, sticky="w", padx=6, pady=(2, 0))
+
+        def _update_sec_folder_state(*_a) -> None:
+            state = "normal" if var_sec_enabled.get() else "disabled"
+            ent_sec_folder.configure(state=state)
+            btn_sec_folder.configure(state=state)
+
+        var_sec_enabled.trace_add("write", _update_sec_folder_state)
+        _update_sec_folder_state()
+
         def refresh_tree(select_key: str | None = None) -> None:
             tree.delete(*tree.get_children())
             for pr in printers:
@@ -492,7 +645,9 @@ class Nexor(RootBase):
                     "", "end", iid=pr.key,
                     values=(
                         pr.display_name, pr.name, f"{pr.speed_m_min:.2f}",
-                        pr.jpg_output_dir, pr.jpg_output_filename, pr.notes,
+                        pr.jpg_output_dir, pr.jpg_output_filename,
+                        "Sim" if pr.secondary_log_enabled else "Não",
+                        pr.notes,
                     ),
                 )
             if select_key:
@@ -506,6 +661,8 @@ class Nexor(RootBase):
             var_notes.set("")
             var_jpg_dir.set("")
             var_jpg_filename.set("")
+            var_sec_enabled.set(False)
+            var_sec_folder.set("")
             tree.selection_remove(*tree.selection())
 
         def on_select(_evt=None) -> None:
@@ -523,6 +680,8 @@ class Nexor(RootBase):
             var_notes.set(pr.notes)
             var_jpg_dir.set(pr.jpg_output_dir)
             var_jpg_filename.set(pr.jpg_output_filename)
+            var_sec_enabled.set(pr.secondary_log_enabled)
+            var_sec_folder.set(pr.secondary_log_folder)
 
         tree.bind("<<TreeviewSelect>>", on_select)
 
@@ -544,6 +703,8 @@ class Nexor(RootBase):
                     notes=var_notes.get().strip(),
                     jpg_output_dir=var_jpg_dir.get().strip(),
                     jpg_output_filename=var_jpg_filename.get().strip(),
+                    secondary_log_enabled=bool(var_sec_enabled.get()),
+                    secondary_log_folder=var_sec_folder.get().strip(),
                 )
             except ValueError as e:
                 messagebox.showerror("Impressoras", str(e))

@@ -1,4 +1,4 @@
 APP_NAME = "Nexor"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.6.13"
 
 __version__ = APP_VERSION
