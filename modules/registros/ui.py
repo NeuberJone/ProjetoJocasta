@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import importlib
+import os
 import traceback
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 from .helpers import format_m, payload_summary, safe_int
+from core.paths import reveal_file_in_explorer
 from core.ui import card, page_heading
+from modules.operacao.models import Job as OperacaoJob
+from modules.operacao.parser import build_blocks
+from .px_export import build_order_context_document, write_order_context_document
 from .repository import (
     load_distinct_tipos,
     load_roll_events,
     load_roll_module,
+    load_roll_order_version_options,
     load_roll_orders,
+    load_roll_orders_for_version,
+    load_roll_original_pdf_path,
+    load_roll_pdf_path,
     load_roll_summary,
+    load_roll_was_edited,
     search_rolls,
 )
 
@@ -35,6 +45,13 @@ _DISPLAY_NAMES = {
 }
 
 
+def _parse_order_end_time(raw: object) -> datetime:
+    try:
+        return datetime.fromisoformat(str(raw))
+    except Exception:
+        return datetime.now()
+
+
 class PXSearchOrdersUI(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -46,6 +63,8 @@ class PXSearchOrdersUI(ttk.Frame):
                      )
 
         self._current_roll_id: Optional[int] = None
+        self._current_order_id: Optional[int] = None
+        self._viewing_live_version: bool = True
 
         # ------------------------
         # Filtros
@@ -94,6 +113,9 @@ class PXSearchOrdersUI(ttk.Frame):
         ttk.Button(filtros, text="Editar rolo", command=self.on_edit_roll).grid(
             row=1, column=3, sticky="w", padx=(0, 10), pady=(0, 8)
         )
+        ttk.Button(filtros, text="Abrir comprovante", command=self.on_open_comprovante).grid(
+            row=1, column=4, sticky="w", padx=(0, 10), pady=(0, 8)
+        )
 
         filtros.columnconfigure(11, weight=1)
 
@@ -108,7 +130,7 @@ class PXSearchOrdersUI(ttk.Frame):
         box_rolls = card(self, "Rolos exportados", padding=10)
         box_rolls.pack(fill="both", expand=True, padx=22, pady=(0, 10))
 
-        cols = ("id", "roll", "machine", "created", "total_m", "orders", "events", "obs")
+        cols = ("id", "roll", "machine", "created", "total_m", "orders", "events", "obs", "edited")
         self.tree_rolls = ttk.Treeview(box_rolls, columns=cols, show="headings", height=5)
 
         self.tree_rolls.heading("id", text="ID")
@@ -135,6 +157,9 @@ class PXSearchOrdersUI(ttk.Frame):
         self.tree_rolls.heading("obs", text="Observações")
         self.tree_rolls.column("obs", width=100, anchor="e")
 
+        self.tree_rolls.heading("edited", text="Editado")
+        self.tree_rolls.column("edited", width=70, anchor="center")
+
         sb_rolls = ttk.Scrollbar(box_rolls, orient="vertical", command=self.tree_rolls.yview)
         self.tree_rolls.configure(yscrollcommand=sb_rolls.set)
 
@@ -144,6 +169,11 @@ class PXSearchOrdersUI(ttk.Frame):
         self.tree_rolls.bind("<<TreeviewSelect>>", self.on_select_roll)
         self.tree_rolls.bind("<Double-1>", self.on_double_click_roll)
 
+        self._roll_menu = tk.Menu(self.tree_rolls, tearoff=False)
+        self._roll_menu.add_command(label="Editar rolo", command=self.on_edit_roll)
+        self._roll_menu.add_command(label="Abrir comprovante", command=self.on_open_comprovante)
+        self.tree_rolls.bind("<Button-3>", self._on_roll_right_click)
+
         # ------------------------
         # Detalhes
         # ------------------------
@@ -152,6 +182,28 @@ class PXSearchOrdersUI(ttk.Frame):
         box_details = card(self, "Detalhes do rolo selecionado", padding=10)
         box_details.pack(side="bottom", fill="both", expand=True, padx=22, pady=(0, 8),
                          before=box_rolls)
+
+        # Versão do rolo (Original, Edição 1, Edição 2... ou a versão
+        # atual) — um rolo nunca editado tem só a opção "Original", que já
+        # é a atual (ver modules/registros/repository.py,
+        # load_roll_order_version_options). Fica acima das abas porque
+        # afeta tanto "Pedidos" quanto "Lista do rolo"; "Resumo" e
+        # "Eventos" sempre mostram o estado atual/histórico completo.
+        version_row = ttk.Frame(box_details)
+        version_row.pack(fill="x", padx=10, pady=(0, 4))
+        ttk.Label(version_row, text="Versão do rolo:").pack(side="left", padx=(0, 4))
+        self._order_version_options: list[dict] = []
+        self.var_order_version = tk.StringVar()
+        self.cmb_order_version = ttk.Combobox(
+            version_row, textvariable=self.var_order_version, state="readonly", width=16,
+        )
+        self.cmb_order_version.pack(side="left")
+        self.cmb_order_version.bind("<<ComboboxSelected>>", self.on_select_order_version)
+        ttk.Label(
+            version_row,
+            text='Afeta as abas "Pedidos" e "Lista do rolo" — Resumo e Eventos sempre mostram o estado atual.',
+            style="Muted.TLabel",
+        ).pack(side="left", padx=(10, 0))
 
         self.nb = ttk.Notebook(box_details)
         self.nb.pack(fill="both", expand=True, padx=10, pady=10)
@@ -170,6 +222,16 @@ class PXSearchOrdersUI(ttk.Frame):
 
         order_cols = ("end_time", "document", "fabric", "tipo", "height_mm", "vpos_mm", "real_m", "source", "observacao")
         self.tree_orders = ttk.Treeview(self.tab_orders, columns=order_cols, show="headings", height=4)
+
+        order_actions = ttk.Frame(self.tab_orders)
+        order_actions.pack(side="top", fill="x", pady=(0, 6))
+        self.btn_export_order_context = ttk.Button(
+            order_actions,
+            text="Exportar contexto de produção...",
+            command=self.on_export_order_context,
+            state="disabled",
+        )
+        self.btn_export_order_context.pack(side="left")
 
         self.tree_orders.heading("end_time", text="EndTime")
         self.tree_orders.column("end_time", width=160, anchor="w")
@@ -203,6 +265,41 @@ class PXSearchOrdersUI(ttk.Frame):
 
         self.tree_orders.pack(side="left", fill="both", expand=True)
         sb_orders.pack(side="right", fill="y")
+
+        self.tree_orders.bind("<<TreeviewSelect>>", self.on_select_order)
+
+        # Aba Lista do rolo — igual à aba de mesmo nome na Operação: todos
+        # os itens numa lista só, na ordem do comprovante (blocos na ordem
+        # de self.blocks, mais recente pro mais antigo dentro de cada um),
+        # incluindo ESPAÇO. Só existe esse jeito pra rolos da Operação —
+        # rolos do Planejador não têm ESPAÇO salvo nem essa noção de bloco
+        # por tecido entre arquivos.
+        self.tab_roll_list = ttk.Frame(self.nb)
+        self.nb.add(self.tab_roll_list, text="Lista do rolo")
+
+        roll_list_cols = ("idx", "end_time", "document", "fabric", "pedido", "tipo", "real_m", "observacao")
+        self.tree_roll_list = ttk.Treeview(
+            self.tab_roll_list, columns=roll_list_cols, show="headings", height=4
+        )
+        for col, text, width, anchor in [
+            ("idx", "#", 40, "e"),
+            ("end_time", "EndTime", 150, "w"),
+            ("document", "Documento", 280, "w"),
+            ("fabric", "Tecido", 110, "w"),
+            ("pedido", "Pedido", 160, "w"),
+            ("tipo", "Tipo", 100, "w"),
+            ("real_m", "Real (m)", 80, "e"),
+            ("observacao", "Observação", 180, "w"),
+        ]:
+            self.tree_roll_list.heading(col, text=text)
+            self.tree_roll_list.column(col, width=width, anchor=anchor)
+
+        sb_roll_list = ttk.Scrollbar(
+            self.tab_roll_list, orient="vertical", command=self.tree_roll_list.yview
+        )
+        self.tree_roll_list.configure(yscrollcommand=sb_roll_list.set)
+        self.tree_roll_list.pack(side="left", fill="both", expand=True)
+        sb_roll_list.pack(side="right", fill="y")
 
         # Aba Eventos
         self.tab_events = ttk.Frame(self.nb)
@@ -296,6 +393,11 @@ class PXSearchOrdersUI(ttk.Frame):
             except Exception:
                 continue
 
+            try:
+                edited = load_roll_was_edited(roll_id)
+            except Exception:
+                edited = False
+
             self.tree_rolls.insert(
                 "",
                 "end",
@@ -309,6 +411,7 @@ class PXSearchOrdersUI(ttk.Frame):
                     orders_count,
                     events_count,
                     f"📝 {obs_count}" if obs_count else "",
+                    "✏ Sim" if edited else "",
                 ),
             )
             count += 1
@@ -321,6 +424,17 @@ class PXSearchOrdersUI(ttk.Frame):
             self.tree_rolls.selection_set(first)
             self.tree_rolls.focus(first)
             self.on_select_roll()
+
+    def _on_roll_right_click(self, event) -> None:
+        iid = self.tree_rolls.identify_row(event.y)
+        if iid:
+            self.tree_rolls.selection_set(iid)
+            self.tree_rolls.focus(iid)
+            self.on_select_roll()
+        try:
+            self._roll_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._roll_menu.grab_release()
 
     def on_double_click_roll(self, _evt=None) -> None:
         sel = self.tree_rolls.selection()
@@ -375,12 +489,6 @@ class PXSearchOrdersUI(ttk.Frame):
         roll_name = str(summary.get("roll_name", ""))
         machine = str(summary.get("machine", ""))
 
-        def _parse_end_time(raw) -> datetime:
-            try:
-                return datetime.fromisoformat(str(raw))
-            except Exception:
-                return datetime.now()
-
         try:
             mod = importlib.import_module(module_path)
             build_ui = getattr(mod, "build_ui", None)
@@ -403,15 +511,13 @@ class PXSearchOrdersUI(ttk.Frame):
                     ],
                 }
             else:
-                from modules.operacao.models import Job as PrintLogsJob
-
                 preload = {
                     "edit_roll_id": roll_id,
                     "roll_name": roll_name,
                     "machine": machine,
                     "jobs": [
-                        PrintLogsJob(
-                            end_time=_parse_end_time(o.get("end_time")),
+                        OperacaoJob(
+                            end_time=_parse_order_end_time(o.get("end_time")),
                             document=str(o.get("document", "")),
                             fabric=str(o.get("fabric", "")),
                             pedido=str(o.get("pedido") or ""),
@@ -421,6 +527,11 @@ class PXSearchOrdersUI(ttk.Frame):
                             src_file=str(o.get("source_path") or ""),
                             tipo=str(o.get("tipo") or ""),
                             observacao=str(o.get("observacao") or ""),
+                            # Avanço/espaço sempre tem tipo vazio (ver
+                            # modules.operacao.parser) — sem isso, reabrir
+                            # um rolo editado mostrava ESPAÇO como se fosse
+                            # um tecido/pedido real.
+                            is_gap=not str(o.get("tipo") or "").strip(),
                             # Já veio resolvido do banco — não deixa o botão
                             # "Salvar" do diálogo de regras reclassificar
                             # história já exportada sem o usuário pedir.
@@ -438,7 +549,6 @@ class PXSearchOrdersUI(ttk.Frame):
 
         win = tk.Toplevel(self)
         win.title(f"Editar rolo #{roll_id} — {_DISPLAY_NAMES.get(module_path, module)}")
-        win.geometry("1200x800")
         win.transient(self.winfo_toplevel())
         win.grab_set()
         win.focus_force()
@@ -459,11 +569,96 @@ class PXSearchOrdersUI(ttk.Frame):
             )
             return
 
+        # Geometry só DEPOIS de montar e empacotar o conteúdo — setar antes
+        # do pack deixa o Tk recalcular o tamanho pelo conteúdo ainda vazio
+        # na primeira renderização, e a janela abre pequena demais.
+        win.minsize(1200, 800)
+        win.update_idletasks()
+        win.geometry("1200x800")
+
         def _on_close():
             win.destroy()
             self.reload()
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
+
+    def _open_pdf(self, pdf_path: str) -> None:
+        if not pdf_path:
+            messagebox.showwarning(
+                "Abrir comprovante", "Esse rolo não tem um PDF de comprovante registrado."
+            )
+            return
+        if not Path(pdf_path).exists():
+            messagebox.showerror("Abrir comprovante", f"Arquivo não encontrado:\n{pdf_path}")
+            return
+        try:
+            os.startfile(pdf_path)
+        except Exception as e:
+            messagebox.showerror(
+                "Abrir comprovante", f"Falha ao abrir o PDF.\n\n{type(e).__name__}: {e}"
+            )
+
+    def _choose_comprovante(self, original_path: str, latest_path: str) -> None:
+        """Rolo editado com comprovantes diferentes — pergunta qual abrir
+        em vez de abrir um dos dois sem avisar que existe o outro."""
+        win = tk.Toplevel(self)
+        win.title("Abrir comprovante")
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+
+        ttk.Label(
+            win,
+            text=(
+                "Esse rolo foi editado depois de fechado — existe o comprovante "
+                "ORIGINAL (de quando fechou a primeira vez) e o ATUAL (depois da "
+                "edição). Qual você quer abrir?"
+            ),
+            wraplength=360, justify="left",
+        ).pack(padx=16, pady=(16, 10))
+
+        btns = ttk.Frame(win)
+        btns.pack(padx=16, pady=(0, 16), fill="x")
+
+        def _open_original():
+            win.destroy()
+            self._open_pdf(original_path)
+
+        def _open_latest():
+            win.destroy()
+            self._open_pdf(latest_path)
+
+        def _open_both():
+            win.destroy()
+            self._open_pdf(original_path)
+            self._open_pdf(latest_path)
+
+        ttk.Button(btns, text="Original", command=_open_original).pack(side="left", padx=4)
+        ttk.Button(btns, text="Atual", command=_open_latest).pack(side="left", padx=4)
+        ttk.Button(btns, text="Os dois", command=_open_both).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancelar", command=win.destroy).pack(side="right", padx=4)
+
+    def on_open_comprovante(self) -> None:
+        roll_id = self._current_roll_id
+        if roll_id is None:
+            messagebox.showinfo("Abrir comprovante", "Selecione um rolo na lista acima.")
+            return
+
+        try:
+            latest_path = load_roll_pdf_path(roll_id)
+            edited = load_roll_was_edited(roll_id)
+            original_path = load_roll_original_pdf_path(roll_id) if edited else latest_path
+        except Exception as e:
+            messagebox.showerror(
+                "Abrir comprovante", f"Falha ao localizar o PDF.\n\n{type(e).__name__}: {e}"
+            )
+            return
+
+        if edited and original_path and latest_path and original_path != latest_path:
+            self._choose_comprovante(original_path, latest_path)
+            return
+
+        self._open_pdf(latest_path or original_path)
 
     def on_select_roll(self, _evt=None) -> None:
         sel = self.tree_rolls.selection()
@@ -477,6 +672,159 @@ class PXSearchOrdersUI(ttk.Frame):
         self._load_orders(roll_id)
         self._load_events(roll_id)
 
+    def on_select_order(self, _evt=None) -> None:
+        sel = self.tree_orders.selection()
+        # Linhas de uma versão histórica (não a atual) têm iid sintético —
+        # exportar contexto de produção só faz sentido pra um registro real
+        # (orders.id) do estado ATUAL, não pra uma cópia congelada de uma
+        # edição antiga. Um avanço/espaço (coluna "Tipo" vazia) também não
+        # tem contexto de produção pra exportar (ver on_export_order_context).
+        is_gap_row = bool(sel) and not str(self.tree_orders.set(sel[0], "tipo") or "").strip()
+        if not sel or not self._viewing_live_version or is_gap_row:
+            self._current_order_id = None
+        else:
+            try:
+                self._current_order_id = int(sel[0])
+            except ValueError:
+                self._current_order_id = None
+        self.btn_export_order_context.configure(state="normal" if self._current_order_id else "disabled")
+
+    def on_select_order_version(self, _evt=None) -> None:
+        label = self.var_order_version.get()
+        option = next((o for o in self._order_version_options if o["label"] == label), None)
+        if option is None or self._current_roll_id is None:
+            return
+        self._render_orders_tree(self._current_roll_id, option["value"])
+        self._render_roll_list(self._current_roll_id, option["value"])
+
+    def on_export_order_context(self) -> None:
+        """"Exportar contexto de produção..." — ver modules/registros/px_export.py e, no
+        repositório PXToolBox, docs/integrations/nexor-order-context.md. SOMENTE LEITURA:
+        nunca altera o rolo/trabalho de impressão, nunca abre o PX/Corel automaticamente.
+        O Nexor não tem pedido comercial formal (sem número/cliente/status) — por isso o
+        texto aqui diz "trabalho de impressão"/"contexto de produção", nunca "pedido" como
+        identificador."""
+        order_id = self._current_order_id
+        if not order_id:
+            messagebox.showinfo("Exportar contexto de produção", "Selecione um trabalho de impressão na lista acima.")
+            return
+
+        try:
+            document = build_order_context_document(order_id)
+        except Exception as e:
+            messagebox.showerror(
+                "Exportar contexto de produção", f"Falha ao ler o registro.\n\n{type(e).__name__}: {e}"
+            )
+            return
+
+        if document is None:
+            messagebox.showerror(
+                "Exportar contexto de produção", "Este registro não foi encontrado (pode ter sido removido)."
+            )
+            return
+
+        # Avanço/espaço (ver core.operacao.parser) tem "tipo" vazio (nunca
+        # "Pedido"/"Reposição"/"Fora do padrão"/etc.) mesmo quando o nome de
+        # exibição (pedidoLabel) não é vazio (ex.: "ESPAÇO") — por isso o
+        # tipo, não só o pedido, decide se há contexto de produção real.
+        tipo = str(document["job"].get("tipo") or "").strip()
+        pedido_label = str(document["job"]["pedidoLabel"]).strip()
+        if not tipo or not pedido_label:
+            messagebox.showwarning(
+                "Exportar contexto de produção",
+                "Este registro não tem um pedido informado (ex.: um avanço/espaço) — "
+                "não há contexto de produção para exportar.",
+            )
+            return
+
+        safe_label = "".join(c if c.isalnum() or c in " -_" else "_" for c in pedido_label).strip() or "trabalho"
+        default_name = f"{safe_label}-contexto-producao-px.json"
+
+        destination = filedialog.asksaveasfilename(
+            title="Exportar contexto de produção para o PX Tool Box",
+            defaultextension=".json",
+            filetypes=[("Arquivo JSON", "*.json")],
+            initialfile=default_name,
+        )
+        if not destination:
+            return
+
+        try:
+            write_order_context_document(document, destination)
+        except Exception as e:
+            messagebox.showerror(
+                "Exportar contexto de produção", f"Falha ao gravar o arquivo.\n\n{type(e).__name__}: {e}"
+            )
+            return
+
+        self.status.configure(text=f"Contexto de produção exportado: {destination}")
+        self._show_export_confirmation(destination)
+
+    def _show_export_confirmation(self, destination: str) -> None:
+        """Janela de confirmação pós-exportação do contexto de produção — mostra o caminho e
+        oferece "Mostrar arquivo na pasta"/"Copiar caminho" (ver core.paths.reveal_file_in_explorer).
+        Só aparece depois de uma gravação bem-sucedida (chamado só pelo caminho de sucesso de
+        on_export_order_context) — cancelamento ou falha de gravação nunca chegam aqui. As duas
+        ações são auxiliares: uma falha nelas nunca desfaz a confirmação de que o arquivo foi
+        exportado, só soma um aviso à parte."""
+        win = tk.Toplevel(self)
+        win.title("Contexto de produção exportado")
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.resizable(False, False)
+
+        frame = ttk.Frame(win, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Contexto de produção exportado com sucesso.", font=("", 10, "bold")).pack(
+            anchor="w"
+        )
+
+        path_entry = ttk.Entry(frame, width=70)
+        path_entry.insert(0, destination)
+        path_entry.configure(state="readonly")
+        path_entry.pack(fill="x", pady=(8, 4))
+
+        aux_status = ttk.Label(frame, text="", foreground="#1a7a1a")
+        aux_status.pack(anchor="w", pady=(0, 8))
+
+        def _on_reveal():
+            try:
+                reveal_file_in_explorer(Path(destination))
+                aux_status.configure(text="Pasta aberta com o arquivo selecionado.", foreground="#1a7a1a")
+            except Exception as e:
+                aux_status.configure(
+                    text=f"Não foi possível abrir a pasta ({type(e).__name__}: {e}).",
+                    foreground="#b00020",
+                )
+
+        def _on_copy():
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(destination)
+                aux_status.configure(text="Caminho copiado.", foreground="#1a7a1a")
+            except Exception as e:
+                aux_status.configure(
+                    text=f"Não foi possível copiar o caminho ({type(e).__name__}: {e}).",
+                    foreground="#b00020",
+                )
+
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(fill="x", pady=(0, 8))
+        ttk.Button(btn_row, text="Mostrar arquivo na pasta", command=_on_reveal).pack(side="left")
+        ttk.Button(btn_row, text="Copiar caminho", command=_on_copy).pack(side="left", padx=(8, 0))
+
+        ttk.Label(
+            frame,
+            text='No PX Tool Box DEV, use Produção > "Carregar contexto de produção".',
+            foreground="#6a6a6a",
+            wraplength=420,
+        ).pack(anchor="w", pady=(4, 8))
+
+        ttk.Button(frame, text="Fechar", command=win.destroy).pack(anchor="e")
+
+        win.focus_force()
+
     # ------------------------
     # Loaders
     # ------------------------
@@ -489,7 +837,12 @@ class PXSearchOrdersUI(ttk.Frame):
         self.txt_summary.configure(state="disabled")
 
         self.tree_orders.delete(*self.tree_orders.get_children())
+        self.tree_roll_list.delete(*self.tree_roll_list.get_children())
         self.tree_events.delete(*self.tree_events.get_children())
+
+        self._order_version_options = []
+        self.cmb_order_version.configure(values=[])
+        self.var_order_version.set("")
 
     def _load_summary(self, roll_id: int) -> None:
         try:
@@ -522,6 +875,18 @@ class PXSearchOrdersUI(ttk.Frame):
             count = fabric_row.get("n", 0)
             lines.append(f"  - {fabric}: {meters} m ({count} pedidos)")
 
+        spaces = summary.get("spaces", []) or []
+        if spaces:
+            lines.append("")
+            lines.append(f"Espaços ({len(spaces)}):")
+            for i, space_row in enumerate(spaces, start=1):
+                label = space_row.get("fabric") or "ESPAÇO"
+                meters = format_m(space_row.get("real_m", 0), suffix=False)
+                end_time = space_row.get("end_time", "")
+                n = space_row.get("n", 1)
+                tail = f" — {n} avanços seguidos" if n and n > 1 else ""
+                lines.append(f"  {i}. {label}: {meters} m ({end_time}){tail}")
+
         self._set_summary_text("\n".join(lines))
 
     def _set_summary_text(self, text: str) -> None:
@@ -531,15 +896,42 @@ class PXSearchOrdersUI(ttk.Frame):
         self.txt_summary.configure(state="disabled")
 
     def _load_orders(self, roll_id: int) -> None:
+        """Popula o combobox de versão (Original/Edição N/atual — ver
+        repository.load_roll_order_version_options) e mostra a lista de
+        pedidos da versão ATUAL por padrão (a última da lista)."""
+        try:
+            self._order_version_options = load_roll_order_version_options(roll_id)
+        except Exception as e:
+            self.status.configure(text=f"Falha ao carregar versões do rolo: {type(e).__name__}")
+            self._order_version_options = [{"value": None, "label": "Atual"}]
+
+        labels = [o["label"] for o in self._order_version_options]
+        self.cmb_order_version.configure(values=labels)
+        current_label = self._order_version_options[-1]["label"] if self._order_version_options else ""
+        self.var_order_version.set(current_label)
+
+        version_value = self._order_version_options[-1]["value"] if self._order_version_options else None
+        self._render_orders_tree(roll_id, version_value)
+        self._render_roll_list(roll_id, version_value)
+
+    def _render_orders_tree(self, roll_id: int, version_no: Optional[int]) -> None:
+        """Mostra na aba "Pedidos" os itens da versão escolhida — `None` é
+        a versão atual (orders.id reais, usáveis em "Exportar contexto de
+        produção"); um inteiro é uma cópia histórica guardada (ver
+        core.printlogs_db.get_roll_order_version), sem id real, iid
+        sintético."""
         self.tree_orders.delete(*self.tree_orders.get_children())
+        self._current_order_id = None
+        self._viewing_live_version = version_no is None
+        self.btn_export_order_context.configure(state="disabled")
 
         try:
-            orders = load_roll_orders(roll_id)
+            orders = load_roll_orders_for_version(roll_id, version_no)
         except Exception as e:
             self.status.configure(text=f"Falha ao carregar pedidos: {type(e).__name__}")
             return
 
-        for order in orders:
+        for idx, order in enumerate(orders):
             end_time = str(order.get("end_time", "") or "")
             document = str(order.get("document", "") or "")
             fabric = str(order.get("fabric", "") or "")
@@ -555,9 +947,16 @@ class PXSearchOrdersUI(ttk.Frame):
             except Exception:
                 pass
 
+            # Na versão atual, iid = o id REAL do registro (orders.id) —
+            # sem isso, "Exportar contexto de produção" não teria como
+            # saber qual linha foi selecionada. Numa versão histórica não
+            # há id real (foi uma cópia congelada antes de um
+            # "Atualizar Rolo" apagar as orders antigas) — iid sintético.
+            iid = str(order["id"]) if self._viewing_live_version else f"v{version_no}_{idx}"
             self.tree_orders.insert(
                 "",
                 "end",
+                iid=iid,
                 values=(
                     end_time,
                     document,
@@ -570,6 +969,69 @@ class PXSearchOrdersUI(ttk.Frame):
                     observacao,
                 ),
             )
+
+    def _render_roll_list(self, roll_id: int, version_no: Optional[int]) -> None:
+        """Aba "Lista do rolo" — mesma visão da aba de mesmo nome na
+        Operação: todos os itens (incluindo ESPAÇO) numa lista só, na
+        ordem do comprovante (blocos na ordem de build_blocks, mais
+        recente pro mais antigo dentro de cada bloco)."""
+        self.tree_roll_list.delete(*self.tree_roll_list.get_children())
+
+        try:
+            module = load_roll_module(roll_id)
+            summary = load_roll_summary(roll_id)
+            orders = load_roll_orders_for_version(roll_id, version_no)
+        except Exception as e:
+            self.status.configure(text=f"Falha ao carregar lista do rolo: {type(e).__name__}")
+            return
+
+        machine = str((summary or {}).get("machine") or "")
+        # ESPAÇO (tipo vazio) só é um conceito real na Operação — rolos do
+        # Planejador nunca salvam avanços como order, e lá tipo vazio
+        # nunca significa espaço (ver o comentário real de
+        # get_roll_summary em core/printlogs_db.py).
+        is_operacao = _EDIT_ROUTES.get(module) == "modules.operacao"
+
+        jobs = [
+            OperacaoJob(
+                end_time=_parse_order_end_time(o.get("end_time")),
+                document=str(o.get("document") or ""),
+                fabric=str(o.get("fabric") or ""),
+                pedido=str(o.get("pedido") or ""),
+                height_mm=float(o.get("height_mm", 0.0) or 0.0),
+                vpos_mm=float(o.get("vpos_mm", 0.0) or 0.0),
+                real_mm=float(o.get("real_m", 0.0) or 0.0) * 1000.0,
+                src_file=str(o.get("source_path") or ""),
+                tipo=str(o.get("tipo") or ""),
+                observacao=str(o.get("observacao") or ""),
+                is_gap=is_operacao and not str(o.get("tipo") or "").strip(),
+            )
+            for o in orders
+        ]
+
+        idx = 0
+        for block in build_blocks(jobs, machine):
+            for job in sorted(block.Jobs, key=lambda j: j.end_time, reverse=True):
+                idx += 1
+                doc_txt = f"— {job.fabric or 'ESPAÇO'} —" if job.is_gap else job.document
+                fabric_txt = "" if job.is_gap else job.fabric
+                pedido_txt = "" if job.is_gap else job.pedido
+                tipo_txt = "" if job.is_gap else job.tipo
+                observacao = (job.observacao or "").splitlines()[0] if job.observacao else ""
+
+                self.tree_roll_list.insert(
+                    "", "end",
+                    values=(
+                        idx,
+                        job.end_time.strftime("%d/%m/%Y %H:%M:%S"),
+                        doc_txt,
+                        fabric_txt,
+                        pedido_txt,
+                        tipo_txt,
+                        format_m(job.real_m, suffix=False),
+                        observacao,
+                    ),
+                )
 
     def _load_events(self, roll_id: int) -> None:
         self.tree_events.delete(*self.tree_events.get_children())

@@ -1,5 +1,142 @@
 # Changelog
 
+## [Não lançado]
+### Added
+- Registros → aba "Pedidos": novo botão "Exportar contexto de produção..." (habilitado quando um trabalho de impressão está selecionado na lista). Gera um arquivo `.json` consumido pelo PX Tool Box (ver, no repositório PXToolBox, `docs/integrations/nexor-order-context.md`) — identificador real `rollId` + `job_hash` (confirmado único só dentro desta base de dados, nunca globalmente — ver docstring de `modules/registros/px_export.py`), etiqueta de pedido informada, tecido, tipo e referência do arquivo de origem. O Nexor não tem pedido comercial formal (sem número/cliente/status) — o texto do botão e das mensagens nunca chama isto de "pedido" como identificador, só como "pedido informado" quando o dado existe. Recusa exportar uma linha sem pedido informado (ex.: um avanço/espaço). Somente leitura: não altera nada no rolo/trabalho de impressão, não abre o PX/Corel automaticamente — o usuário escolhe o destino do arquivo e importa manualmente do outro lado.
+- `core/config.py`: novo campo `installation_id` (`PXCoreConfig`) e `get_installation_id()` — id curto e opaco gerado uma única vez por instalação (persistido em `config.json`), incluído na exportação do contexto de produção acima (`source.installationId`, opcional) para desambiguar `rollId`/`job_hash` vindos de instalações diferentes. Nunca um identificador de pedido comercial, nunca enviado a lugar nenhum fora desse arquivo de exportação explícito.
+- `core/printlogs_db.py`: `installation_id` sozinho não resolvia o escopo real de `(rollId, job_hash)` — conferido com testes reais (`tests/test_database_identity.py`): a mesma instalação pode apontar para bases `.db` diferentes (mesmo id, bases diferentes), e `base_dir` pode ser uma pasta de rede compartilhada entre várias instalações (id diferente, mesma base — ver o comentário real do `journal_mode` em `connect()`). Adicionado `get_database_id()` + nova tabela `db_identity` — um id gerado e gravado DENTRO do próprio arquivo `printlogs.db` (protegido contra corrida de criação simultânea), por isso sobrevive a cópia/restauração do arquivo e é igual entre instalações que acessem a mesma base compartilhada. Incluído na exportação como `source.databaseId` (opcional). `installation_id` permanece, documentado com sua garantia real (mais limitada).
+- Registros → confirmação pós-exportação do contexto de produção: depois de gravar o arquivo com sucesso, uma janela mostra o caminho completo e duas ações auxiliares — "Mostrar arquivo na pasta" (`core/paths.reveal_file_in_explorer`, abre o Explorer com o arquivo já selecionado, via lista de argumentos — nunca concatenação de shell) e "Copiar caminho" (área de transferência). Uma falha em qualquer uma das duas nunca desfaz a confirmação de que o arquivo foi exportado — aparece como aviso à parte, na mesma janela. A janela também lembra: "No PX Tool Box DEV, use Produção > Carregar contexto de produção" — exportar aqui nunca significa que o PX recebeu o contexto. Nenhuma infraestrutura de "lembrar última pasta usada" foi criada: não existia nada equivalente no Nexor hoje, e o diretório de exportação é escolha da máquina/usuário a cada vez (nunca uma preferência portátil, nunca usado para localizar o PX automaticamente). Cancelamento ou falha de gravação continuam sem anunciar sucesso, como já era.
+
+## [1.6.39] - 2026-11-05
+### Added
+- Registros → "Detalhes do rolo selecionado": nova aba "Lista do rolo", igual à de mesmo nome na Operação — todos os itens numa lista só, na mesma ordem do comprovante, incluindo ESPAÇO. Segue o combobox "Versão do rolo" (movido pra cima das abas, já que agora afeta tanto "Pedidos" quanto "Lista do rolo").
+### Fixed
+- Operação: os avanços (ESPAÇO) nunca eram salvos no banco ao fechar/atualizar um rolo — ficavam de fora da lista de orders gravada, mesmo o resto do código (resumo com "Espaços", "Agrupar espaços consecutivos" em Configurações) já esperando que eles estivessem lá. Corrigido: agora entram como orders normalmente (com tipo="", a marca de ESPAÇO). Como consequência direta, reabrir um rolo pelos Registros ("Editar rolo") preserva os avanços em vez de perdê-los pra sempre a cada edição, e eles também voltam a aparecer no resumo dos Registros.
+- Registros → "Exportar contexto de produção...": um avanço/espaço tinha "pedido" preenchido (ex.: "ESPAÇO", não vazio) — o aviso de "sem pedido informado" não pegava esse caso. Agora também verifica o "tipo" (sempre vazio num avanço), então um ESPAÇO nunca gera um contexto de produção.
+
+## [1.6.38] - 2026-11-05
+### Fixed
+- Registros → "Detalhes do rolo" → "Pedidos": ao editar um rolo (ex.: só trocar o nome) e escolher uma versão anterior no combobox ("Original"/"Edição N"), a lista aparecia fora de ordem — a cópia guardada dessa versão não era ordenada por EndTime como a versão atual sempre é, saindo na ordem em que os arquivos foram importados em vez da ordem cronológica. Corrigido na gravação (`update_roll_orders`) e também na leitura, pra já corrigir versões salvas antes deste reparo sem precisar editar o rolo de novo.
+
+## [1.6.37] - 2026-11-05
+### Changed
+- Registros → "Detalhes do rolo selecionado" → aba "Pedidos": novo combobox "Versão", que mostra como padrão a versão ATUAL do rolo e deixa escolher qualquer versão anterior (Original, Edição 1, Edição 2...) de um rolo editado — antes só dava pra ver "o original" (sempre a primeira), numa janela separada. "Ver informações originais" saiu do menu de botão direito (que agora só tem "Editar rolo" e "Abrir comprovante"); pra ver uma versão anterior, selecione o rolo e troque o combobox. Numa versão que não é a atual, "Exportar contexto de produção..." fica desabilitado (só existe registro real pra exportar na versão atual).
+- `core/printlogs_db.py`: a tabela `roll_original_orders` (guardava só UMA cópia, "a original") foi substituída por `roll_order_versions` (uma cópia por edição) — migrada automaticamente na primeira vez que o Nexor abrir o banco.
+
+## [1.6.36] - 2026-11-05
+### Added
+- Configurações → "Identificador deste computador": novo campo "Nome do operador deste computador" — quem fecha/atualiza rolos nesse PC. Quando preenchido, aparece no comprovante (PDF e JPG, já que o JPG é renderizado a partir do PDF) como "Operador de fechamento: <nome>"; em branco, a linha simplesmente não aparece.
+### Changed
+- Nome do rolo: o identificador do computador (quando cadastrado) passou a entrar logo depois da máquina, em vez do fim do nome — ex.: `M3_N_05-11-2026_0083` em vez de `M3_05-11-2026_0083_N`.
+### Fixed
+- `core/station.py`: salvar o identificador do computador apagava o nome do operador salvo (e vice-versa) — `write_module_cfg` substitui o arquivo inteiro, não faz merge. Agora cada save lê o config atual antes de alterar só o campo correspondente.
+
+## [1.6.35] - 2026-11-05
+### Fixed
+- Detecção do nome do pedido pelo arquivo: um número solto no fim do nome (sem parênteses) era tratado como "contador de peça" e removido — então "Haras DRB 4.jpeg" virava pedido "Haras DRB", enquanto "Haras DRB 4 (2).jpeg" (mesmo pedido, 2ª peça) virava "Haras DRB 4", já que aí só o "(2)" era removido. Agora só o que está entre parênteses no fim é ignorado; um número solto faz parte do nome do pedido — os dois arquivos acima já voltam a ser reconhecidos como o mesmo pedido "Haras DRB 4".
+
+## [1.6.34] - 2026-11-05
+### Added
+- Configurações → Operação: novo campo "Pasta de logs (geral)", com botões "Procurar…" e "Abrir pasta". É o fallback usado pelo diálogo de "Importar logs" quando a máquina do lote ainda não é conhecida (primeira importação da sessão) ou quando a impressora já conhecida não tem uma pasta própria cadastrada — "Pasta dos logs desta impressora" (Gerenciar Impressoras) continua tendo prioridade quando preenchida.
+
+## [1.6.33] - 2026-11-05
+### Fixed
+- Registros → "Editar rolo": a janela abria pequena demais na primeira vez, porque o tamanho era fixado antes do conteúdo (Operação/Planejador) ser montado e empacotado — o Tk recalculava pelo conteúdo ainda vazio. Agora o tamanho (1200x800, com `minsize` igual) é aplicado só depois do conteúdo já estar montado.
+
+## [1.6.32] - 2026-11-05
+### Added
+- Configurações → Gerenciar Impressoras: novo campo "Pasta dos logs desta impressora". Quando cadastrado, a Operação abre o diálogo de "Importar logs"/"Importar pasta" já nessa pasta (em vez de onde o Windows abriu da última vez), bastando selecionar os arquivos. Na primeira importação do rolo (máquina ainda não detectada), só assume essa pasta automaticamente se houver uma única impressora cadastrada com pasta definida — com mais de uma, não arrisca palpite.
+- Registros → lista de rolos: menu de botão direito com "Editar rolo", "Abrir comprovante" e "Ver informações originais (antes da edição)" — antes só dava pra editar/abrir pelo botão no topo, precisando selecionar a linha primeiro. Nova coluna "Editado" mostra quais rolos já foram alterados depois de fechados.
+- Editar um rolo pelos Registros ("Editar rolo" → Operação/Planejador → "Atualizar Rolo") agora preserva o estado ORIGINAL do rolo (como ele estava no primeiro fechamento) — orders e PDF/comprovante originais continuam acessíveis mesmo depois da edição. "Abrir comprovante" num rolo editado pergunta se quer abrir o comprovante original, o atual, ou os dois; "Ver informações originais" mostra a lista de itens de como o rolo estava antes da edição.
+### Fixed
+- Operação: fechar o mesmo rolo uma segunda vez (depois de importar mais logs na mesma sessão, sem reabrir pelos Registros) criava um rolo NOVO no banco com conteúdo repetido, em vez de atualizar o rolo já salvo — e por isso acusava "possível duplicidade" contra ele mesmo. Agora, depois do primeiro "Fechar Rolo", o botão já vira "Atualizar Rolo" e passa a atualizar o mesmo rolo. O aviso de duplicidade entre rolos também para de considerar o próprio rolo em edição/atualização como "outro rolo".
+
+## [1.6.31] - 2026-11-05
+### Added
+- Operação: a coluna "Tipo" (Pedido, Reposição, Fora do padrão…) passou a aparecer na tabela de itens do comprovante — tanto no PDF quanto no JPG (que é renderizado a partir do mesmo PDF).
+### Changed
+- Operação: o JPG de registro (espelhado, enviado pra impressora) agora é renderizado a partir de um PDF intermediário contínuo — uma única "página" alta, sem as quebras de página do comprovante em papel (cabeçalho e margens repetidos a cada página). O PDF salvo para o usuário abrir/imprimir continua paginado normalmente; só o JPG passou a ser contínuo.
+
+## [1.6.30] - 2026-10-30
+### Added
+- Operação: impressoras que não imprimem um arquivo dedicado de espaço, mas deixam um avanço em branco automático entre arquivos, agora têm esse avanço (lido do próprio log do arquivo real, campo `VPositionMM`) listado como um item de ESPAÇO próprio, com a metragem em branco correta — antes esse avanço não entrava na listagem de forma alguma quando a máquina não tinha arquivo de espaço cadastrado. Funciona em paralelo ao cadastro de "Arquivo(s) de espaço…", que continua existindo para as máquinas que imprimem um arquivo dedicado.
+### Changed
+- Menu lateral: Operação passou a ser o primeiro item (o Nexor agora abre direto nela ao iniciar); Planejador passou para o segundo.
+
+## [1.6.29] - 2026-10-28
+### Added
+- Operação → "Detalhes do bloco" e "Lista do rolo": novo item "Remover item(ns)…" no menu de botão direito (e tecla Delete), com confirmação — remove da tela um ou mais arquivos selecionados por engano (ex.: log importado errado). Só afeta o rolo aberto nesta sessão; nada é apagado do banco até fechar/atualizar o rolo de novo.
+
+## [1.6.28] - 2026-10-28
+### Added
+- Operação: nova aba "Lista do rolo" — mostra todos os arquivos do rolo numa lista única, na mesma ordem em que saem no comprovante (em vez de agrupados por tecido ou por pedido). Duplo clique ou botão direito → "Editar item…" permite corrigir nome do arquivo, tecido, pedido e observação de um arquivo específico (sem afetar outros do mesmo grupo); com mais de um item selecionado, oferece "Observação (em N arquivos)…" como nas outras abas. Qualquer edição feita ali ou nas abas "Ordem do rolo"/"Detalhes do bloco"/"Pedidos no rolo" aparece automaticamente nas demais.
+
+## [1.6.27] - 2026-10-27
+### Changed
+- Manual: conteúdo bem mais detalhado — passo a passo completo de todo botão/campo do Planejador (parâmetros avançados, editar item, tecidos, ordem dos tecidos, pedaços de tecido) e da Operação (detecção automática de máquina, duplicidade, log adicional, edição em lote), filtros e abas de Registros, e um tópico novo dedicado ao editor visual de "Tipos de impressão" (antes só tinha um resumo em Configurações).
+
+## [1.6.26] - 2026-10-27
+### Changed
+- Operação → importar logs: quando o computador de origem bate, sem ambiguidade, com uma impressora cadastrada (campo "Computador desta impressora"), a máquina é usada direto — não abre mais o diálogo "Selecionar máquina" pra confirmar. O status mostra "(detectada automaticamente)" nesse caso. Sem detecção (computador não cadastrado, ou logs de mais de um computador no mesmo lote), o diálogo continua aparecendo normalmente.
+
+## [1.6.25] - 2026-10-27
+### Added
+- Operação: novo botão "Abrir comprovante", ao lado de "Fechar Rolo"/"Atualizar Rolo" — abre direto o PDF que acabou de ser gerado, sem precisar ir em Registros de produção. Fica desativado até fechar ou atualizar o rolo nessa sessão, e volta a ficar desativado em "Mais ações → Limpar".
+### Fixed
+- Tela "Manual": corrigido `ModuleNotFoundError: No module named 'modules.manual'` no .exe empacotado — o módulo não estava na lista de hiddenimports do PyInstaller, então não ia parar dentro do build (só funcionava rodando via `python Nexor.py`).
+
+## [1.6.24] - 2026-10-26
+### Added
+- Operação → "Detalhes do bloco": agora é possível selecionar vários arquivos de uma vez (Ctrl+clique ou Shift+clique) e abrir "Observação…" pelo botão direito pra gravar a mesma anotação em todos eles de uma vez, em vez de repetir arquivo por arquivo.
+
+## [1.6.23] - 2026-10-26
+### Added
+- Gerenciamento → Impressoras: novo campo "Computador desta impressora" (nome do PC que gera os logs dela — botão "Detectar de um log…" preenche sozinho a partir de um arquivo .txt de exemplo). Com isso cadastrado, a Operação sugere automaticamente a máquina certa ao importar logs, em vez do operador ter que escolher na mão toda vez — detecta pelo campo "ComputerName" dentro do log.
+- Configurações → Diretório de trabalho: novo campo "Identificador deste computador" (ex.: PC1, PC2), salvo localmente em cada PC. Quando preenchido, entra no fim do nome do rolo gerado automaticamente (ex.: M1_26-10-2026_0046_PC1) — reforço extra contra dois computadores fecharem rolos com o mesmo número ao usar o Nexor em rede com mais de um PC apontando pro mesmo banco de dados compartilhado.
+
+## [1.6.22] - 2026-10-26
+### Changed
+- Operação → "Editar pedido"/"Editar tecido" (grupo com mais de um arquivo de origem): trocado o fluxo de "selecionar arquivo(s) → digitar nome → Aplicar → repetir → Fechar" por um formulário com um campo de nome por arquivo, todos visíveis de uma vez — corrige todos e clica em "Salvar" uma única vez, sem precisar repetir o ciclo pra cada arquivo.
+
+## [1.6.21] - 2026-10-26
+### Fixed
+- Operação → "Editar pedido" e "Editar tecido": quando o grupo juntava mais de um arquivo de origem diferente (ex.: vários pedidos detectados como "DESCONHECIDO" que na verdade eram pedidos distintos), renomear salvava o mesmo nome novo pra TODOS os arquivos do grupo de uma vez. Agora, nesse caso, o diálogo lista os arquivos distintos do grupo e deixa selecionar um ou mais e aplicar um nome só a eles, documento por documento, até fechar — permitindo corrigir cada pedido/tecido individualmente.
+- Operação, Planejador e outras telas roláveis: ao rolar a roda do mouse sobre um diálogo aberto (ex.: Editar pedido), a página por trás também rolava junto (sem o operador perceber, já que o diálogo cobre a tela), e ao fechar o diálogo sobrava um espaço em branco no topo da página. Corrigido ignorando o scroll da página enquanto um diálogo modal estiver aberto.
+
+## [1.6.20] - 2026-10-23
+### Added
+- Nova seção "Manual", no menu lateral (abaixo de Gerenciamento) — explica passo a passo como usar o Planejador, a Operação e os Registros de produção, pra que serve cada opção de Configurações, os cadastros de Impressoras/Tecidos/Pedaços de tecido, e tira dúvidas comuns (o que é ESPAÇO, aviso de duplicidade, diferença entre "Fechar Rolo" e "Atualizar Rolo" etc.).
+
+## [1.6.19] - 2026-10-23
+### Changed
+- Configurações → Operação: nova opção "Agrupar espaços consecutivos no Resumo", na seção "Arquivos de espaço". Desmarcada (padrão, comportamento da versão anterior): cada avanço (ESPAÇO) aparece numa linha no Resumo dos Registros. Marcada: avanços seguidos — sem nenhum tecido real entre eles na sequência do rolo — somam numa única linha; um avanço separado de outro por um tecido real continua em linha própria mesmo assim.
+
+## [1.6.18] - 2026-10-23
+### Changed
+- Configurações: "Modo do PDF" e "JPG espelhado" eram configurados duas vezes (uma em Operação, outra em Planejador) e podiam ficar dessincronizados. Agora é uma única seção "Exportação", global para os dois módulos.
+- Removida a opção "Usar pasta/arquivo da impressora para o JPG espelhado" — isso já é decidido automaticamente pelo cadastro de cada impressora (pasta/arquivo de saída do JPG, em Impressoras): se a impressora usada tiver isso configurado, o JPG espelhado vai direto pra lá; senão, usa a pasta padrão do módulo.
+- Registros de produção: no Resumo, os avanços entre tecidos (ESPAÇO) de rolos da Operação não entram mais agrupados num total único — ficam listados item a item, porque os operadores da calandra conferem um por um e um total agrupado confundia a contagem. Tecidos continuam agrupados por metragem, normalmente.
+
+## [1.6.17] - 2026-10-23
+### Changed
+- Operação e Planejador: removido o diálogo "Exportar rolo" — o botão de destaque na tela principal agora é "Fechar Rolo" (ou "Atualizar Rolo" ao editar um rolo já registrado) e já gera o PDF normal + JPG espelhado e grava no banco direto, sem precisar abrir nenhuma janela. As exportações parciais (só PDF ou só JPG) saíram de tela; "Fechar Rolo" sempre gera os dois.
+- Os botões "Abrir pasta PDF (comprovantes)" e "Abrir pasta JPG" que ficavam no diálogo removido passaram para Configurações, na seção de exportação de cada módulo (Operação e Planejador).
+
+### Added
+- Registros de produção: novo botão "Abrir comprovante", ao lado de "Editar rolo" — abre direto o PDF do rolo selecionado na lista.
+
+## [1.6.16] - 2026-10-22
+### Fixed
+- Operação: rótulos "Qtd Pedidos" (Resumo por tecido) e "Qtd Peças" (Pedidos no rolo) — no PDF e nas telas — estavam errados, já que a contagem é sempre de arquivos/jobs, não de pedidos nem de peças (ex.: 1 pedido com 3 arquivos aparecia como "3" em "Qtd Pedidos"). Renomeados para "Arquivos" em todos os lugares (PDF "Ordem do Rolo", lista de tecidos, lista de pedidos e título de detalhe do tecido).
+
+## [1.6.15] - 2026-10-22
+### Changed
+- A opção "Orientação do JPG" (0°, 90°, 180°, 270°) virou um campo por impressora no cadastro de Impressoras, em vez de um único padrão global em Configurações — cada máquina pode precisar do JPG girado de um jeito diferente.
+
+## [1.6.14] - 2026-10-21
+### Added
+- Nova opção "Orientação do JPG" (0°, 90°, 180°, 270°) para o JPG de registro da impressora — antes saía sempre na mesma orientação (0°), agora dá pra girar conforme o que a impressora espera receber. (Na v1.6.15 essa opção foi movida para o cadastro de Impressoras, por máquina.)
+
 ## [1.6.13] - 2026-10-21
 ### Added
 - Configurações → Tipos de impressão: cada regra ganhou a opção "Nome do pedido" — "Detectar pelo nome do arquivo" (padrão, comportamento de sempre) ou "Nome fixo", com um nome configurável pra usar em todo arquivo daquele tipo (ex.: Reposição → sempre "Variados", em vez de ficar "DESCONHECIDO" quando o nome do arquivo não tem pedido de verdade). A lista de regras mostra o modo escolhido em cada uma.

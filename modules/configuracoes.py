@@ -8,14 +8,19 @@ avisa a página via `on_saved(modulo)` para recarregar sem reiniciar.
 """
 from __future__ import annotations
 
+import os
 import re
 import tkinter as tk
-from tkinter import messagebox, ttk
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Dict, List, Optional
 
-from core.config import read_module_cfg, write_module_cfg
+from core.config import load_config, read_module_cfg, write_module_cfg
+from core.export_config import EXPORT_DEFAULTS, load_export_cfg, save_export_cfg
 from core.fabrics import known_fabric_names_with_aliases
 from core.operators import normalize_operators
+from core.paths import pdf_rolls_dir, print_jpg_dir
 from core.print_pattern import (
     ALL_KINDS,
     KIND_FIXED,
@@ -52,6 +57,8 @@ from core.ui import card, dialog_header
 from modules.operacao.config import load_cfg as load_operacao_cfg
 from modules.operacao.config import save_cfg as save_operacao_cfg
 from modules.operacao.parser import normalize_space_entries
+from modules.operacao.paths import pdf_dir as operacao_pdf_dir
+from modules.operacao.paths import jpg_dir as operacao_jpg_dir
 
 # Tipos de bloco que o editor visual oferece no seletor por linha —
 # "Separador" é modelado como linha própria (combobox de caractere) e
@@ -75,12 +82,9 @@ _LABEL_TO_PEDIDO_MODE: Dict[str, str] = {v: k for k, v in PEDIDO_MODE_LABELS.ite
 PLANNER_MODULE = "Planejador"
 
 # Valores iniciais do Planejador — eram fixos no código da tela.
+# Os padrões de exportação (Modo do PDF, JPG espelhado, DPI) não ficam mais
+# aqui — são globais, ver core/export_config.py.
 PLANNER_DEFAULTS: Dict[str, object] = {
-    "report_mode_default": "full",
-    "mirror_jpg_width_mode": "17",
-    "mirror_jpg_width_cm_custom": 17.0,
-    "mirror_jpg_dpi": 300,
-    "use_printer_jpg_path_default": False,
     "dpi": 150.0,
     "axis": "altura",
     "setup_min": 2.0,
@@ -102,6 +106,45 @@ def load_planner_cfg() -> dict:
 
 def save_planner_cfg(cfg: dict) -> None:
     write_module_cfg(PLANNER_MODULE, cfg)
+
+
+def _planejador_base_dir() -> Path:
+    cfg = load_config()
+    return Path(getattr(cfg, "base_dir", None) or r"C:\PXCore")
+
+
+def planejador_pdf_dir(dt: datetime) -> Path:
+    return pdf_rolls_dir(_planejador_base_dir(), PLANNER_MODULE, dt)
+
+
+def planejador_jpg_dir(dt: datetime) -> Path:
+    return print_jpg_dir(_planejador_base_dir(), PLANNER_MODULE, dt)
+
+
+def _open_export_folder(folder: Path) -> None:
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(folder))
+    except Exception:
+        messagebox.showerror("Pasta", "Não foi possível abrir a pasta.")
+
+
+def _open_existing_folder(folder: str) -> None:
+    """Como _open_export_folder, mas pra uma pasta EXTERNA (ex.: onde a
+    impressora grava os logs) — nunca cria a pasta se não existir, já que
+    aqui "não existe" normalmente significa caminho errado ou pasta de
+    rede fora do ar, não uma pasta nova do Nexor pra criar."""
+    folder = (folder or "").strip()
+    if not folder:
+        messagebox.showwarning("Pasta", "Informe o caminho da pasta primeiro.")
+        return
+    if not Path(folder).is_dir():
+        messagebox.showerror("Pasta", f"Pasta não encontrada:\n{folder}")
+        return
+    try:
+        os.startfile(folder)
+    except Exception:
+        messagebox.showerror("Pasta", "Não foi possível abrir a pasta.")
 
 
 def _num(text: str, label: str, *, minimum: float = 0.0, maximum: Optional[float] = None) -> float:
@@ -151,17 +194,19 @@ def _export_defaults_rows(parent: ttk.Frame, cfg: dict, row: int) -> Callable[[]
     var_jpg.trace_add("write", _custom_state)
     _custom_state()
 
-    var_printer_path = tk.BooleanVar(value=bool(cfg.get("use_printer_jpg_path_default", False)))
-    ttk.Checkbutton(
-        parent, text="Usar pasta/arquivo da impressora para o JPG espelhado",
-        variable=var_printer_path,
+    ttk.Label(
+        parent,
+        text=(
+            "O JPG espelhado vai direto para a pasta/arquivo configurado na impressora usada "
+            "(cadastro de Impressoras), quando houver; sem isso, usa a pasta padrão do módulo."
+        ),
+        style="Muted.TLabel", wraplength=700, justify="left",
     ).grid(row=row + 2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
     def collect() -> dict:
         out = {
             "report_mode_default": var_mode.get(),
             "mirror_jpg_width_mode": var_jpg.get(),
-            "use_printer_jpg_path_default": bool(var_printer_path.get()),
         }
         if var_jpg.get() == "custom":
             out["mirror_jpg_width_cm_custom"] = _num(var_custom.get(), "Largura do JPG", minimum=8, maximum=40)
@@ -998,15 +1043,87 @@ def build_print_types_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.L
 
 
 # ---------------------------------------------------------------------------
-# Operação
+# Exportação (global — Operação e Planejador)
 # ---------------------------------------------------------------------------
-def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.LabelFrame:
-    box = card(parent, "Operação · padrões de exportação e arquivos de espaço", padding=14)
-    cfg = load_operacao_cfg()
+def build_exportacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.LabelFrame:
+    box = card(parent, "Exportação · padrões de PDF e JPG (Operação e Planejador)", padding=14)
+    ttk.Label(
+        box,
+        text="Vale para os dois módulos — não precisa configurar duas vezes.",
+        style="Muted.TLabel", wraplength=860, justify="left",
+    ).pack(anchor="w", pady=(0, 10))
 
+    cfg = load_export_cfg()
     grid = ttk.Frame(box)
     grid.pack(fill="x")
     collect_export = _export_defaults_rows(grid, cfg, 0)
+
+    def save() -> bool:
+        try:
+            export = collect_export()
+        except ValueError as e:
+            messagebox.showerror("Exportação", str(e))
+            return False
+        current = load_export_cfg()
+        current.update(export)
+        save_export_cfg(current)
+        on_saved("Operação")
+        on_saved("Planejador")
+        return True
+
+    box.save = save
+    return box
+
+
+# ---------------------------------------------------------------------------
+# Operação
+# ---------------------------------------------------------------------------
+def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.LabelFrame:
+    box = card(parent, "Operação · arquivos de espaço e operadores", padding=14)
+    cfg = load_operacao_cfg()
+
+    folders_row = ttk.Frame(box)
+    folders_row.pack(fill="x", pady=(8, 0))
+    ttk.Button(
+        folders_row, text="Abrir pasta PDF (comprovantes)",
+        command=lambda: _open_export_folder(operacao_pdf_dir(datetime.now())),
+    ).pack(side="left")
+    ttk.Button(
+        folders_row, text="Abrir pasta JPG (operação)",
+        command=lambda: _open_export_folder(operacao_jpg_dir(datetime.now())),
+    ).pack(side="left", padx=(8, 0))
+
+    ttk.Label(box, text="Pasta de logs (geral)", style="PanelStrong.TLabel").pack(anchor="w", pady=(12, 0))
+    ttk.Label(
+        box,
+        text=(
+            "Pasta usada pra abrir o diálogo de \"Importar logs\" — quando a máquina do lote "
+            "ainda não é conhecida, ou quando a impressora já conhecida não tem uma pasta "
+            "própria cadastrada (ver Gerenciar Impressoras → \"Pasta dos logs desta "
+            "impressora\", que tem prioridade sobre esta aqui quando preenchida)."
+        ),
+        style="Muted.TLabel", wraplength=860, justify="left",
+    ).pack(anchor="w", pady=(2, 6))
+
+    log_dir_row = ttk.Frame(box)
+    log_dir_row.pack(fill="x", pady=(0, 6))
+    var_general_log_dir = tk.StringVar(value=str(cfg.get("general_log_dir", "") or ""))
+    ttk.Entry(log_dir_row, textvariable=var_general_log_dir, width=56).pack(
+        side="left", fill="x", expand=True
+    )
+
+    def on_browse_general_log_dir() -> None:
+        folder = filedialog.askdirectory(title="Pasta geral dos logs de impressão")
+        if folder:
+            var_general_log_dir.set(folder)
+
+    ttk.Button(log_dir_row, text="Procurar…", command=on_browse_general_log_dir).pack(
+        side="left", padx=(8, 0)
+    )
+    ttk.Button(
+        log_dir_row, text="Abrir pasta",
+        command=lambda: _open_existing_folder(var_general_log_dir.get()),
+    ).pack(side="left", padx=(8, 0))
 
     ttk.Label(box, text="Arquivos de espaço", style="PanelStrong.TLabel").pack(anchor="w", pady=(12, 0))
     ttk.Label(
@@ -1018,6 +1135,22 @@ def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Labe
         ),
         style="Muted.TLabel", wraplength=860, justify="left",
     ).pack(anchor="w", pady=(2, 6))
+
+    var_group_spaces = tk.BooleanVar(value=bool(cfg.get("group_consecutive_spaces", False)))
+    ttk.Checkbutton(
+        box,
+        text="Agrupar espaços consecutivos no Resumo (soma a metragem de avanços seguidos numa linha só)",
+        variable=var_group_spaces,
+    ).pack(anchor="w", pady=(0, 6))
+    ttk.Label(
+        box,
+        text=(
+            "Desmarcado (padrão): cada avanço aparece numa linha, pra bater com a conferência "
+            "manual na calandra. Marcado: avanços seguidos (sem tecido real entre eles) somam "
+            "numa única linha."
+        ),
+        style="Muted.TLabel", wraplength=860, justify="left",
+    ).pack(anchor="w", pady=(0, 6))
 
     entries: List[dict] = normalize_space_entries(cfg.get("space_filenames", []))
 
@@ -1184,15 +1317,11 @@ def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Labe
     ttk.Button(op_btns, text="Remover", command=remove_operator).pack(side="left")
 
     def save() -> bool:
-        try:
-            export = collect_export()
-        except ValueError as e:
-            messagebox.showerror("Operação", str(e))
-            return False
         current = load_operacao_cfg()
-        current.update(export)
         current["space_filenames"] = list(entries)
+        current["group_consecutive_spaces"] = bool(var_group_spaces.get())
         current["operators"] = list(operators)
+        current["general_log_dir"] = var_general_log_dir.get().strip()
         save_operacao_cfg(current)
         on_saved("Operação")
         return True
@@ -1207,7 +1336,7 @@ def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Labe
 # Planejador
 # ---------------------------------------------------------------------------
 def build_planejador_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.LabelFrame:
-    box = card(parent, "Planejador · valores padrão de cálculo e exportação", padding=14)
+    box = card(parent, "Planejador · valores padrão de cálculo", padding=14)
     ttk.Label(
         box,
         text=(
@@ -1256,9 +1385,16 @@ def build_planejador_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.La
     ttk.Checkbutton(grid, text="Ordem automática dos tecidos (menores no fim)",
                     variable=var_auto).grid(row=5, column=1, columnspan=3, sticky="w")
 
-    export_grid = ttk.Frame(box)
-    export_grid.pack(fill="x", pady=(4, 0))
-    collect_export = _export_defaults_rows(export_grid, cfg, 0)
+    folders_row = ttk.Frame(box)
+    folders_row.pack(fill="x", pady=(8, 0))
+    ttk.Button(
+        folders_row, text="Abrir pasta PDF (comprovantes)",
+        command=lambda: _open_export_folder(planejador_pdf_dir(datetime.now())),
+    ).pack(side="left")
+    ttk.Button(
+        folders_row, text="Abrir pasta JPG (operação)",
+        command=lambda: _open_export_folder(planejador_jpg_dir(datetime.now())),
+    ).pack(side="left", padx=(8, 0))
 
     def save() -> bool:
         try:
@@ -1266,7 +1402,6 @@ def build_planejador_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.La
                 key: _num(vars_[key].get(), label, minimum=mn, maximum=mx)
                 for key, label, mn, mx in numeric
             }
-            values.update(collect_export())
         except ValueError as e:
             messagebox.showerror("Planejador", str(e))
             return False

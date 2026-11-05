@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -16,7 +16,6 @@ _RE_TRAILING_EXT = re.compile(r"\.[A-Za-z0-9]{2,5}$")
 # Parênteses no fim do nome são controle de separação (ex.: "(Argentina)", "(Brasil)", "(13)"),
 # não fazem parte da identidade do pedido — "Salum 12 (Argentina)" e "Salum 12 (Brasil)" são o mesmo pedido.
 _RE_TRAILING_PAREN = re.compile(r"\s*\([^)]*\)\s*$")
-_RE_TRAILING_NUM = re.compile(r"\s+\d+\s*$")
 
 
 def parse_datetime(s: str) -> Optional[datetime]:
@@ -75,12 +74,14 @@ def pedido_from_document(doc: str) -> str:
     raw = " - ".join(parts[2:]).strip()
     raw = _RE_TRAILING_EXT.sub("", raw)
 
-    # Sem parênteses, um número solto no fim (ex.: "Escolinha Reis 21") é tratado
-    # como contador de peça e é removido.
-    raw, had_paren = _strip_trailing_parens(raw)
-
-    if not had_paren:
-        raw = _RE_TRAILING_NUM.sub("", raw)
+    # Só o que estiver entre parênteses no fim é ignorado na identidade do
+    # pedido (ver _strip_trailing_parens) — um número solto no fim, sem
+    # parênteses, pode ser parte do próprio nome do pedido (ex.: "Haras DRB
+    # 4" é o pedido inteiro, não "Haras DRB" + contador "4"), então não é
+    # removido. "09-11 - Ribana - Haras DRB 4.jpeg" e "09-11 - Dryfit -
+    # Haras DRB 4 (2).jpeg" são o mesmo pedido "Haras DRB 4" — o segundo só
+    # tem "(2)" de observação (2ª peça), que o paren-strip já cobre.
+    raw, _had_paren = _strip_trailing_parens(raw)
 
     raw = raw.strip()
 
@@ -148,6 +149,31 @@ def match_space_entry(document: str, space_entries: Optional[Iterable[dict]]) ->
         if _normalize_doc_name(str(entry.get("filename", ""))) == norm_doc:
             return entry
     return None
+
+
+def read_log_general_fields(path: str) -> Dict[str, str]:
+    """Lê só a seção [General] de um log .txt (ex.: ComputerName, Document,
+    EndTime), sem exigir que o resto do arquivo seja válido — usada pra
+    identificar/pré-visualizar o arquivo (ex.: detectar automaticamente a
+    impressora de origem pelo ComputerName) antes do parse completo."""
+    try:
+        txt = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return {}
+
+    section = None
+    general: Dict[str, str] = {}
+    for line in txt:
+        msec = _RE_SECTION.match(line)
+        if msec:
+            section = msec.group(1).strip()
+            continue
+        mkv = _RE_KV.match(line)
+        if not mkv:
+            continue
+        if section == "General":
+            general[mkv.group(1).strip()] = mkv.group(2).strip()
+    return general
 
 
 def parse_log_txt(
@@ -231,6 +257,38 @@ def parse_log_txt(
         operador=operador,
         width_mm=width_mm,
         start_time=start_dt,
+    )
+
+
+def build_auto_gap_job(job: Job) -> Optional[Job]:
+    """Algumas impressoras não imprimem um arquivo dedicado pra marcar o
+    espaço entre tecidos — elas deixam esse avanço em branco automaticamente
+    e só registram o quanto avançaram no próprio log do arquivo real
+    seguinte, no campo VPositionMM. Quando isso acontece (`job.vpos_mm > 0`
+    num item que não é ele mesmo um arquivo de espaço cadastrado), esse
+    avanço precisa entrar na listagem como um item de ESPAÇO próprio —
+    senão aquela metragem em branco do rolo fica invisível. Retorna None
+    quando não há avanço a registrar (vpos_mm == 0 ou o próprio job já é
+    um ESPAÇO)."""
+    if job.is_gap or job.vpos_mm <= 0:
+        return None
+
+    gap_end = job.start_time or (job.end_time - timedelta(seconds=1))
+
+    return Job(
+        end_time=gap_end,
+        document=f"{job.document} (avanço)",
+        fabric="ESPAÇO",
+        pedido="ESPAÇO",
+        height_mm=job.vpos_mm,
+        vpos_mm=0.0,
+        real_mm=job.vpos_mm,
+        src_file=f"{job.src_file}::gap",
+        is_gap=True,
+        tipo="",
+        operador="",
+        width_mm=0.0,
+        start_time=None,
     )
 
 

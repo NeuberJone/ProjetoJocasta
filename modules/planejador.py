@@ -28,7 +28,9 @@ from core.config import (
     load_config as load_pxcore_config,
     module_config_path,
 )
+from core.export_config import load_export_cfg
 from core.migrate import migrate_legacy_path
+from core.roll_naming import build_roll_name
 from core.paths import pdf_rolls_dir, print_jpg_dir, temp_module_dir
 from core.printlogs_db import (
     OrderRow,
@@ -624,6 +626,13 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     canvas.bind("<Configure>", _on_canvas_configure)
 
     def _on_mousewheel(event):
+        # Ignora o scroll enquanto algum diálogo modal tiver o grab do Tk —
+        # sem isso, rolar a roda sobre um diálogo aberto também rola a
+        # página por trás dele (o cursor não "sai" do canvas quando o
+        # diálogo só aparece por cima, sem mover o mouse), deixando um
+        # espaço em branco no topo da página ao fechar o diálogo.
+        if canvas.grab_current() is not None:
+            return
         canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _bind_mousewheel(_evt=None):
@@ -697,13 +706,13 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     var_gap_files = tk.StringVar(value=_cfg_num("gap_files"))
     var_roll_other = tk.StringVar(value=_cfg_num("roll_other"))
 
+    # Modo do PDF e JPG espelhado são padrões globais definidos em
+    # Configurações (Operação e Planejador usam os mesmos).
+    export_cfg = load_export_cfg()
     var_batch_name = tk.StringVar(value="")
-    var_report_mode = tk.StringVar(value=mcfg.get("report_mode_default", "full"))
-    var_jpg_mode = tk.StringVar(value=mcfg.get("mirror_jpg_width_mode", "17"))
-    var_jpg_custom = tk.StringVar(value=str(mcfg.get("mirror_jpg_width_cm_custom", 17.0)))
-    var_use_printer_jpg_path = tk.BooleanVar(
-        value=bool(mcfg.get("use_printer_jpg_path_default", False))
-    )
+    var_report_mode = tk.StringVar(value=export_cfg.get("report_mode_default", "full"))
+    var_jpg_mode = tk.StringVar(value=export_cfg.get("mirror_jpg_width_mode", "17"))
+    var_jpg_custom = tk.StringVar(value=str(export_cfg.get("mirror_jpg_width_cm_custom", 17.0)))
 
     fabric_options = sorted(set(list(fabrics_map.keys()) + ["Outro"]))
     var_fabric_pick = tk.StringVar(value="Dryfit" if "Dryfit" in fabric_options else fabric_options[0])
@@ -809,6 +818,42 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         style="Muted.TLabel",
     )
     drop_label.grid(row=2, column=0, columnspan=6, sticky="w", padx=10, pady=(2, 4))
+
+    row_batch = ttk.Frame(plan_box)
+    row_batch.grid(row=3, column=0, columnspan=7, sticky="ew", padx=10, pady=(4, 0))
+    ttk.Label(row_batch, text="Nome do lote").pack(side="left")
+    ttk.Entry(row_batch, textvariable=var_batch_name, width=28).pack(side="left", padx=(6, 6))
+    ttk.Button(row_batch, text="Atualizar nome", command=lambda: on_refresh_batch_name()).pack(
+        side="left"
+    )
+    ttk.Button(
+        row_batch,
+        text=("Atualizar Rolo" if edit_roll_id is not None else "Fechar Rolo"),
+        style="Accent.TButton",
+        command=lambda: on_export("both"),
+    ).pack(side="right")
+
+    var_export_summary = tk.StringVar()
+    ttk.Label(plan_box, textvariable=var_export_summary, style="Muted.TLabel", justify="left").grid(
+        row=4, column=0, columnspan=7, sticky="w", padx=10, pady=(2, 0)
+    )
+
+    def _update_export_summary(*_a):
+        mode_txt = "Completo" if var_report_mode.get() == "full" else "Resumido"
+        jpg_mode = var_jpg_mode.get()
+        jpg_txt = (
+            f"{var_jpg_custom.get()} cm (personalizado)" if jpg_mode == "custom" else f"{jpg_mode} cm"
+        )
+        pr = find_printer_by_display_name(var_printer.get())
+        printer_txt = "pasta da impressora" if (pr and pr.jpg_output_dir.strip()) else "pasta padrão"
+        var_export_summary.set(
+            f"Modo do PDF: {mode_txt} · JPG espelhado: {jpg_txt} ({printer_txt})"
+            "  —  altere em Configurações"
+        )
+
+    for _v in (var_report_mode, var_jpg_mode, var_jpg_custom, var_printer):
+        _v.trace_add("write", _update_export_summary)
+    _update_export_summary()
 
     if _HAS_DND:
         try:
@@ -2713,13 +2758,15 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     def _auto_batch_name() -> str:
         machine = var_printer.get() or "M?"
-        now = datetime.now()
         # Número sequencial atômico (banco compartilhado) em vez do horário —
         # evita duplicar entre computadores diferentes. Se não conseguir
         # (ex.: pasta de rede fora do ar), propaga o erro — não cai de volta
-        # pro horário, que reintroduziria o risco de duplicata.
+        # pro horário, que reintroduziria o risco de duplicata. O
+        # identificador deste computador (Configurações → Diretório de
+        # trabalho), quando configurado, entra no fim do nome como reforço
+        # extra contra colisão entre PCs diferentes.
         seq = next_roll_sequence()
-        return f"{machine}_{now.strftime('%d-%m-%Y')}_{seq:04d}"
+        return build_roll_name(machine, seq)
 
     def on_refresh_batch_name():
         try:
@@ -2753,19 +2800,18 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         return value
 
     def _resolve_mirror_jpg_path(out_jpg_dir: Path, base_name: str, machine: str) -> Path:
-        if var_use_printer_jpg_path.get():
-            pr = find_printer_by_display_name(machine)
-            if pr and pr.jpg_output_dir.strip():
-                folder = Path(pr.jpg_output_dir.strip())
-                folder.mkdir(parents=True, exist_ok=True)
+        pr = find_printer_by_display_name(machine)
+        if pr and pr.jpg_output_dir.strip():
+            folder = Path(pr.jpg_output_dir.strip())
+            folder.mkdir(parents=True, exist_ok=True)
 
-                filename = pr.jpg_output_filename.strip()
-                if filename:
-                    if not filename.lower().endswith((".jpg", ".jpeg")):
-                        filename += ".jpg"
-                    return folder / filename
+            filename = pr.jpg_output_filename.strip()
+            if filename:
+                if not filename.lower().endswith((".jpg", ".jpeg")):
+                    filename += ".jpg"
+                return folder / filename
 
-                return versioned_path(folder / f"{base_name}.jpg")
+            return versioned_path(folder / f"{base_name}.jpg")
 
         return versioned_path(out_jpg_dir / f"{base_name}.jpg")
 
@@ -2823,14 +2869,17 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             messagebox.showerror("JPG", str(e))
             return
 
-        dpi = int(mcfg.get("mirror_jpg_dpi", 300))
+        dpi = int(load_export_cfg().get("mirror_jpg_dpi", 300))
+        printer_for_rotation = find_printer_by_display_name(machine)
+        rotation = printer_for_rotation.jpg_rotation if printer_for_rotation else 0
 
         scrap_labels_snapshot = dict(roll_scrap_labels)
 
-        # Quando a pasta/arquivo da impressora está configurado, esse é o
-        # único arquivo que ela recebe — por isso ele traz o espelhado
-        # seguido do normal (não espelhado), em vez de só o espelhado.
-        use_printer_folder = var_use_printer_jpg_path.get()
+        # Quando a pasta/arquivo da impressora está configurado (cadastro de
+        # Impressoras), esse é o único arquivo que ela recebe — por isso ele
+        # traz o espelhado seguido do normal (não espelhado), em vez de só o
+        # espelhado.
+        use_printer_folder = bool(printer_for_rotation and printer_for_rotation.jpg_output_dir.strip())
 
         try:
             if which == "normal":
@@ -2851,13 +2900,13 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                     )
                     mirror_and_normal_to_jpg_scaled(
                         tmp_normal_pdf, tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
                     )
                     Path(tmp_normal_pdf).unlink(missing_ok=True)
                 else:
                     pdf_all_pages_to_jpg_scaled(
                         tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
                     )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
@@ -2874,12 +2923,12 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 if use_printer_folder:
                     mirror_and_normal_to_jpg_scaled(
                         normal_path, tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
                     )
                 else:
                     pdf_all_pages_to_jpg_scaled(
                         tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95,
+                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
                     )
                 Path(tmp_mirror_pdf).unlink(missing_ok=True)
 
@@ -3028,59 +3077,8 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 "Exportado", f"JPG (operação):\n{out_jpg_dir}\n\n{Path(mirror_path).name}{db_status}"
             )
 
-    # ---------------- Exportar… (nome do lote, formato, PDF/JPG) ----------------
-    def open_export_dialog():
-        dlg = tk.Toplevel(frame)
-        dlg.title("Exportar")
-        dlg.transient(frame.winfo_toplevel())
-        dlg.grab_set()
-
-        frm = ttk.Frame(dlg, padding=14)
-        frm.pack(fill="both", expand=True)
-        dialog_header(
-            frm, "Exportar PDF / JPG espelhado", "Nome do lote e formato de exportação."
-        ).pack(fill="x")
-
-        row1 = ttk.Frame(frm)
-        row1.pack(fill="x", pady=(10, 4))
-        ttk.Label(row1, text="Nome do lote:").pack(side="left")
-        ttk.Entry(row1, textvariable=var_batch_name, width=28).pack(side="left", padx=(6, 6))
-        ttk.Button(row1, text="Atualizar nome", command=on_refresh_batch_name).pack(side="left")
-
-        mode_txt = "Completo" if var_report_mode.get() == "full" else "Resumido"
-        jpg_mode = var_jpg_mode.get()
-        jpg_txt = f"{var_jpg_custom.get()} cm (personalizado)" if jpg_mode == "custom" else f"{jpg_mode} cm"
-        printer_txt = "pasta da impressora" if var_use_printer_jpg_path.get() else "pasta padrão"
-        ttk.Label(
-            frm,
-            text=(
-                f"Modo do PDF: {mode_txt} · JPG espelhado: {jpg_txt} ({printer_txt})"
-                "  —  altere em Configurações"
-            ),
-            style="Muted.TLabel", justify="left",
-        ).pack(anchor="w", pady=(0, 10))
-
-        is_editing = edit_roll_id is not None
-        actions = ttk.Frame(frm)
-        actions.pack(fill="x")
-        ttk.Button(
-            actions, text=("Atualizar PDF Normal" if is_editing else "Exportar PDF Normal"),
-            command=lambda: on_export("normal"),
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
-            actions, text=("Atualizar JPG Espelhado" if is_editing else "Exportar JPG Espelhado"),
-            command=lambda: on_export("mirror"),
-        ).pack(side="left", padx=6)
-        ttk.Button(
-            actions, text=("Atualizar Ambos" if is_editing else "Exportar Ambos"),
-            style="Accent.TButton", command=lambda: on_export("both"),
-        ).pack(side="left", padx=6)
-
-        ttk.Button(frm, text="Fechar", command=dlg.destroy).pack(anchor="e", pady=(12, 0))
-
     # ---------------- Mais ações (ocasionais/administrativas) ----------------
     more_menu = tk.Menu(frame, tearoff=0)
-    more_menu.add_command(label="Exportar…", command=open_export_dialog)
     more_menu.add_command(label="Exportar CSV", command=export_csv)
     more_menu.add_separator()
     more_menu.add_command(label="Recalcular (DPI/Vel/Setup)", command=recalc_all)
@@ -3135,10 +3133,10 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         var_roll_other.set(_cfg_num("roll_other"))
         var_scrap_bleed_cm.set(_cfg_num("scrap_bleed_cm"))
         var_auto_fabric_order.set(bool(mcfg.get("auto_fabric_order", True)))
-        var_report_mode.set(mcfg.get("report_mode_default", "full"))
-        var_jpg_mode.set(mcfg.get("mirror_jpg_width_mode", "17"))
-        var_jpg_custom.set(str(mcfg.get("mirror_jpg_width_cm_custom", 17.0)))
-        var_use_printer_jpg_path.set(bool(mcfg.get("use_printer_jpg_path_default", False)))
+        export_cfg = load_export_cfg()
+        var_report_mode.set(export_cfg.get("report_mode_default", "full"))
+        var_jpg_mode.set(export_cfg.get("mirror_jpg_width_mode", "17"))
+        var_jpg_custom.set(str(export_cfg.get("mirror_jpg_width_cm_custom", 17.0)))
         if var_mode.get() != str(mcfg.get("mode", "tecido")):
             var_mode.set(str(mcfg.get("mode", "tecido")))  # o trace já regera a fila
         else:

@@ -64,6 +64,7 @@ a = Analysis(
         "modules.operacao",
         "modules.registros",
         "modules.configuracoes",
+        "modules.manual",
     ],
     hookspath=[],
     hooksconfig={},

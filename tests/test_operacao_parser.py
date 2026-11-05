@@ -1,9 +1,12 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from core.print_types import DEFAULT_RULES
+from modules.operacao.models import Job
 from modules.operacao.parser import (
+    build_auto_gap_job,
     fabric_from_document,
     operator_code_from_document,
     parse_log_txt,
@@ -82,8 +85,16 @@ class PedidoFromDocumentTests(unittest.TestCase):
         self.assertEqual(pedido_from_document("16-10 - Dryfit - Salum 12 (Argentina).jpg"), "Salum 12")
         self.assertEqual(pedido_from_document("16-10 - Dryfit - Salum 12 (Brasil).jpg"), "Salum 12")
 
-    def test_loose_trailing_number_without_paren_is_piece_counter(self):
-        self.assertEqual(pedido_from_document("16-10 - Dryfit - Escolinha Reis 21"), "Escolinha Reis")
+    def test_loose_trailing_number_without_paren_is_part_of_the_pedido_name(self):
+        """Só número entre parênteses é ignorado — um número solto no fim,
+        sem parênteses, é parte do nome do pedido (não um contador), senão
+        o mesmo pedido (ex.: "Haras DRB 4") vira dois nomes diferentes
+        dependendo de qual arquivo (com ou sem parênteses) é analisado."""
+        self.assertEqual(pedido_from_document("16-10 - Dryfit - Escolinha Reis 21"), "Escolinha Reis 21")
+
+    def test_same_pedido_with_and_without_parens_normalize_to_the_same_name(self):
+        self.assertEqual(pedido_from_document("09-11 - Ribana - Haras DRB 4.JPEG"), "Haras DRB 4")
+        self.assertEqual(pedido_from_document("09-11 - dryfit - Haras DRB 4 (2).jpeg"), "Haras DRB 4")
 
 
 class ParseLogTxtPedidoModeTests(unittest.TestCase):
@@ -133,6 +144,48 @@ class ParseLogTxtPedidoModeTests(unittest.TestCase):
         job = parse_log_txt(path, type_rules=rules)
         self.assertEqual(job.tipo, "Pedido")
         self.assertEqual(job.pedido, "Cliente A")
+
+
+class BuildAutoGapJobTests(unittest.TestCase):
+    """Impressoras sem arquivo de espaço dedicado registram o avanço em
+    branco direto no log do arquivo real (VPositionMM) — esse avanço tem
+    que virar um item de ESPAÇO próprio na listagem."""
+
+    def _job(self, *, vpos_mm: float, is_gap: bool = False, start_time=None) -> Job:
+        return Job(
+            end_time=datetime(2026, 10, 30, 10, 0, 0),
+            document="16-10 - Dryfit - Cliente A.jpeg",
+            fabric="DRYFIT",
+            pedido="Cliente A",
+            height_mm=1000.0,
+            vpos_mm=vpos_mm,
+            real_mm=1000.0,
+            src_file="C:/logs/16-10 - Dryfit - Cliente A.jpeg.txt",
+            is_gap=is_gap,
+            start_time=start_time,
+        )
+
+    def test_no_gap_when_vpos_is_zero(self):
+        self.assertIsNone(build_auto_gap_job(self._job(vpos_mm=0.0)))
+
+    def test_no_gap_for_an_already_gap_job(self):
+        self.assertIsNone(build_auto_gap_job(self._job(vpos_mm=500.0, is_gap=True)))
+
+    def test_gap_job_uses_vpos_as_length_and_marks_as_espaco(self):
+        job = self._job(vpos_mm=1097.7, start_time=datetime(2026, 10, 30, 9, 58, 0))
+        gap = build_auto_gap_job(job)
+        self.assertIsNotNone(gap)
+        self.assertTrue(gap.is_gap)
+        self.assertEqual(gap.fabric, "ESPAÇO")
+        self.assertEqual(gap.real_mm, 1097.7)
+        self.assertEqual(gap.height_mm, 1097.7)
+        self.assertEqual(gap.end_time, datetime(2026, 10, 30, 9, 58, 0))
+        self.assertNotEqual(gap.src_file, job.src_file)
+
+    def test_gap_job_falls_back_to_end_time_without_start_time(self):
+        job = self._job(vpos_mm=200.0, start_time=None)
+        gap = build_auto_gap_job(job)
+        self.assertLess(gap.end_time, job.end_time)
 
 
 if __name__ == "__main__":

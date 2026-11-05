@@ -17,15 +17,17 @@ APP_DIR.mkdir(parents=True, exist_ok=True)
 CFG_PATH = APP_DIR / "config.json"
 
 DEFAULT_CFG = {
-    "report_mode_default": "full",
-    "mirror_jpg_width_mode": "17",
-    "mirror_jpg_width_cm_custom": 17.0,
-    "mirror_jpg_dpi": 300,
-    "use_printer_jpg_path_default": False,
     "space_filenames": [],
+    "group_consecutive_spaces": False,
     "print_type_rules": [dict(r) for r in DEFAULT_RULES],
     "print_type_subtypes": list(DEFAULT_SUBTYPES),
     "operators": [],
+    # Pasta usada pro diálogo de "Importar logs" quando a impressora do
+    # lote ainda não é conhecida (primeira importação da sessão), ou
+    # quando a impressora já conhecida não tem uma pasta própria cadastrada
+    # (ver core.printers.Printer.log_import_dir) — fallback geral, não por
+    # máquina.
+    "general_log_dir": "",
 }
 
 

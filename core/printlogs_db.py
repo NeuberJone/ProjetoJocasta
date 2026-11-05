@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -105,9 +106,48 @@ def init_schema(con: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS roll_sequence (
             id INTEGER PRIMARY KEY AUTOINCREMENT
         );
+
+        CREATE TABLE IF NOT EXISTS roll_order_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            roll_id INTEGER NOT NULL,
+            version_no INTEGER NOT NULL,
+            orders_json TEXT NOT NULL,
+            saved_at TEXT NOT NULL,
+            FOREIGN KEY (roll_id) REFERENCES rolls(id) ON DELETE CASCADE,
+            UNIQUE (roll_id, version_no)
+        );
+
+        CREATE TABLE IF NOT EXISTS db_identity (
+            id TEXT NOT NULL
+        );
         """
     )
     con.commit()
+
+
+def get_database_id(con: sqlite3.Connection) -> str:
+    """Id curto e opaco GRAVADO NESTE ARQUIVO printlogs.db (tabela db_identity, uma única
+    linha, gerada na primeira chamada que a encontrar vazia). Diferente de
+    core.config.get_installation_id (esse é por instalação/máquina, na config local) — este
+    aqui viaja COM o arquivo da base: uma cópia/restauração em outra máquina, ou várias
+    instalações apontando pro mesmo arquivo (base_dir em pasta de rede compartilhada — ver
+    connect(), comentário do journal_mode), preservam o MESMO valor, porque ele está dentro do
+    próprio arquivo .db, não em configuração externa a ele. Usado para dar ao PX Tool Box uma
+    forma de reconhecer que dois contextos vieram do MESMO arquivo de banco, mesmo que as
+    exportações tenham sido feitas por instalações/máquinas diferentes."""
+    row = con.execute("SELECT id FROM db_identity WHERE rowid = 1").fetchone()
+    if row and row["id"]:
+        return str(row["id"])
+
+    # rowid fixo (1) + OR IGNORE: se duas instalações num base_dir de rede baterem nesta
+    # primeira criação ao mesmo tempo, só uma INSERT vence — a outra é ignorada (nunca duas
+    # linhas) — e o SELECT final sempre lê o valor que realmente persistiu, nunca o que esta
+    # chamada tentou gravar, então as duas instalações convergem pro mesmo id.
+    new_id = uuid.uuid4().hex[:12]
+    con.execute("INSERT OR IGNORE INTO db_identity (rowid, id) VALUES (1, ?)", (new_id,))
+    con.commit()
+    row = con.execute("SELECT id FROM db_identity WHERE rowid = 1").fetchone()
+    return str(row["id"]) if row else new_id
 
 
 def _migrate_schema(con: sqlite3.Connection) -> None:
@@ -120,6 +160,28 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
         con.commit()
     if "observacao" not in cols:
         con.execute("ALTER TABLE orders ADD COLUMN observacao TEXT")
+        con.commit()
+
+    # roll_original_orders (só uma cópia, "o original") foi substituída por
+    # roll_order_versions (uma cópia por edição: Original, Edição 1, Edição
+    # 2...) — migra o que existir da tabela antiga como version_no=0 antes
+    # de descartá-la, pra não perder o que já tinha sido preservado em
+    # versões anteriores do Nexor.
+    tables = {
+        row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    if "roll_original_orders" in tables:
+        already = {
+            row[0] for row in con.execute("SELECT roll_id FROM roll_order_versions WHERE version_no = 0").fetchall()
+        }
+        for row in con.execute("SELECT roll_id, orders_json, saved_at FROM roll_original_orders").fetchall():
+            if row["roll_id"] in already:
+                continue
+            con.execute(
+                "INSERT INTO roll_order_versions(roll_id, version_no, orders_json, saved_at) VALUES(?,0,?,?)",
+                (row["roll_id"], row["orders_json"], row["saved_at"]),
+            )
+        con.execute("DROP TABLE roll_original_orders")
         con.commit()
 
 
@@ -405,6 +467,39 @@ def get_roll_orders(roll_id: int) -> list[dict[str, Any]]:
         con.close()
 
 
+def get_order_context(order_id: int) -> dict[str, Any] | None:
+    """Pedido (linha de orders) e o rolo correspondente, para a exportação do contexto de
+    pedido ao PX Tool Box (ver docs/integrations/nexor-order-context.md no repositório
+    PXToolBox, seção 2) — SOMENTE LEITURA, nunca altera nenhuma coluna. Retorna None se o id
+    não existir (nunca inventa um pedido vazio)."""
+    con = connect()
+    try:
+        ensure_schema(con)
+        row = con.execute(
+            """
+            SELECT o.id, o.roll_id, o.pedido, o.fabric, o.tipo, o.source_path, o.job_hash,
+                   r.roll_name, r.machine
+            FROM orders o
+            JOIN rolls r ON r.id = o.roll_id
+            WHERE o.id = ?
+            """,
+            (int(order_id),),
+        ).fetchone()
+        if row is None:
+            return None
+
+        result = dict(row)
+        try:
+            result["database_id"] = get_database_id(con)
+        except Exception:
+            # Melhor esforço, igual ao installation_id (core/config.py) — a exportação não
+            # pode falhar só por isso; o campo opcional simplesmente não entra no documento.
+            pass
+        return result
+    finally:
+        con.close()
+
+
 def get_roll_events(roll_id: int) -> list[dict[str, Any]]:
     con = connect()
     try:
@@ -423,7 +518,22 @@ def get_roll_events(roll_id: int) -> list[dict[str, Any]]:
         con.close()
 
 
-def get_roll_summary(roll_id: int) -> dict[str, Any]:
+def get_roll_summary(roll_id: int, *, group_consecutive_spaces: bool = False) -> dict[str, Any]:
+    # Na Operação, os avanços entre tecidos (ESPAÇO) entram como orders com
+    # tipo='' — agrupá-los junto com os tecidos (como se fossem um só) some
+    # com a contagem individual, e os operadores da calandra conferem um a
+    # um fisicamente. Por isso, só para rolos da Operação, eles ficam de
+    # fora do agrupamento por tecido e saem numa lista à parte. Por padrão
+    # cada avanço é uma linha; group_consecutive_spaces (opção em
+    # Configurações) funde em uma linha só os avanços que se seguem direto,
+    # sem nenhum tecido real entre eles na sequência física do rolo — dois
+    # avanços separados por um tecido continuam em linhas separadas mesmo
+    # com a opção ligada.
+    # No Planejador, tipo também é sempre '' (nunca classificado), mas lá os
+    # avanços nem chegam a virar order — então o agrupamento normal não
+    # precisa dessa separação.
+    module = get_roll_module(roll_id)
+
     con = connect()
     try:
         ensure_schema(con)
@@ -452,30 +562,91 @@ def get_roll_summary(roll_id: int) -> dict[str, Any]:
             (int(roll_id),),
         ).fetchone()
 
-        fabrics = con.execute(
-            """
-            SELECT fabric, COUNT(*) AS n, COALESCE(SUM(real_m), 0) AS m
-            FROM orders
-            WHERE roll_id = ?
-            GROUP BY fabric
-            ORDER BY m DESC
-            """,
-            (int(roll_id),),
-        ).fetchall()
+        if module == "Operacao":
+            fabrics = con.execute(
+                """
+                SELECT fabric, COUNT(*) AS n, COALESCE(SUM(real_m), 0) AS m
+                FROM orders
+                WHERE roll_id = ? AND tipo <> ''
+                GROUP BY fabric
+                ORDER BY m DESC
+                """,
+                (int(roll_id),),
+            ).fetchall()
+
+            all_rows = con.execute(
+                """
+                SELECT fabric, tipo, end_time, real_m
+                FROM orders
+                WHERE roll_id = ?
+                ORDER BY end_time ASC, id ASC
+                """,
+                (int(roll_id),),
+            ).fetchall()
+
+            spaces: list[dict] = []
+            run: list[sqlite3.Row] = []
+
+            def _flush_run() -> None:
+                if not run:
+                    return
+                if group_consecutive_spaces and len(run) > 1:
+                    spaces.append({
+                        "fabric": run[0]["fabric"],
+                        "real_m": sum(float(x["real_m"] or 0) for x in run),
+                        "n": len(run),
+                        "end_time": run[-1]["end_time"],
+                    })
+                else:
+                    for x in run:
+                        spaces.append({
+                            "fabric": x["fabric"], "real_m": x["real_m"],
+                            "n": 1, "end_time": x["end_time"],
+                        })
+                run.clear()
+
+            for row in all_rows:
+                if (row["tipo"] or "") == "":
+                    run.append(row)
+                else:
+                    _flush_run()
+            _flush_run()
+        else:
+            fabrics = con.execute(
+                """
+                SELECT fabric, COUNT(*) AS n, COALESCE(SUM(real_m), 0) AS m
+                FROM orders
+                WHERE roll_id = ?
+                GROUP BY fabric
+                ORDER BY m DESC
+                """,
+                (int(roll_id),),
+            ).fetchall()
+            spaces = []
 
         out = dict(r)
         out.update(dict(s or {}))
         out["fabrics"] = [dict(x) for x in fabrics]
+        out["spaces"] = [dict(x) for x in spaces]
         return out
     finally:
         con.close()
 
 
-def find_pedido_fabric_rolls(pairs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], list[dict[str, Any]]]:
+def find_pedido_fabric_rolls(
+    pairs: Iterable[tuple[str, str]],
+    *,
+    exclude_roll_id: Optional[int] = None,
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
     """
     Para cada par (pedido, tecido), retorna os rolos já salvos no banco que
     contêm esse mesmo par — usado para detectar duplicidade entre rolos
     (o mesmo pedido com o mesmo tecido impresso em mais de um rolo).
+
+    `exclude_roll_id` tira o próprio rolo em edição/atualização do
+    resultado — sem isso, fechar de novo (ou reabrir e "Atualizar Rolo")
+    o MESMO rolo acusa duplicidade contra ele mesmo, o que não é duplicidade
+    real nenhuma.
     """
     pairs = [(p.strip(), f.strip()) for p, f in pairs if p and f]
     if not pairs:
@@ -487,16 +658,28 @@ def find_pedido_fabric_rolls(pairs: Iterable[tuple[str, str]]) -> dict[tuple[str
 
         out: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for pedido, fabric in pairs:
-            rows = con.execute(
-                """
-                SELECT DISTINCT r.id AS roll_id, r.roll_name, r.machine, r.created_at
-                FROM orders o
-                JOIN rolls r ON r.id = o.roll_id
-                WHERE o.pedido = ? AND o.fabric = ?
-                ORDER BY r.created_at DESC
-                """,
-                (pedido, fabric),
-            ).fetchall()
+            if exclude_roll_id is not None:
+                rows = con.execute(
+                    """
+                    SELECT DISTINCT r.id AS roll_id, r.roll_name, r.machine, r.created_at
+                    FROM orders o
+                    JOIN rolls r ON r.id = o.roll_id
+                    WHERE o.pedido = ? AND o.fabric = ? AND r.id != ?
+                    ORDER BY r.created_at DESC
+                    """,
+                    (pedido, fabric, int(exclude_roll_id)),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    """
+                    SELECT DISTINCT r.id AS roll_id, r.roll_name, r.machine, r.created_at
+                    FROM orders o
+                    JOIN rolls r ON r.id = o.roll_id
+                    WHERE o.pedido = ? AND o.fabric = ?
+                    ORDER BY r.created_at DESC
+                    """,
+                    (pedido, fabric),
+                ).fetchall()
 
             if rows:
                 out[(pedido, fabric)] = [dict(row) for row in rows]
@@ -591,6 +774,41 @@ def update_roll_orders(
                 (roll_name, machine, export_mode, app_version, source_hash, int(roll_id)),
             )
 
+            # Antes de sobrescrever as orders, preserva o estado atual como
+            # uma VERSÃO — a 1ª chamada guarda version_no=0 ("Original", o
+            # rolo como fechou da 1ª vez), a 2ª guarda version_no=1
+            # ("Edição 1", o estado depois da 1ª atualização), e assim por
+            # diante. O estado mais recente de todos nunca precisa de cópia
+            # própria — já é o que está em orders.
+            next_version_row = con.execute(
+                "SELECT COALESCE(MAX(version_no), -1) AS mx FROM roll_order_versions WHERE roll_id = ?",
+                (int(roll_id),),
+            ).fetchone()
+            next_version_no = int(next_version_row["mx"]) + 1
+
+            # Mesma ordenação de get_roll_orders (end_time DESC) — sem isso,
+            # a versão guardada sai na ordem "natural" da tabela (ordem de
+            # inserção, não cronológica), e ao reabrir essa versão depois a
+            # lista aparece fora de ordem mesmo sem o conteúdo ter mudado.
+            current_rows = con.execute(
+                """
+                SELECT end_time, document, fabric, pedido, tipo, height_mm, vpos_mm,
+                       real_m, source_path, observacao
+                FROM orders WHERE roll_id = ?
+                ORDER BY end_time DESC
+                """,
+                (int(roll_id),),
+            ).fetchall()
+            con.execute(
+                "INSERT INTO roll_order_versions(roll_id, version_no, orders_json, saved_at) VALUES(?,?,?,?)",
+                (
+                    int(roll_id),
+                    next_version_no,
+                    json.dumps([dict(r) for r in current_rows], ensure_ascii=False),
+                    _now_iso(),
+                ),
+            )
+
             con.execute("DELETE FROM orders WHERE roll_id = ?", (int(roll_id),))
 
             for o in orders:
@@ -625,6 +843,86 @@ def update_roll_orders(
             con.rollback()
             raise
 
+    finally:
+        con.close()
+
+
+def was_roll_edited(roll_id: int) -> bool:
+    """True quando esse rolo já foi atualizado pelo menos uma vez depois
+    de fechado (ver update_roll_orders) — ou seja, existe pelo menos uma
+    versão guardada em roll_order_versions."""
+    return get_roll_order_version_count(roll_id) > 0
+
+
+def get_roll_order_version_count(roll_id: int) -> int:
+    """Quantas versões anteriores (Original, Edição 1, Edição 2...) estão
+    guardadas pra esse rolo — não conta a versão atual (que é só o que
+    está em orders, não precisa de cópia própria). 0 = nunca editado."""
+    con = connect()
+    try:
+        ensure_schema(con)
+        row = con.execute(
+            "SELECT COUNT(*) AS n FROM roll_order_versions WHERE roll_id = ?", (int(roll_id),)
+        ).fetchone()
+        return int(row["n"]) if row else 0
+    finally:
+        con.close()
+
+
+def get_roll_order_version(roll_id: int, version_no: int) -> list[dict[str, Any]]:
+    """Orders de uma versão anterior guardada (version_no=0 é "Original",
+    1 é "Edição 1" etc. — ver update_roll_orders). [] se essa versão não
+    existir (ex.: version_no inválido)."""
+    con = connect()
+    try:
+        ensure_schema(con)
+        row = con.execute(
+            "SELECT orders_json FROM roll_order_versions WHERE roll_id = ? AND version_no = ?",
+            (int(roll_id), int(version_no)),
+        ).fetchone()
+    finally:
+        con.close()
+
+    if not row or not row["orders_json"]:
+        return []
+
+    try:
+        data = json.loads(row["orders_json"])
+        if not isinstance(data, list):
+            return []
+        # Mesma ordenação de get_roll_orders (end_time DESC), aplicada na
+        # leitura — cobre também versões guardadas antes da ordenação ter
+        # sido adicionada à query de gravação (ver update_roll_orders).
+        return sorted(data, key=lambda o: str(o.get("end_time") or ""), reverse=True)
+    except Exception:
+        return []
+
+
+def get_roll_original_payload(roll_id: int) -> dict[str, Any]:
+    """Payload do PRIMEIRO evento de exportação desse rolo (EXPORT_ROLL,
+    sempre o fechamento inicial) — ao contrário de get_roll_latest_payload
+    (o mais recente), usado para recuperar o caminho do comprovante
+    ORIGINAL, de antes de qualquer "Atualizar Rolo"."""
+    con = connect()
+    try:
+        ensure_schema(con)
+        row = con.execute(
+            """
+            SELECT payload_json
+            FROM events
+            WHERE ref_table='rolls' AND ref_id = ? AND event_type = 'EXPORT_ROLL'
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (int(roll_id),),
+        ).fetchone()
+        if not row or not row["payload_json"]:
+            return {}
+        try:
+            data = json.loads(row["payload_json"])
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
     finally:
         con.close()
 

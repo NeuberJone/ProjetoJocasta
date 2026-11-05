@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,15 @@ class PXCoreConfig:
 
     # Tema visual do Nexor (ver core/theme.py) — persiste entre execuções.
     theme_name: str = "dark"
+
+    # Identificador curto e opaco desta instalação/banco do Nexor (gerado uma vez, nunca
+    # regenerado) — só para desambiguar, na exportação do contexto de produção pro PX Tool
+    # Box (ver modules/registros/px_export.py), rollId/jobHash vindos de bases diferentes
+    # (esses dois só são únicos DENTRO de uma mesma base printlogs.db, nunca entre
+    # instalações diferentes — confirmado lendo core/printlogs_db.py: nenhum dos dois
+    # carrega nenhuma informação da origem). NUNCA um identificador de pedido comercial,
+    # NUNCA enviado a lugar nenhum além desse arquivo de exportação explícito.
+    installation_id: str = ""
 
 
 def _config_path() -> Path:
@@ -74,6 +84,9 @@ def _merge(cfg: PXCoreConfig, raw: dict[str, Any]) -> PXCoreConfig:
         if "theme_name" in raw and raw["theme_name"]:
             cfg.theme_name = str(raw["theme_name"])
 
+        if "installation_id" in raw and raw["installation_id"]:
+            cfg.installation_id = str(raw["installation_id"])
+
     return cfg
 
 
@@ -109,6 +122,18 @@ def load_config() -> PXCoreConfig:
         save_config(cfg)
         _ensure_dirs(cfg)
         return cfg
+
+
+def get_installation_id() -> str:
+    """Id curto e opaco desta instalação (ver PXCoreConfig.installation_id) — gera e persiste
+    na primeira chamada que encontrar o config sem um ainda (nunca regenerado depois:
+    instalações já existentes recebem um id estável na primeira exportação de contexto de
+    produção, sem precisar de nenhuma ação manual)."""
+    cfg = load_config()
+    if not cfg.installation_id:
+        cfg.installation_id = uuid.uuid4().hex[:12]
+        save_config(cfg)
+    return cfg.installation_id
 
 # =========================
 # 🔐 Dev password helpers

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
 from core.format import fmt_m
+from core.station import load_station_operator
 from .models import Block, PedidoSummary
 
 try:
@@ -35,6 +37,25 @@ def _cm_to_px(cm: float, dpi: int) -> int:
     return max(1, int(round((float(cm) / 2.54) * int(dpi))))
 
 
+_ROTATION_TRANSPOSE = {
+    0: None,
+    90: "ROTATE_90",
+    180: "ROTATE_180",
+    270: "ROTATE_270",
+}
+
+
+def _apply_rotation(img, rotation: int):
+    """Gira o JPG final em múltiplos de 90° (sem reamostragem, já que é
+    sempre reta) — usado pra casar com a orientação que a impressora espera
+    receber o arquivo, configurável em Configurações."""
+    rotation = int(rotation) % 360
+    transpose_name = _ROTATION_TRANSPOSE.get(rotation)
+    if transpose_name is None:
+        return img
+    return img.transpose(getattr(Image, transpose_name))
+
+
 def pdf_first_page_to_jpg_scaled(
     pdf_path: str | Path,
     jpg_path: str | Path,
@@ -42,12 +63,15 @@ def pdf_first_page_to_jpg_scaled(
     target_width_cm: float,
     dpi: int = 300,
     quality: int = 95,
+    rotation: int = 0,
 ) -> None:
     """
     Renderiza a 1ª página do PDF em JPG com largura física alvo (cm).
 
     - Gera pixels suficientes para bater a largura em cm no DPI informado
     - Salva o JPG com metadata dpi=(dpi, dpi) para impressão no tamanho correto
+    - `rotation` (0/90/180/270) gira o resultado final, pra casar com a
+      orientação que a impressora espera receber o arquivo
     """
     if not _HAS_PYMUPDF or fitz is None:
         raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
@@ -78,6 +102,7 @@ def pdf_first_page_to_jpg_scaled(
 
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        img = _apply_rotation(img, rotation)
         img.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
     finally:
         doc.close()
@@ -91,11 +116,14 @@ def pdf_all_pages_to_jpg_scaled(
     dpi: int = 300,
     quality: int = 95,
     page_gap_px: int = 0,
+    rotation: int = 0,
 ) -> None:
     """
     Como pdf_first_page_to_jpg_scaled, mas concatena TODAS as páginas do PDF
     verticalmente num único JPG contínuo, em vez de só renderizar a 1ª página
     (útil quando o PDF tem mais de uma página, ex.: modo Completo).
+
+    `rotation` (0/90/180/270) gira o JPG final já combinado.
     """
     if not _HAS_PYMUPDF or fitz is None:
         raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
@@ -142,6 +170,7 @@ def pdf_all_pages_to_jpg_scaled(
                 combined.paste(im, (0, y))
                 y += im.height + page_gap_px
 
+        combined = _apply_rotation(combined, rotation)
         combined.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
     finally:
         doc.close()
@@ -157,6 +186,7 @@ def mirror_and_normal_to_jpg_scaled(
     quality: int = 95,
     col_gap_px: int = 0,
     row_gap_px: int = 0,
+    rotation: int = 0,
 ) -> None:
     """
     Gera um único JPG com o PDF espelhado à esquerda e o normal (não
@@ -164,6 +194,8 @@ def mirror_and_normal_to_jpg_scaled(
     verticalmente quando o PDF tem mais de uma página. Usado quando a
     pasta/arquivo da impressora está configurado (único arquivo que ela
     recebe, então precisa trazer as duas versões).
+
+    `rotation` (0/90/180/270) gira o JPG final já combinado.
     """
     if not _HAS_PYMUPDF or fitz is None:
         raise RuntimeError("PyMuPDF não instalado. Instale: pip install pymupdf")
@@ -227,6 +259,7 @@ def mirror_and_normal_to_jpg_scaled(
                 combined.paste(im, (0, y))
                 y += im.height + row_gap_px
 
+        combined = _apply_rotation(combined, rotation)
         combined.save(jpg_path, "JPEG", dpi=(dpi, dpi), quality=int(quality))
     finally:
         doc_normal.close()
@@ -254,7 +287,13 @@ def pdf_first_page_to_jpg_sized(
     )
 
 
-def _pdf_need_new_page(y: float, min_y: float = 60) -> bool:
+def _pdf_need_new_page(y: float, min_y: float = 60, continuous: bool = False) -> bool:
+    # `continuous=True` é usado só para o PDF intermediário que gera o JPG
+    # (ver export_pdf_continuous) — ali o objetivo é um único "rolo" de
+    # página sem quebras, já que a quebra de página normal (cabeçalho
+    # repetido + margens) não faz sentido numa imagem contínua.
+    if continuous:
+        return False
     return y < min_y
 
 
@@ -277,8 +316,17 @@ def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, 
         ),
     )
 
-    c.line(40, top_y - 26, page_w - 40, top_y - 26)
-    return top_y - 40
+    # "Operador de fechamento" é quem fecha/atualiza o rolo NESTE
+    # computador (Configurações → Identificador deste computador) — opcional,
+    # some da linha (sem reservar espaço) quando não está cadastrado.
+    operator = load_station_operator()
+    line_y = top_y - 26
+    if operator:
+        c.drawString(40, top_y - 32, f"Operador de fechamento: {operator}")
+        line_y = top_y - 40
+
+    c.line(40, line_y, page_w - 40, line_y)
+    return line_y - 14
 
 
 def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
@@ -354,11 +402,12 @@ def _pdf_draw_summary_table(
     machine: str,
     mode: str,
     mirrored: bool,
+    continuous: bool = False,
 ) -> float:
     """
     Resumo:
     - Total (m) centralizado, usando fmt_m
-    - Qtd Pedidos centralizado
+    - Arquivos (quantidade de jobs do tecido nesse rolo) centralizado
     - Total geral no final
     """
     # área útil A4 com margem 40 => ~515
@@ -385,7 +434,7 @@ def _pdf_draw_summary_table(
         x += w_fab
         c.drawCentredString(x + (w_total / 2), y0, "Total (m)")
         x += w_total
-        c.drawCentredString(x + (w_jobs / 2), y0, "Qtd Pedidos")
+        c.drawCentredString(x + (w_jobs / 2), y0, "Arquivos")
         x += w_jobs
         c.drawString(x, y0, "Último fim")
         y0 -= 14
@@ -396,7 +445,7 @@ def _pdf_draw_summary_table(
     y = _reprint_summary_header(y)
 
     for index, block in enumerate(blocks, start=1):
-        if _pdf_need_new_page(y, min_y=85):
+        if _pdf_need_new_page(y, min_y=85, continuous=continuous):
             if mirrored:
                 c.restoreState()
             c.showPage()
@@ -424,7 +473,7 @@ def _pdf_draw_summary_table(
         c.drawString(x, y, block.newest_end.strftime("%d/%m/%Y %H:%M:%S"))
         y -= 14
 
-    if _pdf_need_new_page(y, min_y=85):
+    if _pdf_need_new_page(y, min_y=85, continuous=continuous):
         if mirrored:
             c.restoreState()
         c.showPage()
@@ -460,6 +509,7 @@ def _pdf_draw_pedidos_table(
     machine: str,
     mode: str,
     mirrored: bool,
+    continuous: bool = False,
 ) -> float:
     w_num = 30
     w_ped = 280
@@ -483,7 +533,7 @@ def _pdf_draw_pedidos_table(
         x += w_ped
         c.drawCentredString(x + (w_total / 2), y0, "Total (m)")
         x += w_total
-        c.drawCentredString(x + (w_jobs / 2), y0, "Qtd Peças")
+        c.drawCentredString(x + (w_jobs / 2), y0, "Arquivos")
         y0 -= 14
 
         c.setFont("Helvetica", 10)
@@ -492,7 +542,7 @@ def _pdf_draw_pedidos_table(
     y = _reprint_pedidos_header(y)
 
     for index, pedido in enumerate(pedidos, start=1):
-        if _pdf_need_new_page(y, min_y=60):
+        if _pdf_need_new_page(y, min_y=60, continuous=continuous):
             if mirrored:
                 c.restoreState()
             c.showPage()
@@ -520,23 +570,25 @@ def _pdf_draw_pedidos_table(
     return y
 
 
-def export_pdf(
-    out_path: str | Path,
-    blocks: List[Block],
+def _render_report_body(
+    c,
+    page_w: float,
+    page_h: float,
     roll_name: str,
     machine: str,
-    mode: str = "full",
-    mirrored: bool = False,
-    pedidos: List[PedidoSummary] | None = None,
-) -> None:
-    if canvas is None or A4 is None:
-        raise RuntimeError("reportlab não está instalado. Instale: pip install reportlab")
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    page_w, page_h = A4
-    c = canvas.Canvas(str(out_path), pagesize=A4)
+    mode: str,
+    mirrored: bool,
+    blocks: List[Block],
+    pedidos: List[PedidoSummary] | None,
+    continuous: bool,
+) -> float:
+    """Desenha cabeçalho + tabela de pedidos do rolo (modo completo) +
+    pedidos no rolo + resumo, no canvas `c` já aberto — com quebra de
+    página normal (`continuous=False`, usado no PDF que o usuário abre/
+    imprime) ou numa única página contínua, sem nunca quebrar
+    (`continuous=True`, usado só no PDF intermediário de onde o JPG é
+    renderizado — ver export_pdf_continuous). Não chama `c.save()`; quem
+    chama decide isso. Retorna o `y` final após desenhar tudo."""
 
     def _begin_page() -> None:
         if mirrored:
@@ -553,16 +605,18 @@ def export_pdf(
     y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
 
     if mode == "summary":
-        _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
+        y = _pdf_draw_summary_table(
+            c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored, continuous=continuous
+        )
         _end_page()
-        c.save()
-        return
+        return y
 
     # completo
-    w_end = 110
-    w_doc = 200
-    w_fab = 85
-    w_op = 80
+    w_end = 95
+    w_doc = 170
+    w_fab = 80
+    w_tipo = 55
+    w_op = 70
     w_size = 40
 
     font = "Helvetica"
@@ -588,6 +642,8 @@ def export_pdf(
         xh += w_doc
         c.drawString(xh, y0, "Tecido")
         xh += w_fab
+        c.drawString(xh, y0, "Tipo")
+        xh += w_tipo
         c.drawString(xh, y0, "Operador")
         xh += w_op
         c.drawString(xh, y0, "Tamanho")
@@ -600,7 +656,7 @@ def export_pdf(
 
     for block_index, block in enumerate(blocks):
         if block_index > 0:
-            if _pdf_need_new_page(y, min_y=95):
+            if _pdf_need_new_page(y, min_y=95, continuous=continuous):
                 _end_page()
                 _begin_page()
                 y = page_h - 40
@@ -615,17 +671,19 @@ def export_pdf(
             end_txt = job.end_time.strftime("%d/%m/%Y %H:%M:%S")
             doc_txt = job.document
             fab_txt = job.fabric
+            tipo_txt = job.tipo
             op_txt = job.operador
             size_txt = fmt_m(job.real_m, suffix=False)
 
             doc_lines = _wrap_text(doc_txt, w_doc - 6, font, fs_row)
             fab_lines = _wrap_text(fab_txt, w_fab - 6, font, fs_row)
+            tipo_lines = _wrap_text(tipo_txt, w_tipo - 6, font, fs_row)
             op_lines = _wrap_text(op_txt, w_op - 6, font, fs_row)
 
-            row_lines = max(len(doc_lines), len(fab_lines), len(op_lines), 1)
+            row_lines = max(len(doc_lines), len(fab_lines), len(tipo_lines), len(op_lines), 1)
             row_h = row_lines * line_h
 
-            if _pdf_need_new_page(y - row_h, min_y=95):
+            if _pdf_need_new_page(y - row_h, min_y=95, continuous=continuous):
                 _end_page()
                 _begin_page()
                 y = page_h - 40
@@ -638,9 +696,10 @@ def export_pdf(
             c.drawString(x0, y, end_txt)
             _draw_wrapped_cell(c, x0 + w_end, y, doc_lines, font, fs_row, line_h)
             _draw_wrapped_cell(c, x0 + w_end + w_doc, y, fab_lines, font, fs_row, line_h)
-            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab, y, op_lines, font, fs_row, line_h)
+            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab, y, tipo_lines, font, fs_row, line_h)
+            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab + w_tipo, y, op_lines, font, fs_row, line_h)
             c.drawRightString(
-                x0 + w_end + w_doc + w_fab + w_op + w_size - 2,
+                x0 + w_end + w_doc + w_fab + w_tipo + w_op + w_size - 2,
                 y,
                 size_txt,
             )
@@ -648,7 +707,7 @@ def export_pdf(
             y -= row_h
 
     y -= 6
-    if _pdf_need_new_page(y, min_y=120):
+    if _pdf_need_new_page(y, min_y=120, continuous=continuous):
         _end_page()
         _begin_page()
         y = page_h - 40
@@ -661,16 +720,97 @@ def export_pdf(
     # Pedidos no rolo aparece antes do resumo — resumo do rolo é o fechamento
     # do relatório (PDF e JPG, já que o JPG é renderizado a partir deste PDF).
     if pedidos:
-        y = _pdf_draw_pedidos_table(c, pedidos, y, page_w, page_h, roll_name, machine, mode, mirrored)
+        y = _pdf_draw_pedidos_table(
+            c, pedidos, y, page_w, page_h, roll_name, machine, mode, mirrored, continuous=continuous
+        )
 
         y -= 10
-        if _pdf_need_new_page(y, min_y=90):
+        if _pdf_need_new_page(y, min_y=90, continuous=continuous):
             _end_page()
             _begin_page()
             y = page_h - 40
             y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
 
-    _pdf_draw_summary_table(c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored)
+    y = _pdf_draw_summary_table(
+        c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored, continuous=continuous
+    )
 
     _end_page()
+    return y
+
+
+def export_pdf(
+    out_path: str | Path,
+    blocks: List[Block],
+    roll_name: str,
+    machine: str,
+    mode: str = "full",
+    mirrored: bool = False,
+    pedidos: List[PedidoSummary] | None = None,
+) -> None:
+    if canvas is None or A4 is None:
+        raise RuntimeError("reportlab não está instalado. Instale: pip install reportlab")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    page_w, page_h = A4
+    c = canvas.Canvas(str(out_path), pagesize=A4)
+
+    _render_report_body(
+        c, page_w, page_h, roll_name, machine, mode, mirrored, blocks, pedidos, continuous=False
+    )
+    c.save()
+
+
+def export_pdf_continuous(
+    out_path: str | Path,
+    blocks: List[Block],
+    roll_name: str,
+    machine: str,
+    mode: str = "full",
+    mirrored: bool = False,
+    pedidos: List[PedidoSummary] | None = None,
+) -> None:
+    """Como export_pdf, mas numa única página contínua, sem quebras — sem
+    o espaço de cabeçalho/margem repetido que uma quebra de página normal
+    introduz. Usado só para gerar o PDF intermediário que vira o JPG
+    enviado pra impressora: nesse JPG a quebra de página do comprovante em
+    papel não faz sentido (ele pode — e deve — ser contínuo). O PDF salvo
+    de verdade para o usuário abrir/imprimir continua vindo de export_pdf,
+    paginado normalmente.
+
+    Como a altura final depende do conteúdo (nº de blocos/pedidos/itens,
+    que varia por rolo), a página é medida em duas passadas: a 1ª desenha
+    num canvas descartável, de altura arbitrária, só para descobrir quanto
+    de altura o conteúdo realmente ocupa; a 2ª desenha de verdade num
+    canvas já do tamanho exato (altura do conteúdo + margens), sem sobrar
+    nem faltar espaço."""
+    if canvas is None or A4 is None:
+        raise RuntimeError("reportlab não está instalado. Instale: pip install reportlab")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    page_w, _ = A4
+
+    # 1ª passada (medição): altura de referência arbitrária — como
+    # continuous=True nunca quebra página, o valor em si não importa, só
+    # serve de ponto de partida pra medir quanto o conteúdo desce.
+    probe_h = 1000.0
+    c_probe = canvas.Canvas(io.BytesIO())
+    c_probe.setPageSize((page_w, probe_h))
+    y_final = _render_report_body(
+        c_probe, page_w, probe_h, roll_name, machine, mode, mirrored, blocks, pedidos, continuous=True
+    )
+    content_drop = (probe_h - 40) - y_final
+
+    # 2ª passada (real): altura exata = o que o conteúdo ocupou + margem de
+    # topo (40, igual ao resto do app) + uma folga pequena no fim (20).
+    final_h = content_drop + 60
+    c = canvas.Canvas(str(out_path))
+    c.setPageSize((page_w, final_h))
+    _render_report_body(
+        c, page_w, final_h, roll_name, machine, mode, mirrored, blocks, pedidos, continuous=True
+    )
     c.save()

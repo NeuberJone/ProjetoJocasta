@@ -25,14 +25,27 @@ class Printer:
     display_name: str
     speed_m_min: float = 1.5
     notes: str = ""
+    # Nome do computador que gera os logs desta impressora (campo
+    # "ComputerName" no log .txt) — quando cadastrado, a Operação usa isso
+    # pra sugerir automaticamente qual impressora é a dona dos logs
+    # importados, em vez do operador ter que escolher na mão toda vez.
+    computer_name: str = ""
     jpg_output_dir: str = ""
     jpg_output_filename: str = ""
+    # Pasta onde esta impressora grava os logs .txt — quando cadastrada, a
+    # Operação abre o diálogo de "Importar logs" já nessa pasta (em vez da
+    # última pasta usada no Windows), bastando selecionar os arquivos.
+    log_import_dir: str = ""
     # "Log adicional": algumas máquinas (ex.: M1) só registram o
     # processamento no log por-arquivo — quem imprime de fato é outro
     # programa, que grava um log diário separado nessa pasta. Quando
     # marcado, a Operação cruza os dois logs pra confirmar a impressão real.
     secondary_log_enabled: bool = False
     secondary_log_folder: str = ""
+    # Orientação (0/90/180/270) do JPG de registro gerado para esta
+    # impressora — cada máquina pode precisar receber o arquivo girado
+    # de um jeito diferente.
+    jpg_rotation: int = 0
 
 
 def _slugify(s: str) -> str:
@@ -55,11 +68,22 @@ def _coerce(d: dict) -> Printer:
         display_name=str(d.get("display_name", "")),
         speed_m_min=float(d.get("speed_m_min", 1.5) or 1.5),
         notes=str(d.get("notes", "")),
+        computer_name=str(d.get("computer_name", "") or ""),
         jpg_output_dir=str(d.get("jpg_output_dir", "") or ""),
         jpg_output_filename=str(d.get("jpg_output_filename", "") or ""),
+        log_import_dir=str(d.get("log_import_dir", "") or ""),
         secondary_log_enabled=bool(d.get("secondary_log_enabled", False)),
         secondary_log_folder=str(d.get("secondary_log_folder", "") or ""),
+        jpg_rotation=_coerce_rotation(d.get("jpg_rotation", 0)),
     )
+
+
+def _coerce_rotation(value: object) -> int:
+    try:
+        rotation = int(value) % 360
+    except (TypeError, ValueError):
+        return 0
+    return rotation if rotation in (0, 90, 180, 270) else 0
 
 
 def _save_raw(data: List[dict]) -> None:
@@ -97,10 +121,13 @@ def add_or_update_printer(
     display_name: str,
     speed_m_min: float,
     notes: str = "",
+    computer_name: str = "",
     jpg_output_dir: str = "",
     jpg_output_filename: str = "",
+    log_import_dir: str = "",
     secondary_log_enabled: bool = False,
     secondary_log_folder: str = "",
+    jpg_rotation: int = 0,
 ) -> List[Printer]:
     """
     Retorna uma NOVA lista com o printer adicionado (key vazio/None) ou
@@ -108,8 +135,10 @@ def add_or_update_printer(
     """
     name = name.strip()
     display_name = display_name.strip()
+    computer_name = (computer_name or "").strip()
     jpg_output_dir = (jpg_output_dir or "").strip()
     jpg_output_filename = (jpg_output_filename or "").strip()
+    log_import_dir = (log_import_dir or "").strip()
     secondary_log_folder = (secondary_log_folder or "").strip()
     if not name:
         raise ValueError("Informe o nome da impressora.")
@@ -119,6 +148,7 @@ def add_or_update_printer(
         raise ValueError("Velocidade deve ser maior que zero.")
     if secondary_log_enabled and not secondary_log_folder:
         raise ValueError("Informe a pasta do log adicional, ou desmarque a opção.")
+    jpg_rotation = _coerce_rotation(jpg_rotation)
 
     out = list(printers)
 
@@ -127,12 +157,15 @@ def add_or_update_printer(
             if pr.key == key:
                 out[i] = Printer(
                     key=pr.key, name=name, display_name=display_name,
-                    speed_m_min=speed_m_min, notes=notes,
+                    speed_m_min=speed_m_min, notes=notes, computer_name=computer_name,
                     jpg_output_dir=jpg_output_dir, jpg_output_filename=jpg_output_filename,
+                    log_import_dir=log_import_dir,
                     secondary_log_enabled=secondary_log_enabled,
                     secondary_log_folder=secondary_log_folder,
+                    jpg_rotation=jpg_rotation,
                 )
                 _check_unique_display_name(out)
+                _check_unique_computer_name(out)
                 return out
         raise ValueError("Impressora não encontrada para atualizar.")
 
@@ -145,12 +178,15 @@ def add_or_update_printer(
 
     out.append(Printer(
         key=new_key, name=name, display_name=display_name,
-        speed_m_min=speed_m_min, notes=notes,
+        speed_m_min=speed_m_min, notes=notes, computer_name=computer_name,
         jpg_output_dir=jpg_output_dir, jpg_output_filename=jpg_output_filename,
+        log_import_dir=log_import_dir,
         secondary_log_enabled=secondary_log_enabled,
         secondary_log_folder=secondary_log_folder,
+        jpg_rotation=jpg_rotation,
     ))
     _check_unique_display_name(out)
+    _check_unique_computer_name(out)
     return out
 
 
@@ -163,6 +199,22 @@ def _check_unique_display_name(printers: List[Printer]) -> None:
         seen[low] = pr.key
 
 
+def _check_unique_computer_name(printers: List[Printer]) -> None:
+    """Campo opcional, mas se duas impressoras tiverem o mesmo computador
+    cadastrado, a detecção automática (ver find_printer_by_computer_name)
+    fica ambígua — bloqueia pra evitar isso."""
+    seen = {}
+    for pr in printers:
+        low = pr.computer_name.strip().lower()
+        if not low:
+            continue
+        if low in seen and seen[low] != pr.key:
+            raise ValueError(
+                f"Já existe uma impressora com o computador '{pr.computer_name}' cadastrado."
+            )
+        seen[low] = pr.key
+
+
 def remove_printer(printers: List[Printer], key: str) -> List[Printer]:
     return [p for p in printers if p.key != key]
 
@@ -171,3 +223,11 @@ def find_printer_by_display_name(display_name: str, printers: Optional[List[Prin
     printers = printers if printers is not None else load_printers()
     target = (display_name or "").strip().lower()
     return next((p for p in printers if p.display_name.strip().lower() == target), None)
+
+
+def find_printer_by_computer_name(computer_name: str, printers: Optional[List[Printer]] = None) -> Optional[Printer]:
+    printers = printers if printers is not None else load_printers()
+    target = (computer_name or "").strip().lower()
+    if not target:
+        return None
+    return next((p for p in printers if p.computer_name.strip().lower() == target), None)

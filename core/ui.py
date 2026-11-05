@@ -100,6 +100,13 @@ def page_scroll_container(parent: tk.Misc) -> tuple[ttk.Frame, tk.Canvas]:
     canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
 
     def _on_wheel(event) -> None:
+        # Ignora o scroll enquanto algum diálogo modal tiver o grab do Tk —
+        # sem isso, rolar a roda sobre um diálogo aberto também rola a
+        # página por trás dele (o cursor não "sai" do canvas quando o
+        # diálogo só aparece por cima, sem mover o mouse), deixando um
+        # espaço em branco no topo da página ao fechar o diálogo.
+        if canvas.grab_current() is not None:
+            return
         canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", _on_wheel))

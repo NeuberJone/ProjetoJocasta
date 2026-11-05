@@ -34,3 +34,5 @@ raw.txt
 
 #PXPrintCalc.py
 #PXPrintCalc.fabrics.json
+# Visual Studio
+.vs/

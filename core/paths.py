@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,6 +41,15 @@ def open_in_explorer(path: Path) -> None:
     """Abre a pasta no Explorer (Windows)."""
     path = path.resolve()
     os.startfile(str(path))  # noqa: S606 (Windows-only)
+
+
+def reveal_file_in_explorer(file_path: Path) -> None:
+    """Abre o Explorer já com o ARQUIVO selecionado (não só a pasta) — "Mostrar arquivo na
+    pasta" (ver modules/registros/ui.py, exportação do contexto de produção). Lista de
+    argumentos (nunca string montada por concatenação): evita qualquer interpretação de shell
+    do caminho, mesmo com espaços/acentos."""
+    resolved = str(file_path.resolve())
+    subprocess.Popen(["explorer", "/select,", resolved])  # noqa: S603,S607 (Windows-only)
 
 
 # =========================

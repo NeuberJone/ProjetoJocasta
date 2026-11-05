@@ -16,6 +16,12 @@ from core.printers import (
     add_or_update_printer,
     remove_printer,
 )
+from core.station import (
+    load_station_id,
+    load_station_operator,
+    save_station_id,
+    save_station_operator,
+)
 
 # Root precisa ser TkinterDnD.Tk para drag & drop
 try:
@@ -27,12 +33,13 @@ except Exception:
 
 # Módulos do app, na ordem em que aparecem no menu lateral.
 MODULES: list[tuple[str, str]] = [
-    ("Planejador", "modules.planejador"),
     ("Operação", "modules.operacao"),
+    ("Planejador", "modules.planejador"),
     ("Registros", "modules.registros"),
 ]
 
 SETTINGS_TITLE = "Configurações"
+MANUAL_TITLE = "Manual"
 
 
 def _safe_import(name: str):
@@ -144,6 +151,16 @@ class Nexor(RootBase):
             ttk.Button(sidebar, text=text, style="Nav.TButton", command=command).pack(
                 fill="x", pady=(0, 6)
             )
+        ttk.Label(sidebar, text="AJUDA", style="Kicker.TLabel").pack(
+            anchor="w", pady=(22, 8)
+        )
+        manual_btn = ttk.Button(
+            sidebar, text="Manual", style="Nav.TButton",
+            command=lambda: self.load_module(MANUAL_TITLE),
+        )
+        manual_btn.pack(fill="x", pady=(0, 6))
+        self._nav_buttons[MANUAL_TITLE] = manual_btn
+
         settings_btn = ttk.Button(
             sidebar, text="Configurações", style="Nav.TButton",
             command=lambda: self.load_module(SETTINGS_TITLE),
@@ -183,6 +200,8 @@ class Nexor(RootBase):
         page = ttk.Frame(self.content)
         if title == SETTINGS_TITLE:
             self._build_settings_page(page)
+        elif title == MANUAL_TITLE:
+            self._build_manual_page(page)
         else:
             module_path = dict(MODULES).get(title)
             if module_path is None:
@@ -228,6 +247,20 @@ class Nexor(RootBase):
             self._page_uis[title] = ui
         except Exception as e:
             self._render_error(page, f"Falha ao montar UI de {title}:\n\n{type(e).__name__}: {e}")
+
+    def _build_manual_page(self, page: ttk.Frame) -> None:
+        mod = _safe_import("modules.manual")
+        if isinstance(mod, Exception):
+            self._render_error(page, f"Falha ao carregar o manual:\n\n{type(mod).__name__}: {mod}")
+            return
+
+        try:
+            ui = mod.build_ui(page)
+            if isinstance(ui, tk.Widget) and not ui.winfo_manager():
+                ui.pack(fill="both", expand=True)
+            self._page_uis[MANUAL_TITLE] = ui
+        except Exception as e:
+            self._render_error(page, f"Falha ao montar o manual:\n\n{type(e).__name__}: {e}")
 
     def _render_error(self, parent: ttk.Frame, text: str) -> None:
         t = tk.Text(parent, wrap="word")
@@ -342,6 +375,55 @@ class Nexor(RootBase):
             side="left", padx=(6, 0)
         )
 
+        ttk.Separator(base_box).pack(fill="x", pady=(12, 10))
+
+        ttk.Label(base_box, text="Identificador deste computador:").pack(anchor="w")
+        station_var = tk.StringVar(value=load_station_id())
+        station_row = ttk.Frame(base_box)
+        station_row.pack(fill="x", pady=(4, 2))
+        ttk.Entry(station_row, textvariable=station_var, width=18).pack(side="left")
+
+        ttk.Label(
+            base_box,
+            text=(
+                "Se mais de um computador aponta pro mesmo diretório de rede acima, dê um "
+                "nome curto a cada um aqui (ex.: PC1, PC2). Esse nome entra no nome do rolo, "
+                "logo depois da máquina (ex.: M1_PC1_26-10-2026_0046), como reforço extra "
+                "contra dois computadores gerarem rolos com o mesmo número — o que já é raro, "
+                "mas pode acontecer se a pasta de rede cair bem na hora de gerar o número num "
+                "dos PCs. Fica salvo só neste computador; deixe em branco se usar só um PC."
+            ),
+            justify="left", wraplength=680, style="Muted.TLabel",
+        ).pack(anchor="w", pady=(2, 6))
+
+        ttk.Label(base_box, text="Nome do operador deste computador:").pack(anchor="w", pady=(8, 0))
+        operator_var = tk.StringVar(value=load_station_operator())
+        operator_row = ttk.Frame(base_box)
+        operator_row.pack(fill="x", pady=(4, 2))
+        ttk.Entry(operator_row, textvariable=operator_var, width=28).pack(side="left")
+
+        ttk.Label(
+            base_box,
+            text=(
+                "Quem fecha/atualiza rolos neste computador — entra no comprovante (PDF e JPG) "
+                "como \"Operador de fechamento\". Diferente do operador por iniciais no nome "
+                "do arquivo (Configurações → Operação); este aqui é fixo por computador, não "
+                "por arquivo. Deixe em branco pra não imprimir essa linha."
+            ),
+            justify="left", wraplength=680, style="Muted.TLabel",
+        ).pack(anchor="w", pady=(2, 6))
+
+        def save_station_cb() -> None:
+            save_station_id(station_var.get())
+            save_station_operator(operator_var.get())
+            station_var.set(load_station_id())
+            operator_var.set(load_station_operator())
+            messagebox.showinfo("Configurações", "Identificador e operador do computador salvos.")
+
+        ttk.Button(base_box, text="Salvar identificador", command=save_station_cb).pack(
+            anchor="w"
+        )
+
         # Cadastros de Impressoras/Tecidos/Pedaços de tecido já ficam sempre
         # visíveis no menu lateral ("Gerenciamento") — não duplica os cartões
         # aqui, só aponta pra lá.
@@ -360,6 +442,7 @@ class Nexor(RootBase):
         section_boxes = []
         for build in (
             configuracoes.build_print_types_section,
+            configuracoes.build_exportacao_section,
             configuracoes.build_operacao_section,
             configuracoes.build_planejador_section,
             configuracoes.build_registros_section,
@@ -550,14 +633,17 @@ class Nexor(RootBase):
         frm.pack(fill="both", expand=True)
         dialog_header(frm, "Impressoras", "Máquinas disponíveis e destino dos JPGs espelhados.").pack(fill="x")
 
-        cols = ("display_name", "name", "speed", "jpg_dir", "jpg_filename", "sec_log", "notes")
+        cols = ("display_name", "name", "computer", "speed", "log_dir", "jpg_dir", "jpg_filename", "jpg_rot", "sec_log", "notes")
         tree = ttk.Treeview(frm, columns=cols, show="headings", height=8)
         for col, txt, w in [
             ("display_name", "Nome de exibição", 100),
             ("name", "Nome completo", 150),
+            ("computer", "Computador", 130),
             ("speed", "Velocidade (m/min)", 100),
+            ("log_dir", "Pasta dos logs", 190),
             ("jpg_dir", "Pasta do JPG espelhado", 190),
             ("jpg_filename", "Nome do arquivo", 120),
+            ("jpg_rot", "Orientação", 80),
             ("sec_log", "Log adicional", 110),
             ("notes", "Observações", 120),
         ]:
@@ -610,17 +696,26 @@ class Nexor(RootBase):
             style="Muted.TLabel",
         ).grid(row=4, column=1, columnspan=3, sticky="w", padx=6)
 
+        ttk.Label(form, text="Orientação do JPG espelhado:").grid(row=5, column=0, sticky="w", pady=(10, 0))
+        rot_row = ttk.Frame(form)
+        rot_row.grid(row=5, column=1, columnspan=3, sticky="w", pady=(10, 0))
+        var_jpg_rotation = tk.IntVar(value=0)
+        for text, value in (("0°", 0), ("90°", 90), ("180°", 180), ("270°", 270)):
+            ttk.Radiobutton(rot_row, text=text, value=value, variable=var_jpg_rotation).pack(
+                side="left", padx=(0, 10)
+            )
+
         var_sec_enabled = tk.BooleanVar(value=False)
         var_sec_folder = tk.StringVar()
 
         ttk.Checkbutton(
             form, text="Log adicional (cruza com outro log pra confirmar a impressão real)",
             variable=var_sec_enabled,
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-        ttk.Label(form, text="Pasta do log adicional:").grid(row=6, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(form, text="Pasta do log adicional:").grid(row=7, column=0, sticky="w", pady=(2, 0))
         ent_sec_folder = ttk.Entry(form, textvariable=var_sec_folder, width=46)
-        ent_sec_folder.grid(row=6, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0))
+        ent_sec_folder.grid(row=7, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0))
 
         def on_browse_sec_folder() -> None:
             folder = filedialog.askdirectory(title="Pasta do log adicional (log diário da impressão real)")
@@ -628,7 +723,7 @@ class Nexor(RootBase):
                 var_sec_folder.set(folder)
 
         btn_sec_folder = ttk.Button(form, text="Procurar…", command=on_browse_sec_folder)
-        btn_sec_folder.grid(row=6, column=3, sticky="w", padx=6, pady=(2, 0))
+        btn_sec_folder.grid(row=7, column=3, sticky="w", padx=6, pady=(2, 0))
 
         def _update_sec_folder_state(*_a) -> None:
             state = "normal" if var_sec_enabled.get() else "disabled"
@@ -638,14 +733,80 @@ class Nexor(RootBase):
         var_sec_enabled.trace_add("write", _update_sec_folder_state)
         _update_sec_folder_state()
 
+        ttk.Label(form, text="Computador desta impressora:").grid(
+            row=8, column=0, sticky="w", pady=(10, 0)
+        )
+        var_computer_name = tk.StringVar()
+        ttk.Entry(form, textvariable=var_computer_name, width=28).grid(
+            row=8, column=1, sticky="w", padx=6, pady=(10, 0)
+        )
+
+        def on_detect_computer_name() -> None:
+            path = filedialog.askopenfilename(
+                title="Selecionar um log .txt desta impressora",
+                filetypes=[("Log de impressão", "*.txt"), ("Todos os arquivos", "*.*")],
+            )
+            if not path:
+                return
+            from modules.operacao.parser import read_log_general_fields
+
+            cn = (read_log_general_fields(path).get("ComputerName") or "").strip()
+            if not cn:
+                messagebox.showwarning(
+                    "Impressoras", "Esse arquivo não tem o campo ComputerName."
+                )
+                return
+            var_computer_name.set(cn)
+
+        ttk.Button(form, text="Detectar de um log…", command=on_detect_computer_name).grid(
+            row=8, column=2, columnspan=2, sticky="w", padx=6, pady=(10, 0)
+        )
+        ttk.Label(
+            form,
+            text=(
+                "Nome do PC que gera os logs desta impressora (campo \"ComputerName\" no "
+                "log .txt) — a Operação usa isso pra sugerir automaticamente a máquina certa "
+                "ao importar, sem precisar escolher na mão. Opcional; deixe em branco se não "
+                "souber."
+            ),
+            style="Muted.TLabel", wraplength=680, justify="left",
+        ).grid(row=9, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
+        ttk.Label(form, text="Pasta dos logs desta impressora:").grid(
+            row=10, column=0, sticky="w", pady=(10, 0)
+        )
+        var_log_dir = tk.StringVar()
+        ttk.Entry(form, textvariable=var_log_dir, width=46).grid(
+            row=10, column=1, columnspan=2, sticky="we", padx=6, pady=(10, 0)
+        )
+
+        def on_browse_log_dir() -> None:
+            folder = filedialog.askdirectory(title="Pasta onde esta impressora grava os logs .txt")
+            if folder:
+                var_log_dir.set(folder)
+
+        ttk.Button(form, text="Procurar…", command=on_browse_log_dir).grid(
+            row=10, column=3, sticky="w", padx=6, pady=(10, 0)
+        )
+        ttk.Label(
+            form,
+            text=(
+                "Opcional — quando preenchida, a Operação já abre o diálogo de "
+                "\"Importar logs\" direto nessa pasta, bastando selecionar os arquivos."
+            ),
+            style="Muted.TLabel", wraplength=680, justify="left",
+        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
         def refresh_tree(select_key: str | None = None) -> None:
             tree.delete(*tree.get_children())
             for pr in printers:
                 tree.insert(
                     "", "end", iid=pr.key,
                     values=(
-                        pr.display_name, pr.name, f"{pr.speed_m_min:.2f}",
+                        pr.display_name, pr.name, pr.computer_name, f"{pr.speed_m_min:.2f}",
+                        pr.log_import_dir,
                         pr.jpg_output_dir, pr.jpg_output_filename,
+                        f"{pr.jpg_rotation}°",
                         "Sim" if pr.secondary_log_enabled else "Não",
                         pr.notes,
                     ),
@@ -659,8 +820,11 @@ class Nexor(RootBase):
             var_display.set("")
             var_speed.set("1.50")
             var_notes.set("")
+            var_computer_name.set("")
+            var_log_dir.set("")
             var_jpg_dir.set("")
             var_jpg_filename.set("")
+            var_jpg_rotation.set(0)
             var_sec_enabled.set(False)
             var_sec_folder.set("")
             tree.selection_remove(*tree.selection())
@@ -678,8 +842,11 @@ class Nexor(RootBase):
             var_display.set(pr.display_name)
             var_speed.set(f"{pr.speed_m_min:.2f}")
             var_notes.set(pr.notes)
+            var_computer_name.set(pr.computer_name)
+            var_log_dir.set(pr.log_import_dir)
             var_jpg_dir.set(pr.jpg_output_dir)
             var_jpg_filename.set(pr.jpg_output_filename)
+            var_jpg_rotation.set(pr.jpg_rotation)
             var_sec_enabled.set(pr.secondary_log_enabled)
             var_sec_folder.set(pr.secondary_log_folder)
 
@@ -701,8 +868,11 @@ class Nexor(RootBase):
                     display_name=var_display.get(),
                     speed_m_min=speed,
                     notes=var_notes.get().strip(),
+                    computer_name=var_computer_name.get().strip(),
+                    log_import_dir=var_log_dir.get().strip(),
                     jpg_output_dir=var_jpg_dir.get().strip(),
                     jpg_output_filename=var_jpg_filename.get().strip(),
+                    jpg_rotation=int(var_jpg_rotation.get()),
                     secondary_log_enabled=bool(var_sec_enabled.get()),
                     secondary_log_folder=var_sec_folder.get().strip(),
                 )
