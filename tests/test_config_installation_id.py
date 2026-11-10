@@ -14,13 +14,16 @@ from core.config import get_installation_id
 
 class InstallationIdTests(unittest.TestCase):
     def setUp(self):
-        self._tmp_dir = tempfile.TemporaryDirectory()
+        self._tmp_dir = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
         self.config_path = Path(self._tmp_dir.name) / "config.json"
         self._patcher = patch("core.config._config_path", return_value=self.config_path)
         self._patcher.start()
+        self._dirs_patcher = patch("core.config._ensure_dirs")
+        self._dirs_patcher.start()
 
     def tearDown(self):
         self._patcher.stop()
+        self._dirs_patcher.stop()
         self._tmp_dir.cleanup()
 
     def test_generates_and_persists_id_on_first_call(self):
@@ -52,7 +55,7 @@ class InstallationIdTests(unittest.TestCase):
         # Simula uma instalação já existente, com config.json de antes deste campo existir.
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(
-            json.dumps({"base_dir": r"C:\PXCore", "theme_name": "dark"}), encoding="utf-8"
+            json.dumps({"base_dir": str(self.config_path.parent), "theme_name": "dark"}), encoding="utf-8"
         )
 
         generated = get_installation_id()

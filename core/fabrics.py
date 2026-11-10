@@ -8,20 +8,27 @@ modules/planejador.py reexporta estes nomes para manter compatibilidade com
 o código existente."""
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
 from typing import Dict, List
 
 from core.migrate import migrate_legacy_path
+from core.json_store import ConfigurationWriteError, finite_number, read_json_config, require, validate_object, write_json_config
+from core.logging_config import get_logger, log_exception
+
+_logger = get_logger(__name__)
 
 
 def _fabrics_store_path() -> Path:
     appdata = Path(os.environ.get("APPDATA") or str(Path.home()))
     base = appdata / "Nexor" / "Planejador"
     migrate_legacy_path(appdata / "ProjetoJocasta" / "PXPrintCalc", base)
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log_exception(_logger, "Fabric configuration directory unavailable", exc)
+        raise ConfigurationWriteError(base / "fabrics.json", "Não foi possível acessar a pasta de tecidos.") from exc
     return base / "fabrics.json"
 
 
@@ -93,7 +100,24 @@ def _normalize_fabrics(data: Dict[str, object]) -> Dict[str, FabricEntry]:
 
 def save_fabrics(data: Dict[str, FabricEntry]) -> None:
     p = _fabrics_store_path()
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    previous = read_json_config(p, {}, validator=_validate_fabrics)
+    merged = {}
+    for name, entry in data.items():
+        old_entry = previous.get(name)
+        merged[name] = {**old_entry, **entry} if isinstance(old_entry, dict) and isinstance(entry, dict) else entry
+    write_json_config(p, merged, validator=_validate_fabrics)
+
+
+def _validate_fabrics(raw: object, path: Path) -> None:
+    validate_object(raw, path)
+    for name, entry in raw.items():
+        require(isinstance(name, str) and bool(name.strip()), path, "$", "Esperado nome de tecido não vazio.")
+        require(isinstance(entry, (dict, list)), path, name, "Esperado um cadastro de tecido ou lista legada de aliases.")
+        aliases = entry if isinstance(entry, list) else entry.get("aliases", [])
+        require(isinstance(aliases, list) and all(isinstance(alias, str) for alias in aliases), path, f"{name}.aliases", "Esperada uma lista de textos.")
+        if isinstance(entry, dict) and "roll_length_m" in entry:
+            length = entry["roll_length_m"]
+            require(finite_number(length) and float(length) > 0, path, f"{name}.roll_length_m", "Esperada metragem positiva e finita.")
 
 
 def _legacy_fabrics_path() -> Path:
@@ -108,27 +132,20 @@ def load_fabrics() -> Dict[str, FabricEntry]:
     if not p.exists():
         legacy = _legacy_fabrics_path()
         if legacy.exists():
-            try:
-                legacy_data = json.loads(legacy.read_text(encoding="utf-8"))
-                if isinstance(legacy_data, dict) and legacy_data:
-                    normalized = _normalize_fabrics(legacy_data)
-                    save_fabrics(normalized)
-                    return normalized
-            except Exception:
-                pass
+            legacy_data = read_json_config(legacy, {}, validator=_validate_fabrics)
+            normalized = _normalize_fabrics(legacy_data)
+            # Preserve extension fields in the initial migration as well.
+            for name, entry in legacy_data.items():
+                if isinstance(entry, dict):
+                    normalized[name] = {**entry, **normalized[name]}
+            save_fabrics(normalized)
+            return normalized
 
         data = _default_fabrics()
         save_fabrics(data)
         return data
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(raw, dict) and raw:
-            return _normalize_fabrics(raw)
-        raise ValueError("vazio")
-    except Exception:
-        data = _default_fabrics()
-        save_fabrics(data)
-        return data
+    raw = read_json_config(p, {}, validator=_validate_fabrics)
+    return _normalize_fabrics(raw)
 
 
 _DASHES = ["–", "—", "-", "-"]  # en dash, em dash, hyphen, non-breaking hyphen

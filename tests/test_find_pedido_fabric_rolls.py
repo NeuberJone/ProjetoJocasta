@@ -88,6 +88,26 @@ class FindPedidoFabricRollsTests(unittest.TestCase):
         found_roll_ids = {r["roll_id"] for r in matches[("Cliente A", "DRYFIT")]}
         self.assertEqual(found_roll_ids, {roll_b})
 
+    def test_test_roll_never_counts_as_an_already_printed_duplicate(self):
+        # Rolo de teste (nome terminado em "_TESTE") imprime o mesmo
+        # pedido+tecido de um rolo real — como não é produção de verdade,
+        # nunca deve aparecer como "já impresso" contra outro rolo.
+        save_export_transactional(
+            machine="M1", roll_name="M1-0001_TESTE", export_mode="normal", app_version="1.0.0",
+            orders=[_order("Cliente A", "DRYFIT", "2026-11-05T10:00:00", "doc1.jpg")],
+        )
+
+        matches = find_pedido_fabric_rolls([("Cliente A", "DRYFIT")])
+        self.assertEqual(matches, {})
+
+        roll_b, _ = save_export_transactional(
+            machine="M1", roll_name="M1-0002", export_mode="normal", app_version="1.0.0",
+            orders=[_order("Cliente A", "DRYFIT", "2026-11-05T11:00:00", "doc2.jpg")],
+        )
+        matches = find_pedido_fabric_rolls([("Cliente A", "DRYFIT")])
+        found_roll_ids = {r["roll_id"] for r in matches[("Cliente A", "DRYFIT")]}
+        self.assertEqual(found_roll_ids, {roll_b})
+
 
 if __name__ == "__main__":
     unittest.main()

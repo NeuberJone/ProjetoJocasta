@@ -11,6 +11,8 @@ from typing import Optional
 
 from .helpers import format_m, payload_summary, safe_int
 from core.paths import reveal_file_in_explorer
+from core.logging_config import get_logger, log_exception
+from core.printlogs_db import is_test_roll_name
 from core.ui import card, page_heading
 from modules.operacao.models import Job as OperacaoJob
 from modules.operacao.parser import build_blocks
@@ -28,6 +30,8 @@ from .repository import (
     load_roll_was_edited,
     search_rolls,
 )
+
+_logger = get_logger(__name__)
 
 # Mapeia tanto os nomes antigos (rolos já exportados antes do rebrand pra
 # Nexor) quanto os novos — sem isso, "Editar rolo" quebraria pra todo o
@@ -371,6 +375,7 @@ class PXSearchOrdersUI(ttk.Frame):
                 tipo=tipo,
             )
         except Exception as e:
+            log_exception(_logger, "Production records read failed", e)
             messagebox.showerror(
                 "Registros",
                 f"Falha ao carregar rolos.\n\n{type(e).__name__}: {e}",
@@ -541,9 +546,10 @@ class PXSearchOrdersUI(ttk.Frame):
                     ],
                 }
         except Exception as e:
+            log_exception(_logger, "Could not prepare roll for editing", e)
             messagebox.showerror(
                 "Editar rolo",
-                f"Falha ao preparar os dados do rolo para edição.\n\n{traceback.format_exc()}",
+                f"Falha ao preparar os dados do rolo para edição.\n\n{type(e).__name__}: {e}",
             )
             return
 
@@ -737,6 +743,17 @@ class PXSearchOrdersUI(ttk.Frame):
             )
             return
 
+        # Rolo de teste (nome terminado em "_TESTE" — ver Operação · "Rolo de
+        # teste" e core.printlogs_db.is_test_roll_name): não representa
+        # produção real, então não gera contexto de produção pro PX Tool Box.
+        if is_test_roll_name(str(document["source"].get("rollName") or "")):
+            messagebox.showwarning(
+                "Exportar contexto de produção",
+                "Este trabalho pertence a um rolo de TESTE — não representa produção real, "
+                "por isso não há contexto de produção para exportar.",
+            )
+            return
+
         safe_label = "".join(c if c.isalnum() or c in " -_" else "_" for c in pedido_label).strip() or "trabalho"
         default_name = f"{safe_label}-contexto-producao-px.json"
 
@@ -752,6 +769,7 @@ class PXSearchOrdersUI(ttk.Frame):
         try:
             write_order_context_document(document, destination)
         except Exception as e:
+            log_exception(_logger, "Production context export failed", e)
             messagebox.showerror(
                 "Exportar contexto de produção", f"Falha ao gravar o arquivo.\n\n{type(e).__name__}: {e}"
             )

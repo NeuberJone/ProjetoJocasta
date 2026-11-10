@@ -178,7 +178,7 @@ espelhado.
    - Ordem do rolo — os tecidos impressos, do último pro primeiro, com
      metragem e quantidade de arquivos; duplo clique ou botão direito
      num tecido abre "Editar tecido".
-   - Detalhes do bloco — os arquivos/jobs de um tecido selecionado na aba
+   - Detalhes do bloco — os arquivos de um tecido selecionado na aba
      anterior; duplo clique ou botão direito num arquivo edita a
      observação. Pra anotar vários arquivos de uma vez com o mesmo texto
      (ex.: "papel manchado nesse trecho"), selecione todos com
@@ -282,7 +282,7 @@ três abas:
   da Operação aparecem à parte, sem entrar na soma dos tecidos — veja a
   opção "Agrupar espaços consecutivos" em Configurações pra juntar
   avanços seguidos numa linha só.
-- Pedidos — cada arquivo/job gravado nesse rolo, com tecido, tipo,
+- Pedidos — cada arquivo gravado nesse rolo, com tecido, tipo,
   metragem e observação.
 - Eventos — o histórico de exportações/atualizações desse rolo (quando
   foi criado, quando foi reexportado, e o que mudou em cada vez).
@@ -383,9 +383,9 @@ padrão do módulo.
 
 - Abrir pasta PDF / Abrir pasta JPG — atalho pras pastas onde a Operação
   salva os comprovantes e os JPGs.
-- Arquivos de espaço — cadastro de nomes de arquivo/job que a máquina
+- Arquivos de espaço — cadastro de nomes de arquivo que a máquina
   imprime como avanço entre tecidos (não são pedidos de verdade); ao
-  importar, esses logs viram ESPAÇO. Cada entrada tem um "Arquivo/job"
+  importar, esses logs viram ESPAÇO. Cada entrada tem um "Arquivo"
   (o nome que aparece no log) e uma "Exibição" (como aparece nas
   listagens — padrão "ESPAÇO" se deixar em branco). Selecione um item da
   lista pra editar; "Adicionar / Atualizar" salva, "Remover" apaga.
@@ -403,7 +403,7 @@ padrão do módulo.
 Valores padrão usados ao abrir a tela e ao clicar em "Limpar" (a
 impressora e a velocidade vêm do cadastro de Impressoras, não daqui):
 
-- DPI global, Setup (min/job), Gap entre tecidos (m), Gap antes do fim do
+- DPI global, Setup (min/arquivo), Gap entre tecidos (m), Gap antes do fim do
   rolo (m), Gap entre arquivos (m), Rolo p/ tecido sem metragem (m) e
   Sangria dos pedaços (cm).
 - Eixo do comprimento — altura, largura ou maior (lado usado pra calcular

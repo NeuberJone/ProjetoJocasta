@@ -7,8 +7,11 @@ from typing import Dict, Iterable, List, Optional
 
 from core.fabrics import FabricEntry, canonical_fabric_name
 from core.operators import operator_name_for_code
+from core.logging_config import get_logger, log_exception
 from core.print_types import DEFAULT_RULES, classify_document, pedido_override_for_type
 from .models import Job, Block, PedidoSummary
+
+_logger = get_logger(__name__)
 
 _RE_KV = re.compile(r"^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$")
 _RE_SECTION = re.compile(r"^\s*\[(.+?)\]\s*$")
@@ -158,7 +161,8 @@ def read_log_general_fields(path: str) -> Dict[str, str]:
     impressora de origem pelo ComputerName) antes do parse completo."""
     try:
         txt = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
+    except Exception as exc:
+        log_exception(_logger, "Printer log metadata read failed", exc)
         return {}
 
     section = None
@@ -185,7 +189,8 @@ def parse_log_txt(
 ) -> Optional[Job]:
     try:
         txt = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
+    except Exception as exc:
+        log_exception(_logger, "Printer log read failed", exc)
         return None
 
     section = None

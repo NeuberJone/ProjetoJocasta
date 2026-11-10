@@ -6,7 +6,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 from core.version import __version__
+from core.release_notes import load_release_notes
 from core.config import load_config as load_pxcore_config, save_config as save_pxcore_config
+from core.logging_config import configure_logging, get_logger, log_exception
 from core import theme
 from core.ui import card, dialog_header, page_heading, page_scroll_container, status_bar
 from core.printers import (
@@ -22,6 +24,8 @@ from core.station import (
     save_station_id,
     save_station_operator,
 )
+
+_logger = get_logger(__name__)
 
 # Root precisa ser TkinterDnD.Tk para drag & drop
 try:
@@ -40,12 +44,14 @@ MODULES: list[tuple[str, str]] = [
 
 SETTINGS_TITLE = "Configurações"
 MANUAL_TITLE = "Manual"
+RELEASE_NOTES_TITLE = "Notas da versão"
 
 
 def _safe_import(name: str):
     try:
         return importlib.import_module(name)
     except Exception as e:
+        log_exception(_logger, "Module import failed", e)
         return e
 
 
@@ -54,17 +60,18 @@ def _safe_import(name: str):
 # =========================
 class Nexor(RootBase):
     def __init__(self) -> None:
+        super().__init__()
         # PXCore config (cria dirs e config automaticamente)
         try:
             self.px_cfg = load_pxcore_config()
         except Exception as e:
+            log_exception(_logger, "Application configuration failed to load", e)
             self.px_cfg = None
             messagebox.showwarning(
                 "PXCore",
                 f"Falha ao carregar configurações do PXCore.\n\n{type(e).__name__}: {e}",
+                parent=self,
             )
-
-        super().__init__()
 
         self.title(f"Nexor v{__version__}")
         self.geometry("1280x800")
@@ -93,6 +100,16 @@ class Nexor(RootBase):
 
         # abre no primeiro módulo
         self.load_module(MODULES[0][0])
+
+    def report_callback_exception(self, exc_type, exc_value, exc_traceback) -> None:
+        """Mantém a interface aberta e torna falhas de callbacks visíveis."""
+        log_exception(_logger, "Interface action failed", exc_value)
+        messagebox.showerror(
+            "Não foi possível concluir a ação",
+            f"{exc_type.__name__}: {exc_value}\n\nA ação não foi concluída. "
+            "Confira a mensagem acima antes de tentar novamente.",
+            parent=self,
+        )
 
     # =========================
     # Menu
@@ -161,6 +178,13 @@ class Nexor(RootBase):
         manual_btn.pack(fill="x", pady=(0, 6))
         self._nav_buttons[MANUAL_TITLE] = manual_btn
 
+        release_notes_btn = ttk.Button(
+            sidebar, text=RELEASE_NOTES_TITLE, style="Nav.TButton",
+            command=lambda: self.load_module(RELEASE_NOTES_TITLE),
+        )
+        release_notes_btn.pack(fill="x", pady=(0, 6))
+        self._nav_buttons[RELEASE_NOTES_TITLE] = release_notes_btn
+
         settings_btn = ttk.Button(
             sidebar, text="Configurações", style="Nav.TButton",
             command=lambda: self.load_module(SETTINGS_TITLE),
@@ -198,16 +222,24 @@ class Nexor(RootBase):
         if title in self._pages:
             return
         page = ttk.Frame(self.content)
-        if title == SETTINGS_TITLE:
-            self._build_settings_page(page)
-        elif title == MANUAL_TITLE:
-            self._build_manual_page(page)
-        else:
-            module_path = dict(MODULES).get(title)
-            if module_path is None:
-                messagebox.showerror("Nexor", f"Módulo desconhecido: {title}")
-                return
-            self._build_module_page(page, title, module_path)
+        try:
+            if title == SETTINGS_TITLE:
+                self._build_settings_page(page)
+            elif title == MANUAL_TITLE:
+                self._build_manual_page(page)
+            elif title == RELEASE_NOTES_TITLE:
+                self._build_release_notes_page(page)
+            else:
+                module_path = dict(MODULES).get(title)
+                if module_path is None:
+                    messagebox.showerror("Nexor", f"Módulo desconhecido: {title}")
+                    return
+                self._build_module_page(page, title, module_path)
+        except Exception as exc:
+            log_exception(_logger, "Page initialization failed", exc)
+            for child in page.winfo_children():
+                child.destroy()
+            self._render_error(page, f"Não foi possível carregar {title}.\n\n{type(exc).__name__}: {exc}")
         self._pages[title] = page
         # A página é construída depois da aplicação inicial do tema.
         # Reaplicar aqui é essencial para widgets Tk clássicos (Text,
@@ -246,6 +278,7 @@ class Nexor(RootBase):
                 ui.pack(fill="both", expand=True)
             self._page_uis[title] = ui
         except Exception as e:
+            log_exception(_logger, "Production module initialization failed", e)
             self._render_error(page, f"Falha ao montar UI de {title}:\n\n{type(e).__name__}: {e}")
 
     def _build_manual_page(self, page: ttk.Frame) -> None:
@@ -261,6 +294,46 @@ class Nexor(RootBase):
             self._page_uis[MANUAL_TITLE] = ui
         except Exception as e:
             self._render_error(page, f"Falha ao montar o manual:\n\n{type(e).__name__}: {e}")
+
+    def _build_release_notes_page(self, page: ttk.Frame) -> None:
+        subtitle = f"Nexor v{__version__}"
+        error = ""
+        try:
+            notes = load_release_notes(__version__)
+        except (OSError, UnicodeError):
+            notes = None
+            error = "Não foi possível carregar as notas desta versão."
+
+        if notes and notes.date:
+            subtitle += f" · Publicada em {notes.date}"
+        page_heading(page, RELEASE_NOTES_TITLE, subtitle).pack(
+            fill="x", padx=22, pady=(22, 10),
+        )
+
+        body = ttk.Frame(page)
+        body.pack(fill="both", expand=True, padx=22, pady=(0, 18))
+        text = tk.Text(
+            body, wrap="word", padx=16, pady=14,
+            relief="flat", borderwidth=0, highlightthickness=0,
+        )
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        text.tag_configure("heading", font=("", 12, "bold"), spacing1=12, spacing3=6)
+        text.tag_configure("item", lmargin1=12, lmargin2=26, spacing3=8)
+
+        if notes is None:
+            text.insert("end", error or "Ainda não há notas registradas para esta versão.")
+        else:
+            for title, items in notes.sections.items():
+                text.insert("end", title + "\n", "heading")
+                if items:
+                    for item in items:
+                        text.insert("end", "•  " + item.replace("`", "") + "\n", "item")
+                else:
+                    text.insert("end", "Nenhum item nesta versão.\n", "item")
+        text.configure(state="disabled")
 
     def _render_error(self, parent: ttk.Frame, text: str) -> None:
         t = tk.Text(parent, wrap="word")
@@ -361,8 +434,13 @@ class Nexor(RootBase):
             if not new_dir:
                 messagebox.showerror("Configurações", "Informe um diretório base.")
                 return
+            previous = self.px_cfg.base_dir
             self.px_cfg.base_dir = new_dir
-            save_pxcore_config(self.px_cfg)
+            try:
+                save_pxcore_config(self.px_cfg)
+            except Exception:
+                self.px_cfg.base_dir = previous
+                raise
             messagebox.showinfo(
                 "Configurações",
                 "Diretório base salvo. Reinicie o aplicativo para aplicar as alterações.",
@@ -478,6 +556,7 @@ class Nexor(RootBase):
                     all_ok = False
             except Exception as e:  # noqa: BLE001
                 all_ok = False
+                log_exception(_logger, "Settings section failed to save", e)
                 messagebox.showerror(
                     "Configurações", f"Falha ao salvar uma das seções.\n\n{type(e).__name__}: {e}"
                 )
@@ -593,10 +672,15 @@ class Nexor(RootBase):
                                 fill=spec.brand, outline="")
 
     def _select_theme(self, key: str) -> None:
-        theme.apply_theme(self, key)
         if self.px_cfg is not None:
+            previous = self.px_cfg.theme_name
             self.px_cfg.theme_name = key
-            save_pxcore_config(self.px_cfg)
+            try:
+                save_pxcore_config(self.px_cfg)
+            except Exception:
+                self.px_cfg.theme_name = previous
+                raise
+        theme.apply_theme(self, key)
         self._mark_active_theme()
 
     def _mark_active_theme(self) -> None:
@@ -913,7 +997,24 @@ class Nexor(RootBase):
 
 
 def main() -> None:
-    Nexor().mainloop()
+    logging_error = None
+    try:
+        configure_logging()
+    except OSError as exc:
+        logging_error = exc
+    try:
+        app = Nexor()
+    except Exception as exc:
+        log_exception(_logger, "Application startup failed", exc)
+        messagebox.showerror("Inicialização", f"Não foi possível iniciar o Nexor.\n\n{type(exc).__name__}: {exc}")
+        raise SystemExit(1) from exc
+    if logging_error is not None:
+        messagebox.showwarning(
+            "Diagnóstico técnico", f"Não foi possível abrir o arquivo de log técnico.\n\n"
+            f"{type(logging_error).__name__}: {logging_error}", parent=app,
+        )
+    _logger.info("Nexor started; version %s", __version__)
+    app.mainloop()
 
 
 if __name__ == "__main__":

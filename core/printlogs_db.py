@@ -10,6 +10,22 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from core.config import load_config
+from core.logging_config import get_logger, log_exception
+from core.sqlite_maintenance import DatabaseUnavailableError
+
+
+_logger = get_logger(__name__)
+
+# Marca de "rolo de teste" (ver Operação · caixa "Rolo de teste") — de propósito, só o nome
+# do rolo carrega essa marca, sem coluna própria no banco: assim ela aparece automaticamente
+# em TUDO que já exibe o nome do rolo (PDF, JPG, nome de arquivo, Registros), sem precisar
+# duplicar lógica em cada lugar. Único efeito funcional no banco: find_pedido_fabric_rolls (ver
+# comentário lá) nunca conta pedidos de um rolo de teste como "já impresso" em outro rolo.
+TEST_ROLL_SUFFIX = "_TESTE"
+
+
+def is_test_roll_name(roll_name: str) -> bool:
+    return str(roll_name or "").strip().upper().endswith(TEST_ROLL_SUFFIX)
 
 
 @dataclass
@@ -38,19 +54,24 @@ def get_db_path() -> Path:
 
 def connect() -> sqlite3.Connection:
     db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    con = sqlite3.connect(str(db_path))
-    con.row_factory = sqlite3.Row  # permite dict(row)
-
-    con.execute("PRAGMA foreign_keys = ON;")
-    # DELETE (journal tradicional, baseado em lock de arquivo) em vez de WAL —
-    # WAL depende de memória compartilhada (mmap) que não funciona de forma
-    # confiável em pastas de rede, e o base_dir pode apontar pra uma pasta de
-    # rede compartilhada entre vários computadores.
-    con.execute("PRAGMA journal_mode = DELETE;")
-    con.execute("PRAGMA synchronous = NORMAL;")
-    return con
+    con = None
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(str(db_path), timeout=5.0)
+        con.row_factory = sqlite3.Row  # permite dict(row)
+        con.execute("PRAGMA busy_timeout = 5000;")
+        con.execute("PRAGMA foreign_keys = ON;")
+        # DELETE evita a memória compartilhada exigida por WAL em rede.
+        # Ainda depende dos locks do filesystem: não garante concorrência
+        # segura em qualquer servidor/cliente SMB.
+        con.execute("PRAGMA journal_mode = DELETE;")
+        con.execute("PRAGMA synchronous = NORMAL;")
+        return con
+    except (sqlite3.Error, OSError) as exc:
+        if con is not None:
+            con.close()
+        log_exception(_logger, "SQLite connection unavailable", exc)
+        raise DatabaseUnavailableError.from_exception(exc, operation="acessar o banco de dados") from exc
 
 
 def init_schema(con: sqlite3.Connection) -> None:
@@ -164,9 +185,9 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
 
     # roll_original_orders (só uma cópia, "o original") foi substituída por
     # roll_order_versions (uma cópia por edição: Original, Edição 1, Edição
-    # 2...) — migra o que existir da tabela antiga como version_no=0 antes
-    # de descartá-la, pra não perder o que já tinha sido preservado em
-    # versões anteriores do Nexor.
+    # 2...) — copia o que existir como version_no=0, preservando a tabela
+    # legada e seu histórico. Reabrir a base não sobrescreve a versão
+    # original que já tiver sido migrada.
     tables = {
         row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
@@ -178,10 +199,9 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
             if row["roll_id"] in already:
                 continue
             con.execute(
-                "INSERT INTO roll_order_versions(roll_id, version_no, orders_json, saved_at) VALUES(?,0,?,?)",
+                "INSERT OR IGNORE INTO roll_order_versions(roll_id, version_no, orders_json, saved_at) VALUES(?,0,?,?)",
                 (row["roll_id"], row["orders_json"], row["saved_at"]),
             )
-        con.execute("DROP TABLE roll_original_orders")
         con.commit()
 
 
@@ -248,7 +268,8 @@ def next_roll_sequence() -> int:
         seq = int(cur.lastrowid)
         con.commit()
         return seq
-    except Exception:
+    except Exception as exc:
+        log_exception(_logger, "SQLite roll sequence transaction failed", exc)
         try:
             con.rollback()
         except Exception:
@@ -344,11 +365,12 @@ def save_export_transactional(
             con.commit()
             return roll_id, False
 
-    except Exception:
+    except Exception as exc:
+        log_exception(_logger, "SQLite roll export transaction failed", exc)
         try:
             con.rollback()
-        except Exception:
-            pass
+        except Exception as rollback_exc:
+            log_exception(_logger, "SQLite roll export rollback failed", rollback_exc)
         raise
     finally:
         con.close()
@@ -491,10 +513,10 @@ def get_order_context(order_id: int) -> dict[str, Any] | None:
         result = dict(row)
         try:
             result["database_id"] = get_database_id(con)
-        except Exception:
+        except Exception as exc:
             # Melhor esforço, igual ao installation_id (core/config.py) — a exportação não
             # pode falhar só por isso; o campo opcional simplesmente não entra no documento.
-            pass
+            log_exception(_logger, "SQLite optional database identity unavailable", exc)
         return result
     finally:
         con.close()
@@ -647,6 +669,11 @@ def find_pedido_fabric_rolls(
     resultado — sem isso, fechar de novo (ou reabrir e "Atualizar Rolo")
     o MESMO rolo acusa duplicidade contra ele mesmo, o que não é duplicidade
     real nenhuma.
+
+    Rolos de teste (nome terminado em "_TESTE" — ver TEST_ROLL_SUFFIX) nunca
+    entram no resultado: um pedido impresso só num rolo de teste não é
+    produção real, então nunca deve soar como "já impresso" quando o mesmo
+    pedido/tecido for fechado de verdade depois.
     """
     pairs = [(p.strip(), f.strip()) for p, f in pairs if p and f]
     if not pairs:
@@ -680,6 +707,8 @@ def find_pedido_fabric_rolls(
                     """,
                     (pedido, fabric),
                 ).fetchall()
+
+            rows = [row for row in rows if not is_test_roll_name(row["roll_name"])]
 
             if rows:
                 out[(pedido, fabric)] = [dict(row) for row in rows]
@@ -842,7 +871,9 @@ def update_roll_orders(
         except Exception:
             con.rollback()
             raise
-
+    except Exception as exc:
+        log_exception(_logger, "SQLite roll update transaction failed", exc)
+        raise
     finally:
         con.close()
 

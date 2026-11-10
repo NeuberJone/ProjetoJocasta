@@ -170,7 +170,7 @@ class RollOrderVersionsTests(unittest.TestCase):
         finally:
             con.close()
 
-        self.assertNotIn("roll_original_orders", tables)
+        self.assertIn("roll_original_orders", tables)
         self.assertEqual(get_roll_order_version_count(roll_id), 1)
         self.assertEqual({o["document"] for o in get_roll_order_version(roll_id, 0)}, {"doc1.jpg"})
 

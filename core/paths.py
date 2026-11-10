@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from core.logging_config import get_logger, log_exception
+
+_logger = get_logger(__name__)
+
 
 def is_frozen() -> bool:
     return getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
@@ -33,14 +37,22 @@ def config_path() -> Path:
 
 
 def ensure_dir(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log_exception(_logger, "Working directory unavailable", exc)
+        raise
     return path
 
 
 def open_in_explorer(path: Path) -> None:
     """Abre a pasta no Explorer (Windows)."""
     path = path.resolve()
-    os.startfile(str(path))  # noqa: S606 (Windows-only)
+    try:
+        os.startfile(str(path))  # noqa: S606 (Windows-only)
+    except OSError as exc:
+        log_exception(_logger, "Could not open working directory", exc)
+        raise
 
 
 def reveal_file_in_explorer(file_path: Path) -> None:
@@ -49,7 +61,11 @@ def reveal_file_in_explorer(file_path: Path) -> None:
     argumentos (nunca string montada por concatenação): evita qualquer interpretação de shell
     do caminho, mesmo com espaços/acentos."""
     resolved = str(file_path.resolve())
-    subprocess.Popen(["explorer", "/select,", resolved])  # noqa: S603,S607 (Windows-only)
+    try:
+        subprocess.Popen(["explorer", "/select,", resolved])  # noqa: S603,S607 (Windows-only)
+    except OSError as exc:
+        log_exception(_logger, "Could not reveal exported file", exc)
+        raise
 
 
 # =========================

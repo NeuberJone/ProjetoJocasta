@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 from core.export_config import load_export_cfg
 from core.fabrics import load_fabrics
 from core.format import fmt_m
+from core.logging_config import get_logger, log_exception
 from core.operators import normalize_operators, operator_name_for_code
 from core.ui import card, dialog_header, info_banner, page_heading
 from core.printers import find_printer_by_computer_name, find_printer_by_display_name, load_printers
@@ -23,14 +24,18 @@ from core.print_types import (
     warn_duplicate_for_type,
 )
 from core.printlogs_db import (
+    TEST_ROLL_SUFFIX,
     OrderRow,
     find_pedido_fabric_rolls,
+    is_test_roll_name,
     next_roll_sequence,
     save_export_transactional,
     update_roll_orders,
 )
 from core.roll_naming import build_roll_name
 from core.version import APP_VERSION
+
+_logger = get_logger(__name__)
 
 from .config import load_cfg
 from .exporters import (
@@ -159,6 +164,12 @@ class PXPrintLogsUI(ttk.Frame):
         ttk.Button(top, text="Atualizar nome", command=self.on_refresh_roll_name).grid(
             row=0, column=2, padx=(0, 16), sticky="w"
         )
+
+        self.var_is_test = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            top, text="Rolo de teste", variable=self.var_is_test,
+            command=self.on_toggle_test_roll,
+        ).grid(row=0, column=4, sticky="w", padx=(0, 16))
 
         self.lbl_machine = ttk.Label(top, text="Máquina do lote: (não definida)")
         self.lbl_machine.grid(row=0, column=3, sticky="w")
@@ -376,7 +387,9 @@ class PXPrintLogsUI(ttk.Frame):
     def _apply_preload(self, preload: dict) -> None:
         self.edit_roll_id = int(preload["edit_roll_id"])
         self.machine = str(preload.get("machine") or "") or None
-        self.var_roll.set(str(preload.get("roll_name") or ""))
+        roll_name = str(preload.get("roll_name") or "")
+        self.var_roll.set(roll_name)
+        self.var_is_test.set(is_test_roll_name(roll_name))
         self.Jobs = list(preload.get("jobs") or [])
 
         if self.machine:
@@ -518,7 +531,27 @@ class PXPrintLogsUI(ttk.Frame):
         # trabalho), quando configurado, entra no fim do nome como reforço
         # extra contra colisão entre PCs diferentes.
         seq = next_roll_sequence()
-        return build_roll_name(self.machine or "M?", seq)
+        name = build_roll_name(self.machine or "M?", seq)
+        if self.var_is_test.get() and not is_test_roll_name(name):
+            name += TEST_ROLL_SUFFIX
+        return name
+
+    def on_toggle_test_roll(self) -> None:
+        """Rolo de teste: a marca é o próprio nome terminando em "_TESTE"
+        (ver core.printlogs_db.TEST_ROLL_SUFFIX) — sem isso o rolo seria
+        registrado e aparecer em comprovante/Registros/filename exatamente
+        igual a um rolo real, inclusive contando como "já impresso" para
+        avisos de duplicidade contra rolos futuros."""
+        name = self.var_roll.get().strip()
+        if not name:
+            return
+        if self.var_is_test.get():
+            if not is_test_roll_name(name):
+                self.var_roll.set(f"{name}{TEST_ROLL_SUFFIX}")
+        else:
+            if is_test_roll_name(name):
+                stripped = name[: -len(TEST_ROLL_SUFFIX)].rstrip("_").strip()
+                self.var_roll.set(stripped)
 
     def on_refresh_roll_name(self):
         if not self.machine:
@@ -536,6 +569,12 @@ class PXPrintLogsUI(ttk.Frame):
         name = self.var_roll.get().strip()
         if not name:
             name = self._auto_roll_name()
+            self.var_roll.set(name)
+        # Reforço defensivo: cobre o caso de digitar um nome manualmente
+        # depois de marcar "Rolo de teste" (ou editar o nome depois de já
+        # marcado) sem reusar on_toggle_test_roll.
+        if self.var_is_test.get() and not is_test_roll_name(name):
+            name = f"{name}{TEST_ROLL_SUFFIX}"
             self.var_roll.set(name)
         return sanitize_filename(name)
 
@@ -760,6 +799,7 @@ class PXPrintLogsUI(ttk.Frame):
         self.edit_roll_id = None
         self.var_close_roll_text.set("Fechar Rolo")
         self.var_roll.set("")
+        self.var_is_test.set(False)
         self.lbl_machine.configure(text="Máquina do lote: (não definida)")
         self.tree_blocks.delete(*self.tree_blocks.get_children())
         self.tree_pedidos.delete(*self.tree_pedidos.get_children())
@@ -1742,7 +1782,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         for job in self.Jobs:
             if job.height_mm <= 0:
-                messagebox.showerror("Dados inválidos", f"HeightMM inválido no job: {job.document}")
+                messagebox.showerror("Dados inválidos", f"Altura inválida no arquivo: {job.document}")
                 return
             if abs(job.real_m - (job.height_mm / 1000.0)) > 0.001:
                 messagebox.showerror("Dados inválidos", "Inconsistência em real_m detectada.")
@@ -1831,6 +1871,7 @@ class PXPrintLogsUI(ttk.Frame):
                 Path(tmp_normal_pdf).unlink(missing_ok=True)
             except Exception:
                 pass
+            log_exception(_logger, "Production file export failed", e)
             messagebox.showerror("Erro ao exportar", str(e))
             return
 
@@ -1904,7 +1945,18 @@ class PXPrintLogsUI(ttk.Frame):
                 self.var_close_roll_text.set("Atualizar Rolo")
 
         except Exception as e:
+            log_exception(_logger, "Production export database persistence failed", e)
             self.status.configure(text=self.status.cget("text") + f" | DB erro: {type(e).__name__}")
+            if which in ("normal", "both"):
+                self._last_pdf_path = normal_path
+                self.btn_open_comprovante.configure(state="normal")
+            messagebox.showwarning(
+                "Fechamento não concluído",
+                "Os arquivos foram gerados, mas o rolo não foi registrado/atualizado no banco.\n\n"
+                f"{type(e).__name__}: {e}\n\n"
+                "Confira o acesso ao banco e os arquivos gerados antes de repetir o fechamento.",
+            )
+            return
 
         if which in ("normal", "both"):
             self._last_pdf_path = normal_path

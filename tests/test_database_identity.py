@@ -26,10 +26,13 @@ def _fresh_db(path: Path) -> sqlite3.Connection:
 
 class DatabaseIdentityScenarioTests(unittest.TestCase):
     def setUp(self):
-        self._tmp_dir = tempfile.TemporaryDirectory()
+        self._tmp_dir = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
         self.tmp_path = Path(self._tmp_dir.name)
+        self._dirs_patcher = patch("core.config._ensure_dirs")
+        self._dirs_patcher.start()
 
     def tearDown(self):
+        self._dirs_patcher.stop()
         self._tmp_dir.cleanup()
 
     def test_uma_instalacao_duas_bases_mesmo_installation_id_database_id_diferente(self):

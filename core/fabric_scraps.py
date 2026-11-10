@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 from collections import OrderedDict
@@ -9,13 +8,23 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from core.migrate import migrate_legacy_path
+from core.json_store import (
+    ConfigurationWriteError, finite_number, preserve_entry_fields, read_json_config, require, write_json_config,
+)
+from core.logging_config import get_logger, log_exception
+
+_logger = get_logger(__name__)
 
 
 def _store_path() -> Path:
     appdata = Path(os.environ.get("APPDATA") or str(Path.home()))
     base = appdata / "Nexor" / "Planejador"
     migrate_legacy_path(appdata / "ProjetoJocasta" / "PXPrintCalc", base)
-    base.mkdir(parents=True, exist_ok=True)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log_exception(_logger, "Scrap configuration directory unavailable", exc)
+        raise ConfigurationWriteError(base / "scraps.json", "Não foi possível acessar a pasta de pedaços de tecido.") from exc
     return base / "scraps.json"
 
 
@@ -49,7 +58,28 @@ def _coerce(d: dict) -> FabricScrap:
 
 
 def _save_raw(data: List[dict]) -> None:
-    _store_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = _store_path()
+    previous = read_json_config(path, [], validator=_validate_scraps)
+    previous = [{**item, "key": _coerce(item).key} for item in previous]
+    write_json_config(path, preserve_entry_fields(previous, data), validator=_validate_scraps)
+
+
+def _validate_scraps(raw: object, path: Path) -> None:
+    require(isinstance(raw, list), path, "$", "Esperada uma lista de pedaços de tecido.")
+    seen = set()
+    for index, item in enumerate(raw):
+        field = f"[{index}]"
+        require(isinstance(item, dict), path, field, "Esperado um objeto de pedaço de tecido.")
+        for name in ("key", "name", "fabric", "tipo", "observacao"):
+            if name in item:
+                require(isinstance(item[name], str), path, f"{field}.{name}", "Esperado texto.")
+        length = item.get("length_m", 0)
+        require(finite_number(length) and float(length) >= 0, path, f"{field}.length_m", "Esperada metragem finita não negativa.")
+        if "used" in item:
+            require(isinstance(item["used"], bool), path, f"{field}.used", "Esperado verdadeiro ou falso.")
+        identity = _coerce(item).key
+        require(identity not in seen, path, f"{field}.key", "Identificador de pedaço repetido.")
+        seen.add(identity)
 
 
 def load_scraps() -> List[FabricScrap]:
@@ -57,13 +87,8 @@ def load_scraps() -> List[FabricScrap]:
     if not p.exists():
         _save_raw([])
         return []
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        if isinstance(raw, list):
-            return [_coerce(d) for d in raw if isinstance(d, dict)]
-    except Exception:
-        pass
-    return []
+    raw = read_json_config(p, [], validator=_validate_scraps)
+    return [_coerce(d) for d in raw]
 
 
 def save_scraps(scraps: List[FabricScrap]) -> None:

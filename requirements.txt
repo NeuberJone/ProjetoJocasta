@@ -1,0 +1,6 @@
+# Runtime baseline inspected on Python 3.13.7 / Windows (2026-11-05).
+# reportlab's required Pillow dependency is pinned explicitly below.
+Pillow==11.0.0
+PyMuPDF==1.27.1
+reportlab==4.0.7
+tkinterdnd2==0.4.3

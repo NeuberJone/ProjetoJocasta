@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 from core.format import fmt_m
+from core.printlogs_db import is_test_roll_name
 from core.station import load_station_operator
 from .models import Block, PedidoSummary
 
@@ -305,10 +306,22 @@ def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, 
     c.setFont("Helvetica-Bold", 14)
     c.drawString(40, top_y, f"Ordem do Rolo - {roll_name}")
 
+    # Rolo de teste (nome terminado em "_TESTE" — ver core.printlogs_db.
+    # TEST_ROLL_SUFFIX): além da marca já estar no próprio nome, repete em
+    # destaque (negrito + vermelho) pra nunca passar batido num comprovante
+    # impresso — ele não representa produção real.
+    shift = 0
+    if is_test_roll_name(roll_name):
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillColorRGB(0.75, 0, 0)
+        c.drawString(40, top_y - 18, "ROLO DE TESTE — não representa produção real")
+        c.setFillColorRGB(0, 0, 0)
+        shift = 16
+
     c.setFont("Helvetica", 10)
     c.drawString(
         40,
-        top_y - 18,
+        top_y - 18 - shift,
         (
             f"Máquina: {machine}    "
             f"Modo: {'Completo' if mode == 'full' else 'Resumido'}    "
@@ -320,10 +333,10 @@ def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, 
     # computador (Configurações → Identificador deste computador) — opcional,
     # some da linha (sem reservar espaço) quando não está cadastrado.
     operator = load_station_operator()
-    line_y = top_y - 26
+    line_y = top_y - 26 - shift
     if operator:
-        c.drawString(40, top_y - 32, f"Operador de fechamento: {operator}")
-        line_y = top_y - 40
+        c.drawString(40, top_y - 32 - shift, f"Operador de fechamento: {operator}")
+        line_y = top_y - 40 - shift
 
     c.line(40, line_y, page_w - 40, line_y)
     return line_y - 14
@@ -612,18 +625,22 @@ def _render_report_body(
         return y
 
     # completo
-    w_end = 95
-    w_doc = 170
-    w_fab = 80
-    w_tipo = 55
-    w_op = 70
-    w_size = 40
+    w_end = 80
+    w_doc = 130
+    w_fab = 60
+    w_ped = 95
+    w_tipo = 45
+    w_op = 50
+    w_size = 35
 
     font = "Helvetica"
     font_bold = "Helvetica-Bold"
+    font_italic = "Helvetica-Oblique"
     fs_head = 10
     fs_row = 10
+    fs_obs = 9
     line_h = 12
+    line_h_obs = 11
 
     def _reprint_jobs_header(y0: float) -> float:
         c.setFont("Helvetica-Bold", 12)
@@ -642,6 +659,8 @@ def _render_report_body(
         xh += w_doc
         c.drawString(xh, y0, "Tecido")
         xh += w_fab
+        c.drawString(xh, y0, "Pedido")
+        xh += w_ped
         c.drawString(xh, y0, "Tipo")
         xh += w_tipo
         c.drawString(xh, y0, "Operador")
@@ -671,17 +690,29 @@ def _render_report_body(
             end_txt = job.end_time.strftime("%d/%m/%Y %H:%M:%S")
             doc_txt = job.document
             fab_txt = job.fabric
+            ped_txt = job.pedido
             tipo_txt = job.tipo
             op_txt = job.operador
             size_txt = fmt_m(job.real_m, suffix=False)
+            obs_txt = (job.observacao or "").strip()
 
             doc_lines = _wrap_text(doc_txt, w_doc - 6, font, fs_row)
             fab_lines = _wrap_text(fab_txt, w_fab - 6, font, fs_row)
+            ped_lines = _wrap_text(ped_txt, w_ped - 6, font, fs_row)
             tipo_lines = _wrap_text(tipo_txt, w_tipo - 6, font, fs_row)
             op_lines = _wrap_text(op_txt, w_op - 6, font, fs_row)
+            # Observação entra como uma ou mais linhas abaixo da linha
+            # principal, ocupando a largura inteira da tabela (texto livre,
+            # pode ser mais longo do que qualquer coluna) — só reserva esse
+            # espaço quando o operador realmente anotou algo no item.
+            obs_lines = (
+                _wrap_text(f"Obs: {obs_txt}", page_w - 80 - 10, font_italic, fs_obs)
+                if obs_txt
+                else []
+            )
 
-            row_lines = max(len(doc_lines), len(fab_lines), len(tipo_lines), len(op_lines), 1)
-            row_h = row_lines * line_h
+            row_lines = max(len(doc_lines), len(fab_lines), len(ped_lines), len(tipo_lines), len(op_lines), 1)
+            row_h = row_lines * line_h + len(obs_lines) * line_h_obs
 
             if _pdf_need_new_page(y - row_h, min_y=95, continuous=continuous):
                 _end_page()
@@ -696,15 +727,20 @@ def _render_report_body(
             c.drawString(x0, y, end_txt)
             _draw_wrapped_cell(c, x0 + w_end, y, doc_lines, font, fs_row, line_h)
             _draw_wrapped_cell(c, x0 + w_end + w_doc, y, fab_lines, font, fs_row, line_h)
-            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab, y, tipo_lines, font, fs_row, line_h)
-            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab + w_tipo, y, op_lines, font, fs_row, line_h)
+            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab, y, ped_lines, font, fs_row, line_h)
+            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab + w_ped, y, tipo_lines, font, fs_row, line_h)
+            _draw_wrapped_cell(c, x0 + w_end + w_doc + w_fab + w_ped + w_tipo, y, op_lines, font, fs_row, line_h)
             c.drawRightString(
-                x0 + w_end + w_doc + w_fab + w_tipo + w_op + w_size - 2,
+                x0 + w_end + w_doc + w_fab + w_ped + w_tipo + w_op + w_size - 2,
                 y,
                 size_txt,
             )
 
-            y -= row_h
+            y -= row_lines * line_h
+
+            if obs_lines:
+                _draw_wrapped_cell(c, x0 + 10, y, obs_lines, font_italic, fs_obs, line_h_obs)
+                y -= len(obs_lines) * line_h_obs
 
     y -= 6
     if _pdf_need_new_page(y, min_y=120, continuous=continuous):

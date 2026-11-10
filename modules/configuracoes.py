@@ -1129,7 +1129,7 @@ def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Labe
     ttk.Label(
         box,
         text=(
-            "Nomes de arquivo/job que a máquina imprime como avanço entre tecidos. Ao importar, "
+            "Nomes de arquivo que a máquina imprime como avanço entre tecidos. Ao importar, "
             "esses logs viram ESPAÇO e não entram em \"Pedidos no rolo\"; o nome de exibição "
             "aparece nas listagens."
         ),
@@ -1157,7 +1157,7 @@ def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Labe
     space_row = ttk.Frame(box)
     space_row.pack(fill="x")
     tree = ttk.Treeview(space_row, columns=("filename", "display_name"), show="headings", height=4)
-    tree.heading("filename", text="Arquivo/job")
+    tree.heading("filename", text="Arquivo")
     tree.column("filename", width=260, anchor="w")
     tree.heading("display_name", text="Nome de exibição")
     tree.column("display_name", width=180, anchor="w")
@@ -1165,7 +1165,7 @@ def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Labe
 
     form = ttk.Frame(space_row)
     form.pack(side="left", fill="y", padx=(12, 0))
-    ttk.Label(form, text="Arquivo/job:").grid(row=0, column=0, sticky="w")
+    ttk.Label(form, text="Arquivo:").grid(row=0, column=0, sticky="w")
     var_file = tk.StringVar()
     ttk.Entry(form, textvariable=var_file, width=24).grid(row=0, column=1, padx=6, pady=2)
     ttk.Label(form, text="Exibição:").grid(row=1, column=0, sticky="w")
@@ -1198,7 +1198,7 @@ def build_operacao_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Labe
     def add_or_update() -> None:
         filename = var_file.get().strip()
         if not filename:
-            messagebox.showwarning("Arquivo de espaço", "Informe o nome do arquivo/job.")
+            messagebox.showwarning("Arquivo de espaço", "Informe o nome do arquivo.")
             return
         item = {"filename": filename, "display_name": var_display.get().strip() or "ESPAÇO"}
         if selected["value"] is None:
@@ -1355,7 +1355,7 @@ def build_planejador_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.La
     vars_: Dict[str, tk.StringVar] = {}
     numeric = [
         ("dpi", "DPI global", 1, None),
-        ("setup_min", "Setup (min/job)", 0, None),
+        ("setup_min", "Setup (min/arquivo)", 0, None),
         ("gap_between", "Gap entre tecidos (m)", 0, None),
         ("gap_endroll", "Gap antes do fim do rolo (m)", 0, None),
         ("gap_files", "Gap entre arquivos (m)", 0, None),

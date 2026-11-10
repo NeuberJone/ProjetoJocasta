@@ -30,6 +30,7 @@ from core.config import (
 )
 from core.export_config import load_export_cfg
 from core.migrate import migrate_legacy_path
+from core.logging_config import get_logger, log_exception
 from core.roll_naming import build_roll_name
 from core.paths import pdf_rolls_dir, print_jpg_dir, temp_module_dir
 from core.printlogs_db import (
@@ -74,6 +75,7 @@ except Exception:
     _HAS_DND = False
 
 MODULE_NAME = "Planejador"
+_logger = get_logger(__name__)
 
 
 # -----------------------------
@@ -900,7 +902,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     def _update_fixed_summary(*_):
         var_fixed_summary.set(
             f"DPI {var_dpi.get()} · eixo {var_axis.get()} · {var_speed.get()} m/min · "
-            f"setup {var_setup.get()} min/job\n"
+            f"setup {var_setup.get()} min/arquivo\n"
             f"Gaps: entre tecidos {var_gap_between.get()} m · fim do rolo {var_gap_endroll.get()} m · "
             f"entre arquivos {var_gap_files.get()} m · rolo sem metragem {var_roll_other.get()} m"
             "  —  altere em Configurações"
@@ -2941,6 +2943,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 Path(tmp_normal_pdf).unlink(missing_ok=True)
             except Exception:
                 pass
+            log_exception(_logger, "Planner file export failed", e)
             messagebox.showerror("Erro ao exportar", str(e))
             return
 
@@ -3057,7 +3060,16 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                         "(a fila gerada não tinha nenhum item, só espaços)."
                     )
         except Exception as e:
-            db_status = f"\n\nAviso: falha ao registrar no SearchOrders.\n\n{traceback.format_exc()}"
+            log_exception(_logger, "Planner database persistence failed", e)
+            messagebox.showwarning(
+                "Fechamento não concluído",
+                "Os arquivos foram gerados, mas houve falha ao registrar o fechamento completo.\n\n"
+                f"{type(e).__name__}: {e}\n\n"
+                "Confira os rolos nos Registros, os pedaços de tecido e os arquivos gerados "
+                "antes de repetir o fechamento.\n\n"
+                f"PDF: {out_pdf_dir}\nJPG: {out_jpg_dir}",
+            )
+            return
 
         if which == "both":
             messagebox.showinfo(
