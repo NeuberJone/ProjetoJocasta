@@ -12,6 +12,7 @@ import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from core.logging_config import get_logger, log_exception
@@ -241,3 +242,49 @@ def backup_database(
                 # A failed unlink cannot turn an unsuccessful backup into a
                 # successful one or mask the original failure. Log metadata.
                 log_exception(_logger, "SQLite incomplete backup cleanup failed", exc)
+
+
+_BACKUP_SUFFIX = ".db"
+
+
+def backup_filename(prefix: str, when: datetime) -> str:
+    """A timestamped name for a new backup, sortable lexicographically in
+    the same order as ``when`` (newest last) — ``list_backups``/
+    ``prune_backups`` rely on this to find and order only the backups they
+    created, never any other file a destination folder might hold."""
+    return f"{prefix}_{when:%Y%m%d_%H%M%S}{_BACKUP_SUFFIX}"
+
+
+def list_backups(backup_dir: str | Path, prefix: str) -> list[Path]:
+    """Backups this module created in ``backup_dir`` (matching
+    ``backup_filename``'s pattern for ``prefix``), oldest first. A missing
+    directory returns an empty list rather than raising — there is simply
+    nothing to list yet."""
+    directory = Path(backup_dir)
+    if not directory.is_dir():
+        return []
+    pattern = re.compile(rf"^{re.escape(prefix)}_\d{{8}}_\d{{6}}{re.escape(_BACKUP_SUFFIX)}$")
+    matches = [p for p in directory.iterdir() if p.is_file() and pattern.match(p.name)]
+    return sorted(matches, key=lambda p: p.name)
+
+
+def prune_backups(backup_dir: str | Path, prefix: str, *, keep: int) -> list[Path]:
+    """Delete the oldest backups beyond the newest ``keep``, returning the
+    paths removed (empty if nothing needed removing). Only ever touches
+    files matching ``backup_filename``'s pattern for ``prefix`` — never the
+    live database, and never any unrelated file a shared destination
+    folder might also hold. A delete failure for one file (e.g. held open
+    elsewhere) is logged and skipped rather than raised, so one locked
+    backup never blocks removing the others."""
+    if keep < 0:
+        raise ValueError("keep deve ser um inteiro >= 0.")
+    backups = list_backups(backup_dir, prefix)
+    to_remove = backups[: max(0, len(backups) - keep)]
+    removed: list[Path] = []
+    for path in to_remove:
+        try:
+            path.unlink()
+            removed.append(path)
+        except OSError as exc:
+            log_exception(_logger, "SQLite backup retention could not remove an old backup", exc)
+    return removed

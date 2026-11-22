@@ -7,13 +7,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional
 
-from core.export_config import load_export_cfg
-from core.fabrics import load_fabrics
+from core import theme
+from core.export_config import load_export_cfg, report_filename_tag
+from core.fabrics import canonical_fabric_name, load_fabrics, register_fabric_name
 from core.format import fmt_m
 from core.logging_config import get_logger, log_exception
 from core.operators import normalize_operators, operator_name_for_code
-from core.ui import card, dialog_header, info_banner, page_heading
-from core.printers import find_printer_by_computer_name, find_printer_by_display_name, load_printers
+from core.ui import ask_pick_from_list, card, dialog_header, info_banner, page_heading, run_async
+from core.printers import find_printer_by_display_name, load_printers
 from core.print_types import (
     DEFAULT_RULES,
     DEFAULT_SUBTYPES,
@@ -21,18 +22,34 @@ from core.print_types import (
     classify_document,
     normalize_rules,
     pedido_override_for_type,
-    warn_duplicate_for_type,
 )
+from core.order_files import folder_for_vendor, load_order_index
+from core.order_pdfs import (
+    PDF_LINK_ORIGIN_MANUAL,
+    PDF_LINK_STATUS_ACTIVE,
+    PDF_RESOLUTION_AMBIGUOUS,
+    PDF_RESOLUTION_AUTO,
+    PDF_RESOLUTION_MANUAL,
+    open_order_folder,
+    open_order_pdf,
+    preview_order_pdf,
+)
+from core.order_vendor_resolution import RESOLUTION_AMBIGUOUS, RESOLUTION_AUTO, RESOLUTION_MANUAL, preview_order_vendor
 from core.printlogs_db import (
     TEST_ROLL_SUFFIX,
+    VENDOR_LINK_ORIGIN_MANUAL,
+    VENDOR_LINK_STATUS_ACTIVE,
     OrderRow,
-    find_pedido_fabric_rolls,
+    get_pdf_link,
+    get_roll_orders,
+    get_vendor_link,
     is_test_roll_name,
     next_roll_sequence,
     save_export_transactional,
     update_roll_orders,
 )
 from core.roll_naming import build_roll_name
+from core.vendedores import load_vendedores
 from core.version import APP_VERSION
 
 _logger = get_logger(__name__)
@@ -46,22 +63,35 @@ from .exporters import (
 )
 from .m1_check import STATUS_ERROR as M1_STATUS_ERROR
 from .m1_check import STATUS_LABELS as M1_STATUS_LABELS
+from .m1_check import STATUS_NOT_FOUND as M1_STATUS_NOT_FOUND
 from .m1_check import STATUS_UNKNOWN_FORMAT as M1_STATUS_UNKNOWN_FORMAT
-from .m1_check import check_job as m1_check_job
 from .m1_check import clear_cache as m1_clear_cache
+from .print_check import STATUS_INCOMPLETE as PRINT_STATUS_INCOMPLETE
+from .print_check import STATUS_LABELS as PRINT_STATUS_LABELS
 from .models import Block, Job, PedidoSummary
 from .parser import (
     build_auto_gap_job,
     build_blocks,
     build_pedido_summary,
+    canonicalize_fabric_name,
+    check_reimported_jobs,
+    detect_machine_from_logs,
     fabric_from_document,
+    find_cross_roll_duplicates,
+    format_duplicate_message,
+    format_reimport_warning,
+    import_log_files,
     normalize_space_entries,
     operator_code_from_document,
     parse_log_txt,
     pedido_from_document,
-    read_log_general_fields,
+    resolve_default_import_dir,
+    resolve_mirror_jpg_path,
+    resolve_mirror_target_cm,
+    split_dnd_files,
 )
 from .paths import MODULE_NAME, jpg_dir, pdf_dir, sanitize_filename, temp_dir, versioned_path
+from .vendor_pdf_apply import PedidoSessionDecision, apply_session_decisions
 
 try:
     from tkinterdnd2 import DND_FILES  # type: ignore
@@ -83,6 +113,49 @@ def _distinct_documents(jobs: List[Job]) -> List[str]:
     return [f"{doc}  ({n}x)" if n > 1 else doc for doc, n in sorted(counts.items())]
 
 
+def _vendor_status_text(preview: Optional[PedidoSessionDecision]) -> str:
+    """Texto curto pra coluna "Vendedor" / painel de detalhe da aba
+    "Pedidos no rolo" (painel de pré-visualização, Parte 1 da conclusão do
+    recurso de identificação de vendedor/PDF) — nunca mostra um palpite
+    quando o estado é ambíguo ou não encontrado."""
+    if preview is None or not preview.vendor_state:
+        return "…"
+    if preview.vendor_confirmed and preview.vendor_name:
+        return f"{preview.vendor_name} (confirmado)"
+    if preview.vendor_state == RESOLUTION_AUTO:
+        return preview.vendor_name
+    if preview.vendor_state == RESOLUTION_AMBIGUOUS:
+        return f"Ambíguo ({len(preview.candidates_vendor)})"
+    return "Não identificado"
+
+
+def _pdf_status_text(preview: Optional[PedidoSessionDecision]) -> str:
+    if preview is None:
+        return "—"
+    if preview.pdf_confirmed and preview.pdf_path:
+        return f"{Path(preview.pdf_path).name} (escolhido)"
+    if not preview.pdf_state:
+        return "—"
+    if preview.pdf_state == PDF_RESOLUTION_AUTO and preview.pdf_path:
+        return Path(preview.pdf_path).name
+    if preview.pdf_state == PDF_RESOLUTION_AMBIGUOUS:
+        return f"Ambíguo ({len(preview.candidates_pdf)})"
+    return "Não encontrado"
+
+
+# Status do cruzamento com o "log adicional" (M1_check) que merecem destaque
+# visual nas tabelas — tudo que não é "confirmado" nem "não configurado"
+# (este último fica em branco, não é um problema, só não se aplica).
+_M1_WARN_STATUSES = frozenset({M1_STATUS_ERROR, M1_STATUS_NOT_FOUND, M1_STATUS_UNKNOWN_FORMAT})
+
+
+def _row_needs_warning(job: Job) -> bool:
+    """Linha que merece destaque visual (cor de "perigo" do tema) — pelo
+    cruzamento com o log adicional (só M1, ver m1_check.py) OU pela
+    verificação de impressão incompleta (M1/M2/M3, ver print_check.py)."""
+    return job.m1_status in _M1_WARN_STATUSES or job.print_status == PRINT_STATUS_INCOMPLETE
+
+
 class PXPrintLogsUI(ttk.Frame):
     def __init__(self, parent, *, preload: Optional[dict] = None):
         super().__init__(parent)
@@ -94,6 +167,17 @@ class PXPrintLogsUI(ttk.Frame):
         self.pedidos: List[PedidoSummary] = []
         self._detail_jobs: List[Job] = []
         self.edit_roll_id: Optional[int] = None
+
+        # Painel de pré-visualização de vendedor/PDF (Parte 1 da conclusão
+        # do recurso de identificação de vendedor/PDF original) — estado de
+        # SESSÃO, chaveado pelo nome do pedido (PedidoSummary já agrupa por
+        # nome dentro de um único rolo; ver módulo modules/operacao/
+        # vendor_pdf_apply.py). Nada aqui grava no banco até o rolo ser
+        # salvo (self.on_export chama apply_session_decisions depois).
+        self._pedido_previews: Dict[str, PedidoSessionDecision] = {}
+        self._pdf_preview_inflight: set = set()
+        self._preview_index = None
+        self._preview_vendedores = None
         self.var_close_roll_text = tk.StringVar(value="Fechar Rolo")
         # Caminho do PDF gerado no último Fechar/Atualizar Rolo desta sessão
         # — alimenta o botão "Abrir comprovante" (fica desativado até fechar
@@ -254,7 +338,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.tree_Jobs = ttk.Treeview(
             details,
-            columns=("end", "doc", "pedido", "tipo", "h", "v", "real_m", "m1", "obs"),
+            columns=("end", "doc", "pedido", "tipo", "h", "v", "real_m", "print_complete", "m1", "obs"),
             show="headings",
             height=6,
         )
@@ -266,6 +350,7 @@ class PXPrintLogsUI(ttk.Frame):
             ("h", "HeightMM", 90),
             ("v", "VPosMM", 90),
             ("real_m", "Real (m)", 90),
+            ("print_complete", "Impressão completa", 170),
             ("m1", "Impressão (log adicional)", 200),
             ("obs", "Observação", 200),
         ]:
@@ -314,21 +399,26 @@ class PXPrintLogsUI(ttk.Frame):
         pedidos_box = card(
             orders_tab, "Duplo clique ou botão direito para editar o pedido/tipo", padding=10
         )
+
+        vendor_detail = card(orders_tab, "Vendedor e PDF do pedido selecionado", padding=10)
+        vendor_detail.pack(side="bottom", fill="x", pady=(10, 0))
         pedidos_box.pack(fill="both", expand=True)
 
         self.tree_pedidos = ttk.Treeview(
             pedidos_box,
-            columns=("#", "pedido", "tipo", "total_m", "Jobs", "last"),
+            columns=("#", "pedido", "tipo", "total_m", "Jobs", "last", "vendor", "pdf"),
             show="headings",
             height=8,
         )
         for col, txt, w, anchor in [
-            ("#", "#", 40, "w"),
-            ("pedido", "Pedido", 200, "w"),
-            ("tipo", "Tipo", 110, "w"),
-            ("total_m", "Total (m)", 110, "e"),
-            ("Jobs", "Arquivos", 90, "e"),
-            ("last", "Último EndTime", 160, "w"),
+            ("#", "#", 36, "w"),
+            ("pedido", "Pedido", 170, "w"),
+            ("tipo", "Tipo", 90, "w"),
+            ("total_m", "Total (m)", 90, "e"),
+            ("Jobs", "Arquivos", 75, "e"),
+            ("last", "Último EndTime", 140, "w"),
+            ("vendor", "Vendedor", 130, "w"),
+            ("pdf", "PDF", 150, "w"),
         ]:
             self.tree_pedidos.heading(col, text=txt)
             self.tree_pedidos.column(col, width=w, anchor=anchor)
@@ -340,6 +430,29 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.tree_pedidos.bind("<Double-1>", self.on_edit_pedido)
         self.tree_pedidos.bind("<Button-3>", self._show_pedido_context_menu)
+        self.tree_pedidos.bind("<<TreeviewSelect>>", self.on_select_pedido_preview)
+
+        # Painel de pré-visualização (Parte 1 da conclusão do recurso de
+        # identificação de vendedor/PDF): nenhuma janela obrigatória por
+        # pedido — fica embutido aqui, mostrando o estado do pedido
+        # selecionado na tabela acima, com ações explícitas pra confirmar
+        # ou corrigir (mesmo padrão de modules/registros/ui.py, mas sem
+        # order_id ainda — ver modules/operacao/vendor_pdf_apply.py).
+        self.var_pedido_detail = tk.StringVar(value="Selecione um pedido na lista acima.")
+        ttk.Label(
+            vendor_detail, textvariable=self.var_pedido_detail, wraplength=680, justify="left",
+        ).pack(anchor="w", padx=4, pady=(0, 8))
+
+        detail_btns = ttk.Frame(vendor_detail)
+        detail_btns.pack(anchor="w", padx=4)
+        ttk.Button(detail_btns, text="Escolher vendedor...", command=self.on_choose_vendor_preview).pack(side="left")
+        ttk.Button(detail_btns, text="Escolher PDF...", command=self.on_choose_pdf_preview).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(detail_btns, text="Abrir PDF", command=self.on_open_pdf_preview).pack(side="left", padx=(8, 0))
+        ttk.Button(detail_btns, text="Abrir pasta", command=self.on_open_pdf_folder_preview).pack(
+            side="left", padx=(8, 0)
+        )
 
         list_box = card(
             list_tab,
@@ -351,7 +464,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.tree_roll_list = ttk.Treeview(
             list_box,
-            columns=("#", "end", "doc", "tecido", "pedido", "tipo", "real_m", "obs"),
+            columns=("#", "end", "doc", "tecido", "pedido", "tipo", "real_m", "print_complete", "m1", "obs"),
             show="headings",
             height=10,
         )
@@ -363,6 +476,8 @@ class PXPrintLogsUI(ttk.Frame):
             ("pedido", "Pedido", 150, "w"),
             ("tipo", "Tipo", 100, "w"),
             ("real_m", "Real (m)", 80, "e"),
+            ("print_complete", "Impressão completa", 170, "w"),
+            ("m1", "Impressão (log adicional)", 200, "w"),
             ("obs", "Observação", 180, "w"),
         ]:
             self.tree_roll_list.heading(col, text=txt)
@@ -377,6 +492,9 @@ class PXPrintLogsUI(ttk.Frame):
         self.tree_roll_list.bind("<Button-3>", self._show_roll_list_context_menu)
         self.tree_roll_list.bind("<Delete>", self._on_delete_key_roll_list)
         self._roll_list_jobs: List[Job] = []
+
+        self._configure_warn_tag()
+        theme.on_theme_changed(lambda _key: self._configure_warn_tag())
 
         self.status = ttk.Label(body, text="Pronto.")
         self.status.pack(fill="x", pady=(0, 0))
@@ -397,6 +515,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         self.blocks = build_blocks(self.Jobs, self.machine or "")
         self.pedidos = build_pedido_summary(self.Jobs)
+        self._seed_previews_from_existing_links()
         self.refresh_blocks()
         self.refresh_pedidos()
         self.clear_details()
@@ -411,6 +530,53 @@ class PXPrintLogsUI(ttk.Frame):
         self.status.configure(
             text=f"Rolo carregado para edição: {len(self.Jobs)} log(s) já registrados."
         )
+
+    def _seed_previews_from_existing_links(self) -> None:
+        """Ao reabrir um rolo já salvo pra editar, um vínculo MANUAL já
+        confirmado (vendedor ou PDF) é preservado como está — o painel
+        nunca mostra isto como se fosse só uma sugestão nova, nem deixa
+        `_refresh_vendor_previews` recalcular por conta própria (Parte 1 da
+        conclusão do recurso: "preservar vínculos quando um rolo existente
+        for editado", "não sobrescrever vínculos confirmados sem decisão
+        explícita"). Vínculos automáticos (não manuais) não são semeados
+        aqui — continuam sendo recalculados normalmente, como sempre."""
+        self._pedido_previews = {}
+        if self.edit_roll_id is None:
+            return
+        try:
+            order_rows = get_roll_orders(self.edit_roll_id)
+        except Exception as e:
+            log_exception(_logger, "Could not load existing orders to seed vendor/PDF previews", e)
+            return
+
+        for row in order_rows:
+            if not row.get("tipo"):
+                continue  # avanço/espaço — nunca tem vendedor nem PDF
+            pedido_name = str(row["pedido"])
+            order_id = int(row["id"])
+            vendor_link = get_vendor_link(order_id)
+            pdf_link = get_pdf_link(order_id)
+            if not vendor_link and not pdf_link:
+                continue
+
+            preview = self._pedido_previews.setdefault(pedido_name, PedidoSessionDecision(pedido=pedido_name))
+            if (
+                vendor_link
+                and vendor_link["status"] == VENDOR_LINK_STATUS_ACTIVE
+                and vendor_link["origin"] == VENDOR_LINK_ORIGIN_MANUAL
+            ):
+                preview.vendor_confirmed = True
+                preview.vendor_key = vendor_link["vendor_key"]
+                preview.vendor_name = vendor_link["vendor_name_snapshot"]
+                preview.vendor_state = RESOLUTION_MANUAL
+            if (
+                pdf_link
+                and pdf_link["status"] == PDF_LINK_STATUS_ACTIVE
+                and pdf_link["origin"] == PDF_LINK_ORIGIN_MANUAL
+            ):
+                preview.pdf_confirmed = True
+                preview.pdf_path = pdf_link["pdf_path"]
+                preview.pdf_state = PDF_RESOLUTION_MANUAL
 
     # --------------------------
     # Config helpers
@@ -445,39 +611,16 @@ class PXPrintLogsUI(ttk.Frame):
             )
 
     def _get_mirror_target_cm(self) -> float:
-        mode = (self.var_jpg_mode.get() or "").strip()
-        if mode in ("17", "21"):
-            return float(mode)
-
-        s = (self.var_jpg_custom.get() or "").replace(",", ".").strip()
-        try:
-            value = float(s)
-        except Exception:
-            raise ValueError("Largura personalizada inválida.")
-
-        if value < 8 or value > 40:
-            raise ValueError("Use entre 8 cm e 40 cm.")
-        return value
+        return resolve_mirror_target_cm(self.var_jpg_mode.get(), self.var_jpg_custom.get())
 
     # --------------------------
     # Machine / naming
     # --------------------------
     def _detect_machine_from_logs(self, paths: List[str]) -> Optional[str]:
-        """Olha o campo ComputerName (seção [General]) dos logs sendo
-        importados e, se todos vierem do mesmo computador e esse computador
-        estiver cadastrado numa impressora (Gerenciamento → Impressoras),
-        sugere essa máquina — evita o operador ter que lembrar/escolher na
-        mão toda vez. Só sugere quando não há ambiguidade; senão retorna
-        None e a escolha continua manual."""
-        names = set()
-        for path in paths:
-            cn = (read_log_general_fields(path).get("ComputerName") or "").strip()
-            if cn:
-                names.add(cn)
-        if len(names) != 1:
-            return None
-        printer = find_printer_by_computer_name(next(iter(names)))
-        return printer.display_name if printer else None
+        """Sugestão automática de máquina a partir do ComputerName dos logs
+        — lógica real em `modules/operacao/parser.py:detect_machine_from_logs`
+        (sem Tkinter, testável sem abrir a interface)."""
+        return detect_machine_from_logs(paths)
 
     def ask_machine(self) -> Optional[str]:
         # Só é chamado quando o computador de origem do log não bate com
@@ -587,30 +730,9 @@ class PXPrintLogsUI(ttk.Frame):
         self._import_paths(files)
 
     def _split_dnd_files(self, data: str) -> List[str]:
-        out: List[str] = []
-        buff = ""
-        in_brace = False
-
-        for ch in data:
-            if ch == "{":
-                in_brace = True
-                buff = ""
-            elif ch == "}":
-                in_brace = False
-                if buff:
-                    out.append(buff)
-                buff = ""
-            elif ch == " " and not in_brace:
-                if buff:
-                    out.append(buff)
-                    buff = ""
-            else:
-                buff += ch
-
-        if buff.strip():
-            out.append(buff.strip())
-
-        return [p.strip() for p in out if p.strip()]
+        """Parsing real em `modules/operacao/parser.py:split_dnd_files`
+        (sem Tkinter, testável sem um evento de drag-and-drop real)."""
+        return split_dnd_files(data)
 
     # --------------------------
     # Import
@@ -622,13 +744,7 @@ class PXPrintLogsUI(ttk.Frame):
         sem isso — ou na primeira importação do rolo, quando a máquina
         ainda não é conhecida — cai pra "Pasta de logs (geral)"
         (Configurações → Operação)."""
-        if self.machine:
-            pr = find_printer_by_display_name(self.machine)
-            folder = (pr.log_import_dir.strip() if pr else "")
-            if folder:
-                return folder
-
-        return str(self.mcfg.get("general_log_dir", "") or "").strip() or None
+        return resolve_default_import_dir(self.machine, self.mcfg)
 
     def on_import_files(self):
         initial_dir = self._default_import_dir()
@@ -687,10 +803,6 @@ class PXPrintLogsUI(ttk.Frame):
                         f"Não foi possível gerar o nome do rolo.\n\n{type(e).__name__}: {e}",
                     )
 
-        parsed: List[Job] = []
-        skipped_invalid = 0
-        files_added = 0
-
         existing_src = {j.src_file for j in self.Jobs} if self.Jobs else set()
 
         space_entries = normalize_space_entries(self.mcfg.get("space_filenames", []))
@@ -698,60 +810,29 @@ class PXPrintLogsUI(ttk.Frame):
         operators = normalize_operators(self.mcfg.get("operators", []))
         fabrics_map = load_fabrics()
 
-        for path in txts:
-            path_full = str(path)
-            if path_full in existing_src:
-                continue
+        printer = find_printer_by_display_name(machine)
+        sec_enabled = bool(printer and printer.secondary_log_enabled)
 
-            job = parse_log_txt(
-                path_full,
-                space_entries=space_entries,
-                type_rules=type_rules,
-                operators=operators,
-                fabrics_map=fabrics_map,
-            )
-            if not job:
-                skipped_invalid += 1
-                continue
-
-            if job.height_mm <= 0:
-                skipped_invalid += 1
-                continue
-
-            correct_real_m = job.height_mm / 1000.0
-            if abs(job.real_m - correct_real_m) > 0.001:
-                skipped_invalid += 1
-                continue
-
-            gap_job = build_auto_gap_job(job)
-            if gap_job:
-                parsed.append(gap_job)
-                existing_src.add(gap_job.src_file)
-
-            parsed.append(job)
-            existing_src.add(job.src_file)
-            files_added += 1
+        outcome = import_log_files(
+            txts,
+            existing_src=existing_src,
+            space_entries=space_entries,
+            type_rules=type_rules,
+            operators=operators,
+            fabrics_map=fabrics_map,
+            secondary_log_enabled=sec_enabled,
+            secondary_log_folder=printer.secondary_log_folder if printer else None,
+        )
+        parsed = outcome.jobs
+        skipped_invalid = outcome.skipped_invalid
+        files_added = outcome.files_added
+        sec_alerts = outcome.sec_alerts
+        sec_unknown_format = outcome.sec_unknown_format
+        reimport_check = check_reimported_jobs(parsed, machine)
 
         if not parsed and not self.Jobs:
             messagebox.showerror("Falha", "Nenhum log válido encontrado.")
             return
-
-        printer = find_printer_by_display_name(machine)
-        sec_enabled = bool(printer and printer.secondary_log_enabled)
-        sec_alerts = 0
-        sec_unknown_format = False
-        if sec_enabled and parsed:
-            sec_folder = str(printer.secondary_log_folder or "").strip()
-            for job in parsed:
-                if job.is_gap:
-                    continue
-                res = m1_check_job(folder=sec_folder, end_time=job.end_time)
-                job.m1_status = res.status
-                job.m1_detail = res.detail
-                if res.status == M1_STATUS_ERROR:
-                    sec_alerts += 1
-                elif res.status == M1_STATUS_UNKNOWN_FORMAT:
-                    sec_unknown_format = True
 
         if parsed:
             self.Jobs.extend(parsed)
@@ -779,14 +860,30 @@ class PXPrintLogsUI(ttk.Frame):
                 )
             elif sec_alerts:
                 sec_extra = f" | Log adicional: ⚠ {sec_alerts} log(s) com possível erro de impressão — veja \"Detalhes do bloco\""
+
+        incomplete_count = sum(1 for job in parsed if job.print_status == PRINT_STATUS_INCOMPLETE)
+        incomplete_extra = (
+            f" | ⚠ {incomplete_count} impressão(ões) incompleta(s) detectada(s) — veja \"Detalhes do bloco\""
+            if incomplete_count
+            else ""
+        )
+
+        reimport_extra = ""
+        if reimport_check.already_imported:
+            reimport_extra += f" | Já importados antes: {len(reimport_check.already_imported)}"
+        if reimport_check.changed:
+            reimport_extra += f" | ⚠ Alterados desde a última importação: {len(reimport_check.changed)}"
+
         self.status.configure(
             text=(
                 f"Importado total: {len(self.Jobs)} logs{added} | "
                 f"Blocos: {len(self.blocks)} | Máquina: {machine}{machine_extra}{extra}{sec_extra}"
+                f"{incomplete_extra}{reimport_extra}"
             )
         )
 
         self._warn_duplicates_on_import()
+        self._warn_reimported_changes(reimport_check)
 
     # --------------------------
     # Clear / refresh
@@ -797,6 +894,8 @@ class PXPrintLogsUI(ttk.Frame):
         self.blocks = []
         self.pedidos = []
         self.edit_roll_id = None
+        self._pedido_previews = {}
+        self._pdf_preview_inflight = set()
         self.var_close_roll_text.set("Fechar Rolo")
         self.var_roll.set("")
         self.var_is_test.set(False)
@@ -807,6 +906,7 @@ class PXPrintLogsUI(ttk.Frame):
         self.tree_roll_list.delete(*self.tree_roll_list.get_children())
         self._roll_list_jobs = []
         self.var_detail_title.set("Selecione um tecido na lista abaixo...")
+        self.var_pedido_detail.set("Selecione um pedido na lista acima.")
         self._last_pdf_path = None
         self.btn_open_comprovante.configure(state="disabled")
         self.status.configure(text="Limpo.")
@@ -828,8 +928,15 @@ class PXPrintLogsUI(ttk.Frame):
             )
 
     def refresh_pedidos(self):
+        current_names = {p.pedido for p in self.pedidos}
+        for name in list(self._pedido_previews.keys()):
+            if name not in current_names:
+                del self._pedido_previews[name]
+        self._refresh_vendor_previews()
+
         self.tree_pedidos.delete(*self.tree_pedidos.get_children())
         for idx, pedido in enumerate(self.pedidos, start=1):
+            preview = self._pedido_previews.get(pedido.pedido)
             self.tree_pedidos.insert(
                 "",
                 "end",
@@ -841,8 +948,233 @@ class PXPrintLogsUI(ttk.Frame):
                     fmt_m(pedido.total_m),
                     pedido.job_count,
                     pedido.newest_end.strftime("%d/%m/%Y %H:%M:%S"),
+                    _vendor_status_text(preview),
+                    _pdf_status_text(preview),
                 ),
             )
+        self._update_pedido_detail_panel()
+
+    def _refresh_vendor_previews(self) -> None:
+        """Sugestão automática de vendedor pra todos os pedidos do rolo em
+        edição — só lê o índice já carregado localmente (sem rede), por
+        isso pode rodar de forma síncrona a cada mudança (ver Parte 1 da
+        conclusão do recurso de identificação de vendedor/PDF: "consultar o
+        índice já existente, sem varrer toda a rede"). Uma decisão
+        confirmada pelo operador nesta sessão (`vendor_confirmed`) nunca é
+        recalculada por conta própria."""
+        vendedores = load_vendedores()
+        index = load_order_index()
+        self._preview_vendedores = vendedores
+        self._preview_index = index
+        for pedido in self.pedidos:
+            existing = self._pedido_previews.get(pedido.pedido)
+            if existing and existing.vendor_confirmed:
+                continue
+            result = preview_order_vendor(pedido.pedido, index=index)
+            preview = existing or PedidoSessionDecision(pedido=pedido.pedido)
+            new_folder = folder_for_vendor(pedido.pedido, index, result.vendor_key) if result.vendor_key else ""
+            # Achado de revisão de código: se o vendedor sugerido mudar
+            # entre duas chamadas (ex.: índice atualizado em Configurações
+            # enquanto este rolo está sendo editado), um PDF já descoberto
+            # na pasta do vendedor ANTERIOR ficava preso no preview,
+            # mostrado como se fosse da pasta nova — só não limpa se já foi
+            # confirmado manualmente (precedência do operador).
+            if not preview.pdf_confirmed and preview.folder != new_folder:
+                preview.pdf_state = ""
+                preview.pdf_path = ""
+                preview.candidates_pdf = []
+            preview.vendor_state = result.state
+            preview.vendor_key = result.vendor_key
+            preview.vendor_name = result.vendor_name
+            preview.candidates_vendor = result.candidates
+            preview.folder = new_folder
+            self._pedido_previews[pedido.pedido] = preview
+
+    def _selected_pedido_summary(self) -> Optional[PedidoSummary]:
+        sel = self.tree_pedidos.selection()
+        if not sel:
+            return None
+        try:
+            idx = int(sel[0])
+        except ValueError:
+            return None
+        if idx < 0 or idx >= len(self.pedidos):
+            return None
+        return self.pedidos[idx]
+
+    def _tree_iid_for_pedido(self, pedido_name: str) -> Optional[str]:
+        for idx, p in enumerate(self.pedidos):
+            if p.pedido == pedido_name:
+                return str(idx)
+        return None
+
+    def _update_pedido_row(self, pedido_name: str) -> None:
+        iid = self._tree_iid_for_pedido(pedido_name)
+        if iid is None or not self.tree_pedidos.exists(iid):
+            return
+        preview = self._pedido_previews.get(pedido_name)
+        self.tree_pedidos.set(iid, "vendor", _vendor_status_text(preview))
+        self.tree_pedidos.set(iid, "pdf", _pdf_status_text(preview))
+
+    def _update_pedido_detail_panel(self) -> None:
+        pedido = self._selected_pedido_summary()
+        if pedido is None:
+            self.var_pedido_detail.set("Selecione um pedido na lista acima.")
+            return
+        preview = self._pedido_previews.get(pedido.pedido)
+        extra = "  (consultando pasta do vendedor...)" if pedido.pedido in self._pdf_preview_inflight else ""
+        self.var_pedido_detail.set(
+            f"Pedido: {pedido.pedido}\n"
+            f"Vendedor: {_vendor_status_text(preview)}\n"
+            f"PDF: {_pdf_status_text(preview)}{extra}"
+        )
+
+    def on_select_pedido_preview(self, _evt=None) -> None:
+        """Disparado ao selecionar uma linha em "Pedidos no rolo" — a
+        sugestão de vendedor já está disponível (calculada em
+        `_refresh_vendor_previews`, só com o índice local); a descoberta de
+        PDF é que só acontece aqui, sob demanda, pra não varrer a pasta de
+        rede de todos os pedidos de uma vez (Parte 1 da especificação)."""
+        self._update_pedido_detail_panel()
+        pedido = self._selected_pedido_summary()
+        if pedido is None:
+            return
+        preview = self._pedido_previews.get(pedido.pedido)
+        if preview is None or preview.pdf_confirmed or preview.pdf_state:
+            return
+        if not preview.folder:
+            return  # sem vendedor resolvido ainda — nada pra consultar
+        if pedido.pedido in self._pdf_preview_inflight:
+            return
+
+        pedido_name = pedido.pedido
+        folder = preview.folder
+        self._pdf_preview_inflight.add(pedido_name)
+        self._update_pedido_detail_panel()
+
+        def work():
+            return preview_order_pdf(folder)
+
+        def on_done(result) -> None:
+            self._pdf_preview_inflight.discard(pedido_name)
+            current = self._pedido_previews.get(pedido_name)
+            if current is None or current.pdf_confirmed:
+                return  # pedido removido ou confirmado manualmente enquanto a consulta rodava
+            current.pdf_state = result.state
+            current.pdf_path = result.pdf_path
+            current.candidates_pdf = result.candidates
+            self._update_pedido_row(pedido_name)
+            self._update_pedido_detail_panel()
+
+        def on_error(exc: BaseException) -> None:
+            self._pdf_preview_inflight.discard(pedido_name)
+            log_exception(_logger, "PDF preview discovery failed", exc)
+            self._update_pedido_detail_panel()
+
+        run_async(self, work, on_done=on_done, on_error=on_error)
+
+    def on_choose_vendor_preview(self) -> None:
+        pedido = self._selected_pedido_summary()
+        if pedido is None:
+            messagebox.showinfo("Escolher vendedor", "Selecione um pedido na lista acima.")
+            return
+        vendedores = [v for v in (self._preview_vendedores or load_vendedores()) if v.active]
+        if not vendedores:
+            messagebox.showwarning("Escolher vendedor", "Nenhum vendedor ativo cadastrado (ver Configurações).")
+            return
+
+        clear_sentinel = object()
+        items = list(vendedores) + [clear_sentinel]
+
+        def label(item: object) -> str:
+            return "— Remover escolha (voltar à sugestão automática) —" if item is clear_sentinel else item.name  # type: ignore[union-attr]
+
+        chosen = ask_pick_from_list(
+            self, "Escolher vendedor", f'Escolha o vendedor para o pedido "{pedido.pedido}":', items, label,
+        )
+        if chosen is None:
+            return
+
+        preview = self._pedido_previews.setdefault(pedido.pedido, PedidoSessionDecision(pedido=pedido.pedido))
+        if chosen is clear_sentinel:
+            preview.vendor_confirmed = False
+            preview.vendor_key = ""
+            preview.vendor_name = ""
+            preview.vendor_state = ""
+            preview.folder = ""
+        else:
+            preview.vendor_confirmed = True
+            preview.vendor_key = chosen.key
+            preview.vendor_name = chosen.name
+            preview.vendor_state = RESOLUTION_MANUAL
+            preview.folder = folder_for_vendor(pedido.pedido, self._preview_index or load_order_index(), chosen.key) or ""
+        # Achado de revisão de código: mudar o vendedor (ou removê-lo) sem
+        # limpar um PDF já descoberto automaticamente deixava o painel
+        # mostrando o PDF da pasta do vendedor ANTERIOR como se fosse do
+        # novo — e bloqueava `on_select_pedido_preview` de descobrir de
+        # novo (sua guarda só dispara quando `pdf_state` está vazio). Só
+        # não limpa se o PDF já foi confirmado manualmente (precedência do
+        # operador, independente do vendedor — ver docstring do módulo).
+        if not preview.pdf_confirmed:
+            preview.pdf_state = ""
+            preview.pdf_path = ""
+            preview.candidates_pdf = []
+        self._refresh_vendor_previews()
+        self._update_pedido_row(pedido.pedido)
+        self._update_pedido_detail_panel()
+
+    def on_choose_pdf_preview(self) -> None:
+        pedido = self._selected_pedido_summary()
+        if pedido is None:
+            messagebox.showinfo("Escolher PDF", "Selecione um pedido na lista acima.")
+            return
+        preview = self._pedido_previews.setdefault(pedido.pedido, PedidoSessionDecision(pedido=pedido.pedido))
+
+        if preview.pdf_state == PDF_RESOLUTION_AMBIGUOUS and preview.candidates_pdf:
+            chosen_pdf = ask_pick_from_list(
+                self, "Escolher PDF",
+                "Mais de um PDF foi encontrado na pasta deste pedido. Escolha qual é o arquivo impresso:",
+                preview.candidates_pdf, lambda f: f"{f.name}  ({f.page_count or '?'} pág. · {f.modified_at})",
+            )
+            if chosen_pdf is None:
+                return
+            preview.pdf_path = chosen_pdf.path
+        else:
+            path = filedialog.askopenfilename(
+                title="Escolher o PDF original deste pedido",
+                filetypes=[("PDF", "*.pdf")],
+                initialdir=(preview.folder or None),
+            )
+            if not path:
+                return
+            preview.pdf_path = path
+
+        preview.pdf_confirmed = True
+        preview.pdf_state = PDF_RESOLUTION_MANUAL
+        self._update_pedido_row(pedido.pedido)
+        self._update_pedido_detail_panel()
+
+    def on_open_pdf_preview(self) -> None:
+        pedido = self._selected_pedido_summary()
+        preview = self._pedido_previews.get(pedido.pedido) if pedido else None
+        if not preview or not preview.pdf_path:
+            messagebox.showinfo("Abrir PDF", "Nenhum PDF conhecido para este pedido ainda.")
+            return
+        try:
+            open_order_pdf(preview.pdf_path)
+        except Exception as e:
+            messagebox.showerror("Abrir PDF", f"Falha ao abrir o PDF.\n\n{type(e).__name__}: {e}")
+
+    def on_open_pdf_folder_preview(self) -> None:
+        pedido = self._selected_pedido_summary()
+        preview = self._pedido_previews.get(pedido.pedido) if pedido else None
+        if not preview or not preview.pdf_path:
+            messagebox.showinfo("Abrir pasta", "Nenhum PDF conhecido para este pedido ainda.")
+            return
+        try:
+            open_order_folder(str(Path(preview.pdf_path).parent))
+        except Exception as e:
+            messagebox.showerror("Abrir pasta", f"Falha ao abrir a pasta.\n\n{type(e).__name__}: {e}")
 
     def refresh_roll_list(self):
         """Lista achatada de todos os arquivos do rolo, na mesma ordem em
@@ -860,6 +1192,8 @@ class PXPrintLogsUI(ttk.Frame):
             fabric_txt = "" if job.is_gap else job.fabric
             pedido_txt = "" if job.is_gap else job.pedido
             tipo_txt = "" if job.is_gap else job.tipo
+            print_complete_txt = PRINT_STATUS_LABELS.get(job.print_status, "") if job.print_status else ""
+            m1_txt = M1_STATUS_LABELS.get(job.m1_status, "") if job.m1_status else ""
             obs_txt = (job.observacao or "").splitlines()[0] if job.observacao else ""
             if job.observacao:
                 obs_txt = f"📝 {obs_txt}"
@@ -875,8 +1209,11 @@ class PXPrintLogsUI(ttk.Frame):
                     pedido_txt,
                     tipo_txt,
                     fmt_m(job.real_m, suffix=False),
+                    print_complete_txt,
+                    m1_txt,
                     obs_txt,
                 ),
+                tags=("m1_warn",) if _row_needs_warning(job) else (),
             )
 
     def _get_roll_list_job(self, iid: Optional[str]) -> Optional[Job]:
@@ -1068,6 +1405,16 @@ class PXPrintLogsUI(ttk.Frame):
 
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
+    def _configure_warn_tag(self) -> None:
+        """Destaque visual (texto na cor de 'perigo' do tema atual) pra
+        linhas com algum problema de impressão — cruzamento com o log
+        adicional que não deu "confirmado" nem "não configurado" (só M1,
+        ver m1_check.py) ou impressão incompleta detectada direto no log
+        por-arquivo (M1/M2/M3, ver print_check.py)."""
+        spec = theme.get_spec()
+        for tree in (self.tree_Jobs, self.tree_roll_list):
+            tree.tag_configure("m1_warn", foreground=spec.danger)
+
     def clear_details(self):
         self.var_detail_title.set("Selecione um tecido na lista abaixo...")
         self.tree_Jobs.delete(*self.tree_Jobs.get_children())
@@ -1097,6 +1444,7 @@ class PXPrintLogsUI(ttk.Frame):
             doc_txt = f"— {job.fabric or 'ESPAÇO'} —" if job.is_gap else job.document
             pedido_txt = "" if job.is_gap else job.pedido
             tipo_txt = "" if job.is_gap else job.tipo
+            print_complete_txt = PRINT_STATUS_LABELS.get(job.print_status, "") if job.print_status else ""
             m1_txt = M1_STATUS_LABELS.get(job.m1_status, "") if job.m1_status else ""
             obs_txt = (job.observacao or "").splitlines()[0] if job.observacao else ""
             if job.observacao:
@@ -1113,9 +1461,11 @@ class PXPrintLogsUI(ttk.Frame):
                     f"{job.height_mm:.1f}",
                     f"{job.vpos_mm:.1f}",
                     fmt_m(job.real_m, suffix=False),
+                    print_complete_txt,
                     m1_txt,
                     obs_txt,
                 ),
+                tags=("m1_warn",) if _row_needs_warning(job) else (),
             )
 
     def _get_detail_job(self, iid: Optional[str]) -> Optional[Job]:
@@ -1221,13 +1571,39 @@ class PXPrintLogsUI(ttk.Frame):
         ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side="right")
         ttk.Button(btns, text="Salvar", command=on_save).pack(side="right", padx=(0, 8))
 
+    def _jobs_in_blocks(self, iids: List[str]) -> List[Job]:
+        """Todos os Jobs (inclusive itens de ESPAÇO) dos grupos/tecidos
+        selecionados em "Ordem do rolo" — usado pra aplicar uma observação
+        de uma vez a todas as entradas do(s) grupo(s), sem precisar abrir
+        "Detalhes do bloco" e selecionar item por item."""
+        jobs: List[Job] = []
+        for iid in iids:
+            try:
+                idx = int(iid)
+            except ValueError:
+                continue
+            if 0 <= idx < len(self.blocks):
+                jobs.extend(self.blocks[idx].Jobs)
+        return jobs
+
     def _show_block_context_menu(self, event):
         iid = self.tree_blocks.identify_row(event.y)
-        if iid:
+        if not iid:
+            return
+        if iid not in self.tree_blocks.selection():
             self.tree_blocks.selection_set(iid)
+        sel = list(self.tree_blocks.selection())
 
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Editar tecido", command=self.on_edit_fabric)
+        if len(sel) <= 1:
+            menu.add_command(label="Editar tecido", command=self.on_edit_fabric)
+            obs_label = "Observação (em todo o grupo)…"
+        else:
+            obs_label = f"Observação (em {len(sel)} grupos)…"
+        menu.add_command(
+            label=obs_label,
+            command=lambda: self._open_observacao_dialog(self._jobs_in_blocks(sel)),
+        )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1417,6 +1793,20 @@ class PXPrintLogsUI(ttk.Frame):
         dlg.wait_window()
         return changed["v"]
 
+    def _canonicalize_fabric_name(self, typed: str) -> str:
+        """Nome final (sempre em caixa alta, convenção já usada pelos
+        tecidos extraídos do log — ver fabric_from_document) de um tecido
+        digitado à mão em "Editar tecido". Primeiro tenta casar com o
+        cadastro COMPARTILHADO (core/fabrics.py, o mesmo que o Planejador
+        usa) — assim "dryfit"/"Dry Fit"/"DRIFIT" digitados aqui continuam
+        agrupando sob o mesmo tecido que já existe, em vez de criar uma
+        variação nova só por causa da caixa/acentuação digitada. Quando o
+        nome realmente não existe em lugar nenhum ainda, cadastra ele no
+        compartilhado (register_fabric_name) — assim o Planejador já vê
+        esse tecido na próxima vez que abrir, em vez de só existir
+        localmente dentro deste rolo."""
+        return canonicalize_fabric_name(typed)
+
     def on_edit_fabric(self, _evt=None):
         sel = self.tree_blocks.selection()
         if not sel:
@@ -1433,7 +1823,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         if len({j.document for j in block.Jobs}) > 1:
             def _set_fabric(j: Job, v: str) -> None:
-                j.fabric = v.upper()
+                j.fabric = self._canonicalize_fabric_name(v)
                 j.fabric_manual = True
 
             changed = self._ask_group_rename_dialog(
@@ -1454,11 +1844,11 @@ class PXPrintLogsUI(ttk.Frame):
             if new_name is None:
                 return
 
-            new_name = new_name.strip().upper()
-            if not new_name:
+            if not new_name.strip():
                 messagebox.showwarning("Nome inválido", "O nome do tecido não pode ficar vazio.")
                 return
 
+            new_name = self._canonicalize_fabric_name(new_name)
             if new_name == block.fabric:
                 return
 
@@ -1667,26 +2057,10 @@ class PXPrintLogsUI(ttk.Frame):
     # Duplicidade entre rolos
     # --------------------------
     def _find_cross_roll_duplicates(self) -> dict:
-        rules = normalize_rules(self.mcfg.get("print_type_rules", DEFAULT_RULES))
-        pairs = {
-            (j.pedido, j.fabric)
-            for j in self.Jobs
-            if not j.is_gap and warn_duplicate_for_type(j.tipo, rules)
-        }
-        try:
-            return find_pedido_fabric_rolls(pairs, exclude_roll_id=self.edit_roll_id)
-        except Exception:
-            return {}
+        return find_cross_roll_duplicates(self.Jobs, self.mcfg, exclude_roll_id=self.edit_roll_id)
 
     def _format_duplicate_message(self, matches: dict) -> str:
-        lines = []
-        for (pedido, fabric), rolls in matches.items():
-            rolls_txt = ", ".join(
-                f"{r['roll_name']} ({r['machine']}, {(r['created_at'] or '')[:16].replace('T', ' ')})"
-                for r in rolls
-            )
-            lines.append(f"- Pedido \"{pedido}\" + Tecido \"{fabric}\" já impresso em: {rolls_txt}")
-        return "\n".join(lines)
+        return format_duplicate_message(matches)
 
     def _warn_duplicates_on_import(self):
         matches = self._find_cross_roll_duplicates()
@@ -1697,6 +2071,22 @@ class PXPrintLogsUI(ttk.Frame):
             "Possível duplicidade",
             "Os itens abaixo já foram impressos (mesmo pedido + mesmo tecido) em outro rolo:\n\n"
             + self._format_duplicate_message(matches),
+        )
+
+    def _warn_reimported_changes(self, check) -> None:
+        """Mesmo arquivo físico (log .txt) já importado antes, em qualquer
+        rolo salvo (não só nesta sessão) — ver
+        `modules/operacao/parser.py:check_reimported_jobs`. Só avisa quando
+        o conteúdo mudou desde então (`check.changed`); "já importado sem
+        alteração" (`check.already_imported`) não é um alerta, só aparece
+        na barra de status como progresso."""
+        if not check.changed:
+            return
+
+        messagebox.showwarning(
+            "Arquivos alterados desde a última importação",
+            "Os itens abaixo já foram importados antes, mas o conteúdo do log mudou desde então "
+            "(confira antes de continuar):\n\n" + format_reimport_warning(check),
         )
 
     def _confirm_duplicates_on_export(self) -> bool:
@@ -1715,20 +2105,7 @@ class PXPrintLogsUI(ttk.Frame):
     # Export
     # --------------------------
     def _resolve_mirror_jpg_path(self, out_jpg_dir: Path, base_name: str) -> Path:
-        pr = find_printer_by_display_name(self.machine or "")
-        if pr and pr.jpg_output_dir.strip():
-            folder = Path(pr.jpg_output_dir.strip())
-            folder.mkdir(parents=True, exist_ok=True)
-
-            filename = pr.jpg_output_filename.strip()
-            if filename:
-                if not filename.lower().endswith((".jpg", ".jpeg")):
-                    filename += ".jpg"
-                return folder / filename
-
-            return versioned_path(folder / f"{base_name}.jpg")
-
-        return versioned_path(out_jpg_dir / f"{base_name}.jpg")
+        return resolve_mirror_jpg_path(self.machine, out_jpg_dir, base_name)
 
     def on_export(self, which: str):
         if not self.blocks or not self.machine:
@@ -1748,7 +2125,8 @@ class PXPrintLogsUI(ttk.Frame):
             )
             return
         mode = self.var_mode.get()
-        mode_tag = "FULL" if mode == "full" else "SUMMARY"
+        report_style = str(load_export_cfg().get("report_style", "classic"))
+        mode_tag = report_filename_tag(mode, report_style)
 
         dt = datetime.now()
         out_pdf_dir = pdf_dir(dt)
@@ -1757,7 +2135,7 @@ class PXPrintLogsUI(ttk.Frame):
 
         date_iso = dt.strftime("%Y-%m-%d")
         roll_safe = sanitize_filename(roll)
-        base_name = f"{date_iso}_{self.machine}_{roll_safe}_{mode_tag}"
+        base_name = f"{date_iso}_{self.machine}_{roll_safe}" + (f"_{mode_tag}" if mode_tag else "")
 
         normal_path = str(versioned_path(out_pdf_dir / f"{base_name}.pdf"))
         mirror_path = str(self._resolve_mirror_jpg_path(out_jpg_dir, base_name))
@@ -1773,6 +2151,7 @@ class PXPrintLogsUI(ttk.Frame):
         dpi = int(load_export_cfg().get("mirror_jpg_dpi", 300))
         printer = find_printer_by_display_name(self.machine or "")
         rotation = printer.jpg_rotation if printer else 0
+        printer_full_name = printer.name if printer else ""
 
         # Quando a pasta/arquivo da impressora está configurado (cadastro de
         # Impressoras), esse é o único arquivo que ela recebe — por isso ele
@@ -1793,17 +2172,20 @@ class PXPrintLogsUI(ttk.Frame):
                 export_pdf(
                     normal_path, self.blocks, roll, self.machine,
                     mode=mode, mirrored=False, pedidos=self.pedidos,
+                    report_style=report_style, printer_name=printer_full_name,
                 )
 
             elif which == "mirror":
                 export_pdf_continuous(
                     tmp_mirror_pdf, self.blocks, roll, self.machine,
                     mode=mode, mirrored=True, pedidos=self.pedidos,
+                    report_style=report_style, printer_name=printer_full_name,
                 )
                 if use_printer_folder:
                     export_pdf_continuous(
                         tmp_normal_pdf, self.blocks, roll, self.machine,
                         mode=mode, mirrored=False, pedidos=self.pedidos,
+                        report_style=report_style, printer_name=printer_full_name,
                     )
                     mirror_and_normal_to_jpg_scaled(
                         tmp_normal_pdf,
@@ -1830,16 +2212,19 @@ class PXPrintLogsUI(ttk.Frame):
                 export_pdf(
                     normal_path, self.blocks, roll, self.machine,
                     mode=mode, mirrored=False, pedidos=self.pedidos,
+                    report_style=report_style, printer_name=printer_full_name,
                 )
 
                 export_pdf_continuous(
                     tmp_mirror_pdf, self.blocks, roll, self.machine,
                     mode=mode, mirrored=True, pedidos=self.pedidos,
+                    report_style=report_style, printer_name=printer_full_name,
                 )
                 if use_printer_folder:
                     export_pdf_continuous(
                         tmp_normal_pdf, self.blocks, roll, self.machine,
                         mode=mode, mirrored=False, pedidos=self.pedidos,
+                        report_style=report_style, printer_name=printer_full_name,
                     )
                     mirror_and_normal_to_jpg_scaled(
                         tmp_normal_pdf,
@@ -1894,6 +2279,7 @@ class PXPrintLogsUI(ttk.Frame):
                     source_path=job.src_file,
                     tipo=job.tipo,
                     observacao=job.observacao,
+                    start_time=job.start_time.isoformat(timespec="seconds") if job.start_time else "",
                 )
                 for job in self.Jobs
             ]
@@ -1943,6 +2329,26 @@ class PXPrintLogsUI(ttk.Frame):
                 # de duplicidade contra ele mesmo).
                 self.edit_roll_id = roll_id
                 self.var_close_roll_text.set("Atualizar Rolo")
+
+            # Identificação de vendedor e PDF (Etapa F + Parte 1 da
+            # conclusão do recurso): roda pra cada pedido real deste rolo
+            # assim que ele é salvo. Uma decisão confirmada no painel de
+            # pré-visualização ("Escolher vendedor.../Escolher PDF...",
+            # aba "Pedidos no rolo") tem precedência; sem decisão, cai no
+            # mesmo comportamento automático de sempre (ver
+            # modules/operacao/vendor_pdf_apply.py:apply_session_decisions).
+            # Isolado num try próprio — o rolo já foi salvo com sucesso
+            # acima; uma falha aqui (ex.: índice de pedidos indisponível)
+            # nunca pode aparecer como se o fechamento do rolo tivesse
+            # falhado.
+            try:
+                apply_session_decisions(
+                    roll_id, self._pedido_previews,
+                    index=self._preview_index or load_order_index(),
+                    vendedores=self._preview_vendedores or load_vendedores(),
+                )
+            except Exception as e:
+                log_exception(_logger, "Vendor/PDF resolution after export failed", e)
 
         except Exception as e:
             log_exception(_logger, "Production export database persistence failed", e)

@@ -63,6 +63,26 @@ class RollSummarySpacesTests(unittest.TestCase):
         self.assertEqual(spaces[0]["fabric"], "ESPAÇO")
         self.assertAlmostEqual(spaces[0]["real_m"], 0.5)
 
+    def test_legacy_pxprintlogs_module_name_still_separates_spaces(self):
+        """Achado real no banco de produção: rolo exportado antes do
+        rebrand pra Nexor grava payload["module"] = "PXPrintLogs", não
+        "Operacao" — sem reconhecer isso, o avanço ficava misturado no
+        agrupamento por tecido em vez de separado em "spaces"."""
+        roll_id, _ = save_export_transactional(
+            machine="M1", roll_name="M1-0002", export_mode="normal", app_version="1.0.0",
+            orders=[
+                _job_order("doc1.jpg", "DRYFIT", "2026-11-05T10:00:00"),
+                _gap_order("doc1.jpg (avanço)", "2026-11-05T09:59:00"),
+            ],
+            event_payload={"module": "PXPrintLogs"},
+        )
+
+        summary = get_roll_summary(roll_id)
+
+        fabrics = {f["fabric"] for f in summary["fabrics"]}
+        self.assertEqual(fabrics, {"DRYFIT"})
+        self.assertEqual(len(summary["spaces"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

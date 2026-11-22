@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -216,6 +217,77 @@ class SQLiteMaintenanceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.api.backup_database(self.source, self.destination, timeout_ms=timeout)
         self.assertEqual(list(self.root.iterdir()), [])
+
+
+class BackupRetentionTests(unittest.TestCase):
+    """list_backups/prune_backups — item de roadmap (Fase 1) "formalizar
+    diagnóstico, retenção de backups e ensaio de restauração": antes desta
+    etapa, backup_database existia e era testado, mas nada decidia quantos
+    backups manter nem reconhecia quais arquivos de uma pasta de destino
+    eram backups de verdade (vs. qualquer outro arquivo que a pasta possa
+    conter)."""
+
+    def setUp(self):
+        self.api = importlib.import_module("core.sqlite_maintenance")
+        self.temp = tempfile.TemporaryDirectory(prefix="sqlite-retention-", dir=Path(__file__).parent)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def _touch_backup(self, prefix: str, when: datetime) -> Path:
+        path = self.root / self.api.backup_filename(prefix, when)
+        path.write_bytes(b"fake db bytes")
+        return path
+
+    def test_list_backups_on_a_missing_directory_is_empty_not_an_error(self):
+        self.assertEqual(self.api.list_backups(self.root / "does-not-exist", "printlogs"), [])
+
+    def test_list_backups_ignores_unrelated_files_and_other_prefixes(self):
+        wanted = self._touch_backup("printlogs", datetime(2026, 1, 1, 10, 0, 0))
+        self._touch_backup("outro-prefixo", datetime(2026, 1, 1, 10, 0, 0))
+        (self.root / "printlogs.db").write_bytes(b"not a backup, the live db itself")
+        (self.root / "readme.txt").write_text("not a backup")
+        self.assertEqual(self.api.list_backups(self.root, "printlogs"), [wanted])
+
+    def test_list_backups_is_oldest_first(self):
+        newer = self._touch_backup("printlogs", datetime(2026, 11, 19, 10, 0, 0))
+        older = self._touch_backup("printlogs", datetime(2026, 11, 18, 9, 0, 0))
+        self.assertEqual(self.api.list_backups(self.root, "printlogs"), [older, newer])
+
+    def test_prune_keeps_the_newest_and_removes_the_rest(self):
+        oldest = self._touch_backup("printlogs", datetime(2026, 11, 17, 10, 0, 0))
+        middle = self._touch_backup("printlogs", datetime(2026, 11, 18, 10, 0, 0))
+        newest = self._touch_backup("printlogs", datetime(2026, 11, 19, 10, 0, 0))
+
+        removed = self.api.prune_backups(self.root, "printlogs", keep=1)
+
+        self.assertEqual(removed, [oldest, middle])
+        self.assertFalse(oldest.exists())
+        self.assertFalse(middle.exists())
+        self.assertTrue(newest.exists())
+
+    def test_prune_never_touches_files_outside_its_own_prefix(self):
+        self._touch_backup("printlogs", datetime(2026, 11, 17, 10, 0, 0))
+        other_prefix = self._touch_backup("outro-modulo", datetime(2026, 11, 17, 10, 0, 0))
+
+        self.api.prune_backups(self.root, "printlogs", keep=0)
+
+        self.assertTrue(other_prefix.exists())
+
+    def test_prune_with_enough_room_removes_nothing(self):
+        a = self._touch_backup("printlogs", datetime(2026, 11, 17, 10, 0, 0))
+        b = self._touch_backup("printlogs", datetime(2026, 11, 18, 10, 0, 0))
+        self.assertEqual(self.api.prune_backups(self.root, "printlogs", keep=5), [])
+        self.assertTrue(a.exists())
+        self.assertTrue(b.exists())
+
+    def test_negative_keep_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.api.prune_backups(self.root, "printlogs", keep=-1)
+
+    def test_backup_filename_is_lexicographically_sortable_by_time(self):
+        earlier = self.api.backup_filename("printlogs", datetime(2026, 1, 2, 3, 4, 5))
+        later = self.api.backup_filename("printlogs", datetime(2026, 1, 2, 3, 4, 6))
+        self.assertLess(earlier, later)
 
 
 if __name__ == "__main__":

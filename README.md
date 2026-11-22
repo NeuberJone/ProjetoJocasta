@@ -2,16 +2,17 @@
 
 Aplicativo desktop para acompanhar a produção de impressão têxtil, planejar filas e consultar o histórico de rolos. O repositório mantém o nome histórico ProjetoJocasta; o produto e o ponto de entrada atuais são **Nexor**, em `Nexor.py`.
 
-**Versão:** 1.6.39, definida em [`core/version.py`](core/version.py). Esta consolidação não altera a versão; um executável isolado foi gerado somente para validar o empacotamento.
+**Versão:** 1.6.66, definida em [`core/version.py`](core/version.py). A consolidação original (05/11/2026) foi feita na 1.6.39; desde então, uma série de incrementos de recurso (vendedor/PDF, Prisma no Planejador/Operação, M1/M2/M3, correção de truncamento — ver [`CHANGELOG.md`](CHANGELOG.md)) e uma auditoria P0 (16/11/2026: suíte isolada com 455 casos, `compileall` limpo, `dist\Nexor-1.6.64.exe` iniciado e confirmado nesta máquina — ver [roadmap de modernização](docs/roadmaps/nexor-modernization-roadmap.md)) avançaram a versão sem reabrir os critérios de aceitação da Fase 1. Nenhum instalador ou pacote de distribuição foi produzido.
 
 ## Funcionalidades atuais
 
 | Área | Responsabilidade |
 | --- | --- |
-| Operação | Importar logs TXT de impressão, identificar máquina/tecido/tipo/operador, organizar itens e espaços, fechar ou editar rolos e gerar PDF/JPG. |
+| Operação | Importar logs TXT de impressão, identificar máquina/tecido/tipo/operador, organizar itens e espaços, pré-visualizar o vendedor/PDF sugerido de cada pedido (confirmar ou corrigir antes de salvar), fechar ou editar rolos e gerar PDF/JPG. |
 | Planejador | Calcular metragem de imagens a partir de pixels e DPI, estimar tempo, organizar filas/rolos e pedaços de tecido, gerar comprovantes e reabrir rolos. |
-| Registros | Consultar rolos, itens, eventos e versões anteriores; reabrir um rolo no módulo de origem e exportar contexto de produção para o PX Tool Box. |
-| Gerenciamento e ajuda | Cadastrar impressoras e tecidos, configurar regras de classificação/exportação, escolher temas, consultar o manual e as notas da versão. |
+| Registros | Consultar rolos, itens, eventos e versões anteriores; reabrir um rolo no módulo de origem, exportar contexto de produção para o PX Tool Box e identificar o vendedor/PDF original de cada pedido (localização automática ou manual, abrir PDF/pasta). |
+| Gerenciamento e ajuda | Cadastrar impressoras (velocidade manual ou detectada a partir de logs .txt reais) e tecidos, configurar regras de classificação/exportação, escolher temas, consultar o manual e as notas da versão. |
+| Configurações · Vendedores | Cadastrar vendedores e as pastas de rede com as artes originais de cada um, com teste de acesso à pasta, e atualizar o índice local usado para localizar os pedidos em Registros. |
 
 Os PDFs/JPGs e o histórico SQLite são locais ou ficam na pasta de produção configurada. O texto de pedido extraído de um arquivo é uma etiqueta operacional; o Nexor não mantém um cadastro formal de pedidos comerciais.
 
@@ -27,7 +28,9 @@ py -3.13 -m venv .venv
 
 No Linux, crie o ambiente com `python3.13 -m venv .venv` e use `.venv/bin/python`. Os testes de lógica também são previstos para Linux; recursos que abrem arquivos/pastas usam APIs do Windows e a operação completa da interface fora dele ainda exige adaptação e validação.
 
-As dependências de execução estão fixadas em [`requirements.txt`](requirements.txt): Pillow 11.0.0, PyMuPDF 1.27.1, ReportLab 4.0.7 e tkinterdnd2 0.4.3. São as versões encontradas no ambiente existente, sem atualização nesta etapa. Uma instalação nova a partir dos manifestos ainda precisa ser validada; os pins não incluem hashes dos pacotes. `sqlite3`, `unittest`, derivação de senhas e logging usam a biblioteca padrão.
+As dependências de execução estão fixadas em [`requirements.txt`](requirements.txt): Pillow 11.0.0, PyMuPDF 1.27.1, ReportLab 4.0.7 e tkinterdnd2 0.4.3. São as versões encontradas no ambiente existente, sem atualização nesta etapa. `sqlite3`, `unittest`, derivação de senhas e logging usam a biblioteca padrão.
+
+Instalação nova a partir dos manifestos (16/11/2026): `.venv` criado do zero com `py -3.13 -m venv .venv` (nenhum existia neste ambiente) e `requirements.txt`/`requirements-build.txt` instalados nele sem erro; a suíte isolada (461 testes) e `compileall` passaram usando esse `.venv` recém-criado. Não cobre um build de validação a partir desse `.venv` nem CI remota (ver [roadmap de modernização](docs/roadmaps/nexor-modernization-roadmap.md)); os pins continuam sem hashes dos pacotes.
 
 ## Testes isolados
 
@@ -68,7 +71,7 @@ $buildId = "validation-" + [guid]::NewGuid().ToString("N")
 .\.venv\Scripts\python.exe -m PyInstaller --distpath "dist\$buildId" --workpath "build\$buildId" Nexor.spec
 ```
 
-O spec prefere a detecção padrão de Tcl/Tk. O fallback existente para Python portátil Windows/Tcl/Tk 8.6 só é aplicado quando o hook falha e todos os arquivos esperados existem. A adaptação depende de detalhes internos do PyInstaller e precisa de teste do executável ao alterar Python ou o empacotador. O build isolado em `dist/foundation-validation-20261105-144030/` foi inspecionado: contém `CHANGELOG.md`, Tcl/Tk e seus arquivos de inicialização. O executável congelado não foi iniciado; nenhum instalador ou pacote de distribuição foi produzido.
+O spec prefere a detecção padrão de Tcl/Tk. O fallback existente para Python portátil Windows/Tcl/Tk 8.6 só é aplicado quando o hook falha e todos os arquivos esperados existem. A adaptação depende de detalhes internos do PyInstaller e precisa de teste do executável ao alterar Python ou o empacotador. O build isolado em `dist/foundation-validation-20261105-144030/` foi inspecionado: contém `CHANGELOG.md`, Tcl/Tk e seus arquivos de inicialização. Na auditoria P0 de 16/11/2026, `dist\Nexor-1.6.64.exe` foi de fato iniciado nesta máquina (processo real, filho do bootloader onefile, com o título de janela esperado) e encerrado sem travar — primeira vez que o executável congelado roda, não só é inspecionado; ainda não é smoke visual completo. Nenhum instalador ou pacote de distribuição foi produzido.
 
 ## Documentação
 

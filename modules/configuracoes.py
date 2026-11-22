@@ -17,7 +17,13 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Dict, List, Optional
 
 from core.config import load_config, read_module_cfg, write_module_cfg
-from core.export_config import EXPORT_DEFAULTS, load_export_cfg, save_export_cfg
+from core.export_config import (
+    EXPORT_DEFAULTS,
+    REPORT_STYLE_CLASSIC,
+    REPORT_STYLE_PRISMA,
+    load_export_cfg,
+    save_export_cfg,
+)
 from core.fabrics import known_fabric_names_with_aliases
 from core.operators import normalize_operators
 from core.paths import pdf_rolls_dir, print_jpg_dir
@@ -53,7 +59,18 @@ from core.print_types import (
     normalize_subtypes,
     validate_pattern,
 )
-from core.ui import card, dialog_header
+from core.order_files import load_order_index, refresh_order_index, save_order_index
+from core.ui import card, dialog_header, run_async
+from core.vendedores import (
+    Vendedor,
+    add_or_update_vendedor,
+    add_vendedor_folder,
+    load_vendedores,
+    remove_vendedor_folder,
+    save_vendedores,
+    set_vendedor_folder_access_result,
+    test_folder_access,
+)
 from modules.operacao.config import load_cfg as load_operacao_cfg
 from modules.operacao.config import save_cfg as save_operacao_cfg
 from modules.operacao.parser import normalize_space_entries
@@ -166,8 +183,10 @@ def _fmt(value: object) -> str:
 
 
 def _export_defaults_rows(parent: ttk.Frame, cfg: dict, row: int) -> Callable[[], dict]:
-    """Linhas 'Modo do PDF' e 'JPG espelhado' (iguais em Planejador e Operação)."""
+    """Linhas 'Modo do PDF', 'Estilo do comprovante' e 'JPG espelhado'
+    (iguais em Planejador e Operação)."""
     var_mode = tk.StringVar(value=str(cfg.get("report_mode_default", "full")))
+    var_style = tk.StringVar(value=str(cfg.get("report_style", REPORT_STYLE_CLASSIC)))
     var_jpg = tk.StringVar(value=str(cfg.get("mirror_jpg_width_mode", "17")))
     var_custom = tk.StringVar(value=_fmt(cfg.get("mirror_jpg_width_cm_custom", 17.0)))
 
@@ -179,9 +198,22 @@ def _export_defaults_rows(parent: ttk.Frame, cfg: dict, row: int) -> Callable[[]
         side="left", padx=(10, 0)
     )
 
-    ttk.Label(parent, text="JPG espelhado").grid(row=row + 1, column=0, sticky="w", pady=4)
+    # Estilo do comprovante (Clássico/Prisma) — instalações existentes e
+    # novas sempre começam em Clássico (ver core/export_config.py); trocar
+    # o estilo não altera cálculos nem registros, só a aparência do PDF/JPG.
+    ttk.Label(parent, text="Estilo do comprovante").grid(row=row + 1, column=0, sticky="w", pady=4)
+    style_row = ttk.Frame(parent)
+    style_row.grid(row=row + 1, column=1, columnspan=3, sticky="w", pady=4)
+    ttk.Radiobutton(
+        style_row, text="Clássico", value=REPORT_STYLE_CLASSIC, variable=var_style,
+    ).pack(side="left")
+    ttk.Radiobutton(
+        style_row, text="Prisma", value=REPORT_STYLE_PRISMA, variable=var_style,
+    ).pack(side="left", padx=(10, 0))
+
+    ttk.Label(parent, text="JPG espelhado").grid(row=row + 2, column=0, sticky="w", pady=4)
     jpg_row = ttk.Frame(parent)
-    jpg_row.grid(row=row + 1, column=1, columnspan=3, sticky="w", pady=4)
+    jpg_row.grid(row=row + 2, column=1, columnspan=3, sticky="w", pady=4)
     for text, value in (("17 cm", "17"), ("21 cm", "21"), ("Personalizado", "custom")):
         ttk.Radiobutton(jpg_row, text=text, value=value, variable=var_jpg).pack(side="left", padx=(0, 10))
     ent_custom = ttk.Entry(jpg_row, textvariable=var_custom, width=6)
@@ -201,11 +233,12 @@ def _export_defaults_rows(parent: ttk.Frame, cfg: dict, row: int) -> Callable[[]
             "(cadastro de Impressoras), quando houver; sem isso, usa a pasta padrão do módulo."
         ),
         style="Muted.TLabel", wraplength=700, justify="left",
-    ).grid(row=row + 2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+    ).grid(row=row + 3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
     def collect() -> dict:
         out = {
             "report_mode_default": var_mode.get(),
+            "report_style": var_style.get(),
             "mirror_jpg_width_mode": var_jpg.get(),
         }
         if var_jpg.get() == "custom":
@@ -1445,4 +1478,401 @@ def build_registros_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.Lab
         messagebox.showinfo("Registros", f"{changed} pedido(s) reclassificado(s).")
 
     ttk.Button(box, text=f"Reclassificar registros '{FALLBACK_TYPE}'", command=run).pack(anchor="w")
+    return box
+
+
+# ---------------------------------------------------------------------------
+# Banco de dados: diagnóstico e backup
+# ---------------------------------------------------------------------------
+_BACKUP_PREFIX = "printlogs"
+_BACKUP_KEEP = 20
+
+
+def _backup_dir() -> Path:
+    return _planejador_base_dir() / "backups"
+
+
+def build_backup_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.LabelFrame:
+    """Backup validado do banco de dados usado por Operação/Planejador/
+    Registros (core.sqlite_maintenance), com retenção automática — item de
+    roadmap (Fase 1) "formalizar diagnóstico, retenção de backups e ensaio
+    de restauração". `backup_database`/`diagnose_database` já existiam e
+    eram testados, mas nunca tinham superfície na tela — o operador não
+    tinha como rodar nenhum dos dois sem acesso a um terminal Python. Sem
+    agendamento automático: o operador decide quando rodar; cada clique só
+    cria/apaga arquivo de backup, nunca toca o banco de produção em si."""
+    box = card(parent, "Banco de dados · diagnóstico e backup", padding=14)
+
+    ttk.Label(
+        box,
+        text=(
+            "Cria uma cópia validada (íntegra, nunca sobrescreve um backup existente) do "
+            "banco de dados usado por Operação, Planejador e Registros, mantendo os "
+            f"{_BACKUP_KEEP} backups mais recentes e apagando os mais antigos automaticamente."
+        ),
+        style="Muted.TLabel", wraplength=860, justify="left",
+    ).pack(anchor="w", pady=(0, 10))
+
+    def _status_text() -> str:
+        from core.sqlite_maintenance import list_backups
+
+        backup_dir = _backup_dir()
+        backups = list_backups(backup_dir, _BACKUP_PREFIX)
+        if not backups:
+            return f"Nenhum backup ainda em {backup_dir}."
+        return f"{len(backups)} backup(s) em {backup_dir} — mais recente: {backups[-1].name}."
+
+    var_status = tk.StringVar(value=_status_text())
+    ttk.Label(box, textvariable=var_status, style="Muted.TLabel", wraplength=860, justify="left").pack(
+        anchor="w", pady=(0, 10)
+    )
+
+    btn_row = ttk.Frame(box)
+    btn_row.pack(anchor="w")
+    btn_diagnose = ttk.Button(btn_row, text="Verificar integridade")
+    btn_backup = ttk.Button(btn_row, text="Criar backup agora")
+    btn_diagnose.pack(side="left")
+    btn_backup.pack(side="left", padx=(8, 0))
+
+    def _set_busy(busy: bool, *, label: str) -> None:
+        state = "disabled" if busy else "normal"
+        btn_diagnose.configure(state=state)
+        btn_backup.configure(state=state)
+        if busy:
+            var_status.set(label)
+
+    def on_diagnose_done(report) -> None:
+        _set_busy(False, label="")
+        var_status.set(_status_text())
+        if report.healthy:
+            messagebox.showinfo("Verificar integridade", "Banco de dados íntegro — nenhum problema encontrado.")
+            return
+        details = "\n".join(report.integrity_messages) or "(sem mensagens de integridade)"
+        if report.foreign_key_violations:
+            details += f"\n\n{len(report.foreign_key_violations)} violação(ões) de referência entre tabelas."
+        messagebox.showwarning("Verificar integridade", f"Problemas encontrados:\n\n{details}")
+
+    def on_diagnose_error(exc: BaseException) -> None:
+        _set_busy(False, label="")
+        var_status.set(_status_text())
+        messagebox.showerror("Verificar integridade", f"Não foi possível verificar o banco.\n\n{type(exc).__name__}: {exc}")
+
+    def on_run_diagnose() -> None:
+        from core.printlogs_db import get_db_path
+        from core.sqlite_maintenance import diagnose_database
+
+        _set_busy(True, label="Verificando integridade — pode demorar se o banco estiver numa pasta de rede lenta...")
+        run_async(box, lambda: diagnose_database(get_db_path()), on_done=on_diagnose_done, on_error=on_diagnose_error)
+
+    def _run_backup() -> tuple[Path, int]:
+        from core.printlogs_db import get_db_path
+        from core.sqlite_maintenance import backup_database, backup_filename, prune_backups
+
+        backup_dir = _backup_dir()
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        destination = backup_dir / backup_filename(_BACKUP_PREFIX, datetime.now())
+        backup_database(get_db_path(), destination)
+        removed = prune_backups(backup_dir, _BACKUP_PREFIX, keep=_BACKUP_KEEP)
+        return destination, len(removed)
+
+    def on_backup_done(result) -> None:
+        _set_busy(False, label="")
+        var_status.set(_status_text())
+        destination, removed_count = result
+        extra = (
+            f"\n\n{removed_count} backup(s) antigo(s) removido(s) (mantendo os {_BACKUP_KEEP} mais recentes)."
+            if removed_count else ""
+        )
+        messagebox.showinfo("Criar backup", f"Backup criado e validado:\n{destination}{extra}")
+
+    def on_backup_error(exc: BaseException) -> None:
+        _set_busy(False, label="")
+        var_status.set(_status_text())
+        messagebox.showerror("Criar backup", f"Não foi possível criar o backup.\n\n{type(exc).__name__}: {exc}")
+
+    def on_run_backup() -> None:
+        _set_busy(True, label="Criando backup — pode demorar se o banco estiver numa pasta de rede lenta...")
+        run_async(box, _run_backup, on_done=on_backup_done, on_error=on_backup_error)
+
+    btn_diagnose.configure(command=on_run_diagnose)
+    btn_backup.configure(command=on_run_backup)
+    return box
+
+
+# ---------------------------------------------------------------------------
+# Vendedores e arquivos dos pedidos
+# ---------------------------------------------------------------------------
+def build_vendedores_section(parent: tk.Misc, on_saved: SavedCallback) -> ttk.LabelFrame:
+    """Cadastro de vendedores e das pastas de rede onde ficam as artes
+    originais de cada um, mais o índice local que Operação/Registros usam
+    pra identificar o vendedor e localizar os PDFs de cada pedido (ver
+    core/order_files.py). Cada ação de cadastro já grava no disco na hora
+    (ver add_or_update_vendedor etc.), porque "Testar acesso" precisa de
+    retorno imediato por clique — não combina com salvamento em lote pelo
+    botão "Salvar todas"."""
+    box = card(parent, "Vendedores e arquivos dos pedidos", padding=14)
+    ttk.Label(
+        box,
+        text=(
+            "Cadastro de vendedores e das pastas de rede onde ficam as artes originais de "
+            "cada um. Depois de cadastrar, use \"Atualizar índice\" (abaixo) para que Operação "
+            "e Registros consigam localizar os pedidos."
+        ),
+        style="Muted.TLabel", wraplength=860, justify="left",
+    ).pack(anchor="w", pady=(0, 10))
+
+    vendedores: List[Vendedor] = load_vendedores()
+    selected_key: Dict[str, Optional[str]] = {"value": None}
+    selected_folder: Dict[str, Optional[str]] = {"value": None}
+
+    body = ttk.Frame(box)
+    body.pack(fill="both", expand=True)
+
+    left = ttk.Frame(body)
+    left.pack(side="left", fill="both", expand=True)
+
+    tree = ttk.Treeview(left, columns=("name", "active", "priority"), show="headings", height=6)
+    for col, txt, w in [("name", "Nome", 220), ("active", "Ativo", 70), ("priority", "Prioridade", 80)]:
+        tree.heading(col, text=txt)
+        tree.column(col, width=w, anchor="w")
+    tree.pack(fill="both", expand=True)
+
+    form = ttk.Frame(left)
+    form.pack(fill="x", pady=(8, 0))
+
+    ttk.Label(form, text="Nome:").grid(row=0, column=0, sticky="w")
+    var_name = tk.StringVar()
+    ttk.Entry(form, textvariable=var_name, width=28).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+
+    var_active = tk.BooleanVar(value=True)
+    ttk.Checkbutton(form, text="Ativo", variable=var_active).grid(row=0, column=2, sticky="w", padx=(12, 0))
+
+    ttk.Label(form, text="Prioridade:").grid(row=0, column=3, sticky="w", padx=(12, 0))
+    var_priority = tk.StringVar(value="100")
+    ttk.Entry(form, textvariable=var_priority, width=6).grid(row=0, column=4, sticky="w", padx=6, pady=2)
+
+    ttk.Label(form, text="Observações:").grid(row=1, column=0, sticky="w")
+    var_notes = tk.StringVar()
+    ttk.Entry(form, textvariable=var_notes, width=50).grid(
+        row=1, column=1, columnspan=4, sticky="we", padx=6, pady=2
+    )
+
+    btn_row = ttk.Frame(left)
+    btn_row.pack(fill="x", pady=(6, 0))
+
+    right = ttk.Frame(body)
+    right.pack(side="left", fill="both", expand=True, padx=(16, 0))
+
+    ttk.Label(right, text="Pastas do vendedor selecionado:").pack(anchor="w")
+    folders_tree = ttk.Treeview(right, columns=("path", "checked", "result"), show="headings", height=6)
+    for col, txt, w in [("path", "Pasta", 260), ("checked", "Último teste", 130), ("result", "Resultado", 160)]:
+        folders_tree.heading(col, text=txt)
+        folders_tree.column(col, width=w, anchor="w")
+    folders_tree.pack(fill="both", expand=True, pady=(4, 0))
+
+    folder_btn_row = ttk.Frame(right)
+    folder_btn_row.pack(fill="x", pady=(6, 0))
+
+    def refresh_tree(select_key: Optional[str] = None) -> None:
+        tree.delete(*tree.get_children())
+        ordered = sorted(vendedores, key=lambda v: (v.priority, v.name.lower()))
+        for v in ordered:
+            tree.insert("", "end", iid=v.key, values=(v.name, "Sim" if v.active else "Não", v.priority))
+        if select_key:
+            tree.selection_set(select_key)
+
+    def refresh_folders_tree() -> None:
+        folders_tree.delete(*folders_tree.get_children())
+        v = next((x for x in vendedores if x.key == selected_key["value"]), None)
+        if not v:
+            return
+        for f in v.folders:
+            if f.last_check_ok is None:
+                result = "Nunca testado"
+            else:
+                result = f"OK — {f.last_check_detail}" if f.last_check_ok else f"Falhou — {f.last_check_detail}"
+            folders_tree.insert("", "end", iid=f.path, values=(f.path, f.last_checked_at or "—", result))
+
+    def clear_form() -> None:
+        selected_key["value"] = None
+        selected_folder["value"] = None
+        var_name.set("")
+        var_active.set(True)
+        var_priority.set("100")
+        var_notes.set("")
+        tree.selection_remove(*tree.selection())
+        refresh_folders_tree()
+
+    def on_select_vendor(_evt=None) -> None:
+        sel = tree.selection()
+        if not sel:
+            return
+        key = sel[0]
+        v = next((x for x in vendedores if x.key == key), None)
+        if v is None:
+            return
+        selected_key["value"] = v.key
+        selected_folder["value"] = None
+        var_name.set(v.name)
+        var_active.set(v.active)
+        var_priority.set(str(v.priority))
+        var_notes.set(v.notes)
+        refresh_folders_tree()
+
+    tree.bind("<<TreeviewSelect>>", on_select_vendor)
+
+    def on_select_folder(_evt=None) -> None:
+        sel = folders_tree.selection()
+        selected_folder["value"] = sel[0] if sel else None
+
+    folders_tree.bind("<<TreeviewSelect>>", on_select_folder)
+
+    def on_save_vendor() -> None:
+        nonlocal vendedores
+        try:
+            priority = int((var_priority.get() or "100").strip())
+        except ValueError:
+            messagebox.showerror("Vendedores", "Prioridade inválida — use um número inteiro.")
+            return
+        try:
+            vendedores = add_or_update_vendedor(
+                vendedores,
+                key=selected_key["value"],
+                name=var_name.get(),
+                active=bool(var_active.get()),
+                priority=priority,
+                notes=var_notes.get().strip(),
+            )
+        except ValueError as e:
+            messagebox.showerror("Vendedores", str(e))
+            return
+        save_vendedores(vendedores)
+        new_key = selected_key["value"] or next(
+            (v.key for v in vendedores if v.name.strip().lower() == var_name.get().strip().lower()), None
+        )
+        refresh_tree(select_key=new_key)
+        on_select_vendor()
+        on_saved("Vendedores")
+
+    def on_toggle_active() -> None:
+        nonlocal vendedores
+        v = next((x for x in vendedores if x.key == selected_key["value"]), None)
+        if v is None:
+            messagebox.showwarning("Vendedores", "Selecione um vendedor.")
+            return
+        vendedores = add_or_update_vendedor(
+            vendedores, key=v.key, name=v.name, active=not v.active, priority=v.priority, notes=v.notes,
+        )
+        save_vendedores(vendedores)
+        refresh_tree(select_key=v.key)
+        on_select_vendor()
+        on_saved("Vendedores")
+
+    ttk.Button(btn_row, text="Novo", command=clear_form).pack(side="left")
+    ttk.Button(btn_row, text="Adicionar · Atualizar", command=on_save_vendor).pack(side="left", padx=(6, 0))
+    ttk.Button(btn_row, text="Ativar · Desativar", command=on_toggle_active).pack(side="left", padx=(6, 0))
+
+    def on_add_folder() -> None:
+        nonlocal vendedores
+        if not selected_key["value"]:
+            messagebox.showwarning("Vendedores", "Selecione um vendedor primeiro.")
+            return
+        folder = filedialog.askdirectory(title="Pasta de rede com as artes deste vendedor")
+        if not folder:
+            return
+        try:
+            vendedores = add_vendedor_folder(vendedores, selected_key["value"], folder)
+        except ValueError as e:
+            messagebox.showerror("Vendedores", str(e))
+            return
+        save_vendedores(vendedores)
+        refresh_folders_tree()
+        on_saved("Vendedores")
+
+    def on_remove_folder() -> None:
+        nonlocal vendedores
+        if not selected_key["value"] or not selected_folder["value"]:
+            messagebox.showwarning("Vendedores", "Selecione uma pasta primeiro.")
+            return
+        vendedores = remove_vendedor_folder(vendedores, selected_key["value"], selected_folder["value"])
+        save_vendedores(vendedores)
+        selected_folder["value"] = None
+        refresh_folders_tree()
+        on_saved("Vendedores")
+
+    def on_test_folder_access() -> None:
+        nonlocal vendedores
+        if not selected_key["value"] or not selected_folder["value"]:
+            messagebox.showwarning("Vendedores", "Selecione uma pasta primeiro.")
+            return
+        ok, detail = test_folder_access(selected_folder["value"])
+        vendedores = set_vendedor_folder_access_result(
+            vendedores, selected_key["value"], selected_folder["value"],
+            ok=ok, detail=detail, checked_at=datetime.now().strftime("%d/%m/%Y %H:%M"),
+        )
+        save_vendedores(vendedores)
+        refresh_folders_tree()
+        on_saved("Vendedores")
+
+    def on_open_folder() -> None:
+        if not selected_folder["value"]:
+            messagebox.showwarning("Vendedores", "Selecione uma pasta primeiro.")
+            return
+        _open_existing_folder(selected_folder["value"])
+
+    ttk.Button(folder_btn_row, text="Cadastrar diretório", command=on_add_folder).pack(side="left")
+    ttk.Button(folder_btn_row, text="Remover diretório", command=on_remove_folder).pack(side="left", padx=(6, 0))
+    ttk.Button(folder_btn_row, text="Testar acesso", command=on_test_folder_access).pack(side="left", padx=(6, 0))
+    ttk.Button(folder_btn_row, text="Abrir pasta", command=on_open_folder).pack(side="left", padx=(6, 0))
+
+    # Índice local dos pedidos (Etapa B/E) — pesquisa as pastas de todos os
+    # vendedores cadastrados de uma vez, numa thread separada (core.ui.run_async),
+    # pra nunca travar o Tkinter enquanto uma pasta de rede estiver lenta/fora
+    # do ar (regra obrigatória "Não bloquear a interface..."). É este índice
+    # que Operação/Registros (Etapa E) consultam pra identificar o vendedor e
+    # localizar os PDFs de cada pedido — sem atualizá-lo aqui ao menos uma
+    # vez, essas telas não encontram nada.
+    index_row = ttk.Frame(box)
+    index_row.pack(fill="x", pady=(14, 0))
+
+    def _format_index_status(state) -> str:
+        if not state.generated_at:
+            return "Índice de pedidos: nunca atualizado — localização automática ainda não funciona."
+        vendor_count = len({f.vendor_key for f in state.folders})
+        msg = (
+            f"Índice de pedidos: atualizado em {state.generated_at} — "
+            f"{len(state.folders)} pedido(s) em {vendor_count} vendedor(es)"
+        )
+        if state.errors:
+            msg += f" · {len(state.errors)} pasta(s) com erro de acesso"
+        return msg
+
+    var_index_status = tk.StringVar(value=_format_index_status(load_order_index()))
+    btn_refresh_index = ttk.Button(index_row, text="Atualizar índice")
+
+    def on_index_refresh_done(state) -> None:
+        save_order_index(state)
+        var_index_status.set(_format_index_status(state))
+        btn_refresh_index.configure(text="Atualizar índice", state="normal")
+
+    def on_index_refresh_error(exc: BaseException) -> None:
+        btn_refresh_index.configure(text="Atualizar índice", state="normal")
+        var_index_status.set(_format_index_status(load_order_index()))
+        messagebox.showerror("Vendedores", f"Falha ao atualizar o índice.\n\n{type(exc).__name__}: {exc}")
+
+    def on_refresh_index() -> None:
+        btn_refresh_index.configure(text="Atualizando...", state="disabled")
+        var_index_status.set("Atualizando índice — pode demorar se alguma pasta de rede estiver lenta...")
+        run_async(
+            box, lambda: refresh_order_index(vendedores),
+            on_done=on_index_refresh_done, on_error=on_index_refresh_error,
+        )
+
+    btn_refresh_index.configure(command=on_refresh_index)
+    btn_refresh_index.pack(side="left")
+    ttk.Label(
+        index_row, textvariable=var_index_status, style="Muted.TLabel", wraplength=700, justify="left",
+    ).pack(side="left", padx=(10, 0))
+
+    refresh_tree()
     return box

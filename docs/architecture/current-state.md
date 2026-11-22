@@ -2,6 +2,10 @@
 
 Referência: código de trabalho em 05/11/2026, versão mantida em **1.6.39**. Recursos futuros constam no [roadmap](../roadmaps/nexor-modernization-roadmap.md).
 
+**Nota 13/11/2026, versão 1.6.61.** A estrutura/dependências abaixo continuam corretas; o que mudou desde 05/11/2026 foi recurso novo, registrado no `CHANGELOG.md` (vendedores/rastreabilidade de PDF, comprovante "Prisma", verificação de impressão real da M1 e detecção de impressão física incompleta) — módulos novos como `core/vendedores.py`, `core/order_files.py`, `core/order_pdfs.py`, `core/order_vendor_resolution.py`, `core/prisma_report.py`, `modules/operacao/m1_check.py`, `modules/operacao/print_check.py` e `modules/operacao/vendor_pdf_apply.py` ainda não aparecem no diagrama/tabela abaixo. Nenhum dos mecanismos descritos aqui (JSON atômico, SQLite, logging, PX Tool Box) mudou de comportamento nesse meio-tempo.
+
+**Nota 16/11/2026, versão 1.6.64.** Mesma estrutura; só mais dois incrementos do Prisma (Planejador + correção de truncamento, ver `CHANGELOG.md`), nenhuma mudança de arquitetura/mecanismo. Auditoria P0 desta data confirmou (evidência real, não suposição): suíte isolada com 455 casos passando, `compileall` limpo, e o executável `dist\Nexor-1.6.64.exe` abrindo de verdade (processo real com o título de janela esperado) — ver notas correspondentes em `technical-debt.md` e no roadmap.
+
 ## Estrutura e dependências
 
 ```text

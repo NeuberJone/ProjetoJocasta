@@ -107,6 +107,51 @@ class PrintlogsSafetyTests(unittest.TestCase):
         self.assertEqual([tuple(row) for row in legacy], [('[{"document":"legacy"}]', "old")])
         self.assertEqual([tuple(row) for row in versions], [(0, '[{"document":"legacy"}]')])
 
+    def test_start_time_column_is_added_to_a_database_created_before_it_existed(self):
+        # Simula um banco real já em uso antes da coluna start_time existir
+        # (métricas de duração, ver core.printlogs_db.compute_machine_metrics):
+        # cria o schema manualmente sem ela, grava uma order do jeito antigo,
+        # e confirma que abrir essa base de novo (ensure_schema) adiciona a
+        # coluna sem perder nem travar a linha já existente.
+        con = sqlite3.connect(self.path)
+        try:
+            con.executescript(
+                """
+                CREATE TABLE rolls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, roll_name TEXT NOT NULL, machine TEXT NOT NULL,
+                    export_mode TEXT NOT NULL, created_at TEXT NOT NULL, source_hash TEXT NOT NULL UNIQUE,
+                    app_version TEXT, notes TEXT
+                );
+                CREATE TABLE orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, roll_id INTEGER NOT NULL, end_time TEXT, document TEXT,
+                    fabric TEXT, pedido TEXT, tipo TEXT, height_mm REAL, vpos_mm REAL, real_m REAL,
+                    source_path TEXT, observacao TEXT, job_hash TEXT NOT NULL,
+                    FOREIGN KEY (roll_id) REFERENCES rolls(id) ON DELETE CASCADE, UNIQUE (roll_id, job_hash)
+                );
+                """
+            )
+            con.execute(
+                "INSERT INTO rolls(roll_name, machine, export_mode, created_at, source_hash) VALUES('R1','M1','normal','2026-01-01','h1')"
+            )
+            con.execute(
+                "INSERT INTO orders(roll_id, end_time, document, fabric, pedido, tipo, height_mm, vpos_mm, real_m, source_path, observacao, job_hash) "
+                "VALUES(1,'2026-01-01T10:00:00','doc.jpg','DRYFIT','Cliente A','Pedido',1000.0,0.0,1.0,'/x/doc.jpg','', 'h1')"
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        con = db.connect()
+        try:
+            db.ensure_schema(con)
+            cols = [row[1] for row in con.execute("PRAGMA table_info(orders)").fetchall()]
+            self.assertIn("start_time", cols)
+            row = con.execute("SELECT document, start_time FROM orders WHERE id = 1").fetchone()
+        finally:
+            con.close()
+        self.assertEqual(row["document"], "doc.jpg")
+        self.assertIsNone(row["start_time"])
+
     def test_failed_export_event_rolls_back_roll_and_orders(self):
         with patch("core.printlogs_db.log_event", side_effect=sqlite3.OperationalError("event rejected")):
             with self.assertRaises(sqlite3.OperationalError):

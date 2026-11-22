@@ -6,12 +6,16 @@ módulos que os usam.
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 import weakref
 from tkinter import ttk
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from core import theme
+from core.logging_config import get_logger, log_exception
+
+_logger = get_logger(__name__)
 
 # ttk ignora "padding" vindo do estilo em frames; as caixas que só têm
 # preenchimento interno no Windows 98 (.nx-head/.nx-step) são ajustadas aqui.
@@ -150,3 +154,112 @@ def step_indicator(parent: tk.Misc, steps: list[str], active: int = 0) -> ttk.Fr
         style = "StepActive.TLabel" if index == active else "Step.TLabel"
         ttk.Label(frame, text=label, style=style).pack(side="left", padx=(6, 14))
     return outer
+
+
+def run_async(
+    widget: tk.Misc,
+    work: Callable[[], Any],
+    on_done: Optional[Callable[[Any], None]] = None,
+    on_error: Optional[Callable[[BaseException], None]] = None,
+) -> None:
+    """Roda `work` numa thread separada e entrega o resultado (ou erro) de
+    volta na thread principal do Tkinter via `widget.after(0, ...)` — nunca
+    atualiza um widget direto de dentro da thread de trabalho. Introduzido
+    pela Etapa E do recurso de identificação de vendedor (ver
+    core/order_files.py e core/order_pdfs.py), cuja indexação de pastas de
+    rede e geração de miniaturas de PDF são as primeiras operações do Nexor
+    potencialmente lentas o bastante pra exigir isto (regra obrigatória:
+    "Não bloquear a interface durante pesquisas ou geração de miniaturas").
+
+    Uma excecão dentro de `work` nunca mata a thread silenciosamente: é
+    capturada e entregue a `on_error` (se informado), do mesmo jeito seguro
+    via `after`; sem `on_error`, só é registrada no log.
+
+    Achado de revisão de código: se a janela for fechada ENQUANTO a thread
+    de trabalho ainda está rodando (ex.: "Atualizar índice"/"Criar backup"
+    numa pasta de rede lenta), `widget.after(...)` pode falhar ao agendar
+    (widget já destruído) ou o callback entregue pode falhar ao tentar
+    atualizar um botão/variável que não existe mais — nos dois casos é só
+    registrado no log, nunca propagado (a thread de trabalho já terminou;
+    não há mais ninguém esperando o resultado)."""
+    def _deliver(callback: Callable[[], None]) -> None:
+        try:
+            widget.after(0, callback)
+        except tk.TclError as exc:
+            log_exception(_logger, "run_async: widget destroyed before result could be delivered", exc)
+
+    def _run_callback(callback: Callable[[Any], None], value: Any) -> None:
+        try:
+            callback(value)
+        except tk.TclError as exc:
+            log_exception(_logger, "run_async: widget destroyed while callback was running", exc)
+
+    def _runner() -> None:
+        try:
+            result = work()
+        except BaseException as exc:  # noqa: BLE001 - repassa qualquer erro pro callback, nunca deixa a thread morrer silenciosamente
+            if on_error is not None:
+                _deliver(lambda: _run_callback(on_error, exc))
+            else:
+                log_exception(_logger, "Unhandled error in background task", exc)
+            return
+        if on_done is not None:
+            _deliver(lambda: _run_callback(on_done, result))
+
+    threading.Thread(target=_runner, daemon=True).start()
+
+
+def ask_pick_from_list(
+    parent: tk.Misc,
+    title: str,
+    prompt: str,
+    items: list,
+    label_fn: Callable[[Any], str],
+) -> Optional[Any]:
+    """Diálogo modal simples de escolha única — usado tanto para ambiguidade
+    de vendedor/PDF (vários candidatos encontrados) quanto para correção
+    manual ("Alterar vendedor...", "Escolher vendedor..."/"Escolher PDF..."
+    do painel de pré-visualização em Operação). Sem seleção == Cancelar
+    (retorna None, nunca escolhe o primeiro item por conta própria).
+
+    Originalmente só em modules/registros/ui.py; promovido pra aqui quando
+    o painel de pré-visualização de Operação (Parte 1 da conclusão do
+    recurso de identificação de vendedor/PDF) passou a precisar do mesmo
+    diálogo, pra não duplicar a implementação."""
+    if not items:
+        return None
+    win = tk.Toplevel(parent)
+    win.title(title)
+    win.transient(parent.winfo_toplevel())
+    win.grab_set()
+    result: dict = {"value": None}
+
+    ttk.Label(win, text=prompt, wraplength=440, justify="left").pack(anchor="w", padx=12, pady=(12, 6))
+    listbox = tk.Listbox(win, height=min(8, len(items)), width=72, exportselection=False)
+    for item in items:
+        listbox.insert("end", label_fn(item))
+    # Achado de revisão de código: um `selection_set(0)` aqui pré-selecionava
+    # o primeiro item da lista — clicar em "Confirmar" sem escolher nada
+    # devolvia esse primeiro item como se fosse a escolha do operador,
+    # contradizendo a garantia documentada acima ("nunca escolhe o primeiro
+    # item por conta própria"). Removido: sem clique numa linha, `on_ok`
+    # já trata "nenhuma seleção" igual a Cancelar.
+    listbox.pack(fill="both", expand=True, padx=12)
+
+    def on_ok() -> None:
+        sel = listbox.curselection()
+        if sel:
+            result["value"] = items[sel[0]]
+        win.destroy()
+
+    def on_cancel() -> None:
+        win.destroy()
+
+    btn_row = ttk.Frame(win)
+    btn_row.pack(fill="x", padx=12, pady=12)
+    ttk.Button(btn_row, text="Confirmar", command=on_ok).pack(side="right")
+    ttk.Button(btn_row, text="Cancelar", command=on_cancel).pack(side="right", padx=(0, 8))
+
+    win.protocol("WM_DELETE_WINDOW", on_cancel)
+    win.wait_window()
+    return result["value"]

@@ -55,6 +55,18 @@ def open_in_explorer(path: Path) -> None:
         raise
 
 
+def open_file(path: Path) -> None:
+    """Abre um arquivo no aplicativo padrão do Windows (ex.: PDF no leitor
+    configurado) — mesmo mecanismo de open_in_explorer, só que para um
+    arquivo em vez de uma pasta."""
+    path = path.resolve()
+    try:
+        os.startfile(str(path))  # noqa: S606 (Windows-only)
+    except OSError as exc:
+        log_exception(_logger, "Could not open file", exc)
+        raise
+
+
 def reveal_file_in_explorer(file_path: Path) -> None:
     """Abre o Explorer já com o ARQUIVO selecionado (não só a pasta) — "Mostrar arquivo na
     pasta" (ver modules/registros/ui.py, exportação do contexto de produção). Lista de

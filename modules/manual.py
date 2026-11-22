@@ -89,6 +89,12 @@ ou lançar um lote manualmente a partir de imagens.
      de importação, reordenável à mão (veja abaixo).
    - "Ordem automática (menores no fim)": no modo tecido, deixa os itens
      menores de cada tecido por último dentro do rolo.
+   - "Agrupar por pedido dentro do tecido" (ligado por padrão): dentro de
+     um mesmo bloco de tecido, mantém os itens do mesmo pedido juntos
+     (ordem alfabética do pedido; tamanho decrescente dentro do mesmo
+     pedido) em vez de ordenar só por tamanho — evita intercalar pedidos
+     diferentes no mesmo rolo. O limite de metragem do rolo continua
+     valendo normalmente; só a ordem de entrada nos rolos muda.
    - "Configurações avançadas ▸" (recolhido por padrão): "Priorizar
      pedaços de tecido cortados (não usados)" usa sobras já cadastradas em
      Pedaços de tecido em vez de cortar sempre do rolo cheio; o botão
@@ -102,10 +108,11 @@ ou lançar um lote manualmente a partir de imagens.
    valores em Configurações → Planejador).
 6. Confira o resultado nas quatro abas (cada uma com "⤢ Abrir em janela"
    pra ver numa janela maior):
-   - Arquivos — lista os arquivos na ordem de importação, sem agrupar;
-     "Ver arquivos importados" leva direto pra essa visão dentro da aba
-     "Fila de impressão".
-   - Fila de impressão — a sequência final que vai pro rolo. No modo
+   - Arquivos — lista própria dos arquivos na ordem de importação, sem
+     agrupar por tecido/rolo; "Atualizar arquivos" atualiza a lista (ela
+     também se atualiza sozinha ao entrar nessa aba).
+   - Fila de impressão — a sequência final que vai pro rolo (com rolagem
+     própria quando a lista é longa). No modo
      "original", arraste pela alcinha à esquerda de cada linha (ou use
      "Mover para cima"/"Mover para baixo" no menu de botão direito) pra
      reordenar manualmente; no modo "tecido" a ordem é automática.
@@ -190,7 +197,21 @@ espelhado.
      e só afeta o rolo aberto, nada apagado do banco.
    - Pedidos no rolo — o mesmo conteúdo agrupado por pedido/tipo, em vez
      de por tecido; duplo clique ou botão direito abre "Editar pedido" ou
-     "Editar tipo".
+     "Editar tipo". As colunas "Vendedor" e "PDF" mostram, pra cada
+     pedido, uma sugestão calculada a partir do cadastro de Vendedores
+     (Configurações) — "Ambíguo (N)" quando o mesmo nome de pedido existe
+     em mais de um vendedor, "Não identificado"/"—" quando não achou
+     nada. Selecionar um pedido na tabela mostra, no painel abaixo,
+     "Escolher vendedor..." e "Escolher PDF..." pra confirmar ou corrigir
+     a sugestão ANTES de fechar o rolo (e "Abrir PDF"/"Abrir pasta" pra
+     olhar o arquivo sugerido). Uma escolha feita aqui tem prioridade
+     sobre a sugestão automática e só é gravada de verdade quando o rolo é
+     fechado/atualizado — sem confirmar nada, o programa continua
+     identificando sozinho quando encontra exatamente uma correspondência
+     (igual já fazia antes, só que agora também tenta achar o PDF). Ao
+     reabrir um rolo já salvo pra editar, um vínculo confirmado
+     manualmente (aqui ou em Registros) aparece como está, nunca é
+     substituído sozinho por uma sugestão diferente.
    - Lista do rolo — todos os arquivos do rolo numa lista só, na MESMA
      ordem em que saem no comprovante (não agrupados por tecido ou
      pedido). Duplo clique ou botão direito → "Editar item…" abre um
@@ -230,7 +251,22 @@ espelhado.
    outro programa que grava seu próprio log), cada item mostra na coluna
    "Impressão (log adicional)" se a impressão física foi confirmada
    cruzando os dois logs (✓), se deu erro (⚠) ou se o formato do log
-   configurado não é o esperado (⚠ formato desconhecido).
+   configurado não é o esperado (⚠ formato desconhecido). Essa coluna
+   aparece tanto em "Detalhes do bloco" (do tecido selecionado) quanto em
+   "Lista do rolo" (todos os arquivos do rolo de uma vez). Qualquer coisa
+   diferente de "confirmado" aparece com o texto destacado na cor de
+   "perigo" do tema — vale conferir esse item de perto, porque hoje ainda
+   não dá pra saber automaticamente se isso aconteceu por uma impressão
+   realmente interrompida ou outro motivo (ex.: pasta do log adicional
+   desatualizada).
+8.1. Independente de ter ou não "Log adicional" configurado — funciona
+   pra M1, M2 e M3 sempre — a coluna "Impressão completa" mostra se a
+   impressão física saiu do tamanho esperado ou ficou curta
+   ("✓ Impressão completa" / "⚠ Impressão incompleta", com a diferença em
+   metros no detalhe quando incompleta). Essa linha também fica destacada
+   na cor de "perigo". Quando uma impressão é marcada como incompleta, o
+   comprovante (PDF, nos dois estilos) mostra o mesmo aviso na observação
+   daquele item.
 9. Clique em "Fechar Rolo" (ou "Atualizar Rolo", se estiver editando um
    rolo já salvo) — gera o PDF, o JPG espelhado e grava no banco, tudo de
    uma vez. Depois disso o botão "Abrir comprovante", ao lado, fica
@@ -360,6 +396,17 @@ cobre só o caso raro de a pasta de rede cair bem na hora de um dos PCs
 gerar o número. Fica salvo só no computador onde foi preenchido — deixe
 em branco se usar um PC só.
 
+## Backup do banco de dados
+
+"Verificar integridade" confere o banco de dados usado por Operação,
+Planejador e Registros sem alterar nada; avisa se encontrar algum
+problema. "Criar backup agora" faz uma cópia validada numa pasta
+"backups" dentro do diretório de trabalho, com data e hora no nome, e
+apaga sozinho os backups mais antigos, mantendo só os 20 mais recentes.
+Os dois rodam em segundo plano — não travam a tela mesmo se o banco
+estiver numa pasta de rede lenta. Não há agendamento automático: rode
+quando quiser, por exemplo antes de uma manutenção na rede.
+
 ## Tipos de impressão
 
 Regras que identificam automaticamente se um arquivo é Pedido, Reposição
@@ -372,6 +419,28 @@ Vale igual pra Operação e pro Planejador, não precisa configurar duas
 vezes:
 
 - Modo do PDF — Completo (todo o detalhamento) ou Resumido.
+- Estilo do comprovante — Clássico (modelo tradicional, tabela única) ou
+  Prisma (cabeçalho com selo do rolo e indicadores, cartões compactos de
+  metragem por tecido, sequência detalhada com tipo/responsável e
+  vendedor quando identificado, e os mesmos resumos de pedidos/tecidos do
+  Clássico, só com outra aparência). Trocar o estilo não muda nenhum
+  cálculo ou registro salvo, só a aparência do PDF/JPG; instalações novas
+  e já existentes começam em Clássico até você escolher Prisma. **O
+  Planejador também tem visual Prisma**, no mesmo estilo visual (cores e
+  tipografia) — como a fila ainda não tem um rolo fechado (pode ter
+  vários rolos, nenhum impresso ainda), o cabeçalho mostra "PLANEJAMENTO
+  DE PRODUÇÃO" em vez do selo "ROLO FECHADO", e a tabela detalhada é a
+  mesma informação da fila do Clássico (rolo/tecido/arquivo/tempo/metros,
+  e o resumo por rolo com tecido principal, pedaço cortado, blocos,
+  itens, total e tempo) — nenhuma informação do comprovante comum fica de
+  fora, só muda a aparência; não tem pedido/vendedor/operador (a fila
+  ainda não chegou a ter isso — esses dados só existem depois que o rolo
+  é salvo). Na Operação, o vendedor mostrado no Prisma é uma
+  pré-visualização: só aparece quando o pedido casa com exatamente um
+  vendedor no índice (ver Configurações · Vendedores); ambíguo ou não
+  encontrado, a linha some — nunca mostra um palpite. Essa mesma
+  conclusão é gravada de verdade em Registros assim que o rolo é salvo
+  (ver seção "Vendedor e PDF original do pedido" em Registros).
 - JPG espelhado — largura de 17 cm, 21 cm ou Personalizado (digite o
   valor em cm ao lado).
 
@@ -421,6 +490,104 @@ Tipos de impressão aos pedidos já salvos nesse tipo (útil depois de criar
 ou ajustar uma regra, pra ela valer também pro que já foi importado antes,
 sem precisar reabrir rolo por rolo). Tipos escolhidos à mão (Teste,
 Terceirizado etc. via "Editar tipo") não mudam.
+
+A aba "Retrabalho" lista pedido+tecido que aparece em mais de um rolo da
+Operação — o rolo mais antigo é tratado como a impressão original, os
+demais como possível retrabalho (reimpressão por defeito/erro). A aba
+"Duplicatas" é diferente: lista rolos com o MESMO nome exportados mais de
+uma vez com conteúdo IDÊNTICO — reexportação acidental do mesmo lote,
+nunca retrabalho de verdade. As duas são só relatórios pra conferir —
+nenhuma nunca muda "Métricas"/"Reconciliação"/"Painel", que continuam
+somando cada cópia normalmente; botão direito numa linha abre o(s) rolo(s)
+envolvido(s) direto na aba "Pesquisar".
+
+### Detalhes do rolo selecionado
+
+Ao lado de "Resumo", "Pedidos", "Lista do rolo" e "Eventos", o detalhe do
+rolo selecionado tem mais três abas que mostram a mesma visão agrupada por
+tecido que a Operação usa durante a importação — "Ordem do rolo" (um
+tecido por linha, mais recente primeiro), "Detalhes do bloco" (os itens do
+tecido selecionado em "Ordem do rolo") e "Pedidos no rolo" (resumo
+agrupado por pedido). São só leitura, a partir das orders já salvas — não
+substituem "Editar rolo" pra corrigir algo. O botão "⤢ Abrir em janela" (no
+topo, ao lado de "Versão do rolo") abre uma segunda janela de Registros
+maior, já aberta no mesmo rolo, pra ver os dados com mais espaço.
+
+A aba "Ocorrências" registra um problema vinculado ao rolo inteiro (ex.:
+"máquina travou", "tecido rasgado", "erro de impressão") — diferente da
+Observação livre de um pedido, uma ocorrência tem status (Aberta/Resolvida)
+e histórico próprio: "Nova ocorrência…" cria a primeira entrada; dar duplo
+clique numa ocorrência já existente mostra o histórico completo e permite
+adicionar uma entrada nova (edição) sem nunca apagar ou sobrescrever as
+anteriores.
+
+### Vendedor e PDF original do pedido (aba "Pedidos")
+
+Selecione um pedido na aba "Pedidos" (da versão ATUAL do rolo — uma versão
+histórica, escolhida em "Versão do rolo", não tem estas ações) para usar:
+
+- Localizar vendedor/PDF — procura o pedido no índice local (cadastrado em
+  Configurações · Vendedores — veja ali antes de usar isto pela primeira
+  vez) e, se encontrar de forma inequívoca, identifica o vendedor e o PDF
+  automaticamente. Se o mesmo pedido existir em mais de um vendedor, ou
+  houver mais de um PDF na pasta, pergunta qual é o certo — nunca escolhe
+  por conta própria nem assume que o arquivo mais recente é o correto.
+- Alterar vendedor... — corrige manualmente, inclusive para remover o
+  vínculo (volta a "Não identificado"). Uma correção manual nunca é
+  sobrescrita por uma localização automática posterior.
+- Vincular PDF... — escolhe manualmente o PDF, quando a localização
+  automática não encontra nada ou encontra o arquivo errado.
+- Abrir PDF / Abrir pasta / Mostrar no Explorador — usam o PDF vinculado
+  (a pasta é a pasta onde esse PDF está); ficam desabilitados enquanto
+  não houver um PDF vinculado ao pedido selecionado.
+
+As colunas "Vendedor" e "PDF" mostram o vínculo já salvo. Desde que o rolo
+é fechado em Operação, o vendedor de cada pedido real (nunca de
+avanço/espaço) já é identificado automaticamente assim que o fechamento é
+salvo — se houver mais de um candidato (ambiguidade) ou nenhum, o pedido
+fica "Não identificado" até alguém usar "Localizar vendedor/PDF" ou
+"Alterar vendedor..." manualmente aqui; nada disso sobrescreve uma
+correção manual já feita antes. Abrir a tela ou selecionar um rolo, por si
+só, não dispara nenhuma busca nova.
+
+O filtro "Vendedor" (ao lado de "Tipo") mostra só os rolos que tenham ao
+menos um pedido vinculado àquele vendedor; "— Sem vendedor identificado —"
+mostra rolos com ao menos um pedido real (avanço/espaço nunca conta aqui)
+ainda sem vínculo.
+
+## Vendedores e arquivos dos pedidos
+
+Cadastro de vendedores e das pastas de rede onde ficam as artes originais
+de cada um, mais o índice local que a tela de Registros usa para
+localizar o vendedor e o PDF original de cada pedido.
+
+- Novo / Adicionar · Atualizar — cria ou edita um vendedor (nome,
+  prioridade — menor número aparece primeiro nas listas — e observações
+  livres).
+- Ativar · Desativar — não existe "excluir vendedor" por aqui; um
+  vendedor que saiu fica desativado, sem perder o histórico.
+- Cadastrar diretório — adiciona uma pasta de rede (ex.: a pasta desse
+  vendedor no servidor) à lista do vendedor selecionado. O mesmo caminho
+  pode ser cadastrado em mais de um vendedor, se for uma pasta
+  compartilhada entre eles.
+- Testar acesso — confirma, na hora, se aquela pasta está acessível e
+  LISTÁVEL agora (não só "existe") — útil pra descobrir cedo uma pasta de
+  rede fora do ar ou um caminho digitado errado. O resultado reflete esta
+  máquina nesta sessão, não uma garantia permanente: uma unidade mapeada
+  que funciona num computador pode não existir em outro.
+- Abrir pasta — abre a pasta selecionada no Explorer.
+- Atualizar índice — percorre as pastas de todos os vendedores ativos e
+  guarda o resultado localmente, sem travar a tela (roda em segundo
+  plano). É esse índice que a aba "Pedidos" de Registros consulta para
+  localizar vendedor e PDF — depois de cadastrar um vendedor novo ou uma
+  pasta nova, clique aqui antes de usar "Localizar vendedor/PDF" em
+  Registros. Uma pasta de rede fora do ar nesta rodada não apaga o que já
+  foi indexado dela antes.
+
+Atenção: testar o acesso a uma pasta de rede que não existe mais, ou
+atualizar o índice com uma pasta de rede lenta, pode demorar alguns
+segundos antes de avisar que falhou — é esperado, não é o programa
+travado.
 """
 
 _TIPOS_IMPRESSAO = """
@@ -506,7 +673,25 @@ Lista com Novo (botão "Nova"), seleção pra editar, "Salvar" e "Remover".
 Campos do formulário:
 
 - Nome completo e Nome de exibição (o que aparece nas telas, ex. "M1").
-- Velocidade (m/min) — usada no cálculo de tempo do Planejador.
+- Velocidade (m/min) — usada no cálculo de tempo do Planejador. O botão
+  "Detectar velocidade de log(s)…" ao lado deixa escolher um ou mais logs
+  .txt e calcula a velocidade real de cada um. Aceita tanto o log
+  por-arquivo (os mesmos importados na Operação — comprimento impresso ÷
+  tempo entre início e fim do log) quanto o log diário físico de uma
+  máquina que usa log adicional (como a M1/JetPrime): nesse caso cada
+  LOTE físico concluído sem erro dentro do arquivo do dia vira uma amostra
+  própria (comprimento do lote ÷ tempo entre ele entrar na fila e o
+  resultado final ser reportado — inclui tempo de fila, não só impressão
+  pura). Uma janela de conferência mostra o cálculo de cada amostra, deixa
+  desmarcar alguma que pareça estranho (útil especialmente pras amostras
+  do log diário, que podem incluir espera na fila), e só preenche o campo
+  quando você clica "Usar este valor" — nunca aplica sozinho, e ainda
+  precisa clicar "Salvar" depois. Logs sem horário inicial, com
+  tempo/comprimento inválido, de outro computador (log por-arquivo, quando
+  "Computador desta impressora" já estiver preenchido) ou sem nenhum lote
+  concluído sem erro (log diário) aparecem como ignorados, à parte. Só
+  funciona com os .txt originais — rolos já fechados em Registros não
+  servem.
 - Observações — texto livre.
 - Pasta do JPG espelhado (+ "Procurar…") e Nome do arquivo do JPG — se
   preenchidos, o JPG dessa impressora vai direto pra essa pasta/arquivo ao
@@ -587,6 +772,17 @@ item bateu com o log físico da máquina; "⚠ Erro na impressão" indica que
 o log físico registrou uma falha nesse item; "⚠ Formato do log adicional
 não reconhecido" quer dizer que a pasta configurada não parece ter o tipo
 de log esperado — confira o caminho em Gerenciamento → Impressoras.
+
+## O que significam os status da coluna "Impressão completa"?
+
+Aparece sempre, em qualquer máquina (M1, M2, M3), mesmo sem "Log
+adicional" configurado — é calculado direto do próprio log do arquivo.
+"✓ Impressão completa" quer dizer que o tamanho realmente processado pela
+impressora bateu com o tamanho esperado do arquivo; "⚠ Impressão
+incompleta" quer dizer que saiu menos do que o esperado (o detalhe mostra
+quantos metros faltaram) — é um sinal forte de impressão interrompida no
+meio. Fica em branco só quando o log não tem o campo necessário pra essa
+conta (formato inesperado) ou tem mais de um arquivo no mesmo item.
 
 ## "Fechar Rolo" ou "Atualizar Rolo" — qual a diferença?
 

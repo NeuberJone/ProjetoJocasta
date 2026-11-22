@@ -1,23 +1,33 @@
 from __future__ import annotations
 
 import io
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
+from core.export_config import REPORT_STYLE_PRISMA
 from core.format import fmt_m
+from core.order_vendor_resolution import guess_vendor_name_for_pedido
+from core.pdf_text import wrap_pdf_text as _wrap_text
 from core.printlogs_db import is_test_roll_name
+from core.prisma_report import (
+    PrismaFabricRow,
+    PrismaFileRow,
+    PrismaPedidoRow,
+    PrismaReportData,
+    render_prisma_report_body,
+)
 from core.station import load_station_operator
 from .models import Block, PedidoSummary
+from .print_check import observacao_with_warning
 
 try:
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4
-    from reportlab.pdfbase import pdfmetrics
 except Exception:
     canvas = None
     A4 = None
-    pdfmetrics = None
 
 try:
     import fitz  # PyMuPDF
@@ -342,53 +352,6 @@ def _pdf_draw_header(c, roll_name: str, machine: str, mode: str, page_w: float, 
     return line_y - 14
 
 
-def _wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
-    """
-    Wrap por largura real (stringWidth).
-    """
-    text = (text or "").strip()
-    if not text:
-        return [""]
-
-    if pdfmetrics is None:
-        return [text]
-
-    words = text.split()
-    lines: List[str] = []
-    current = ""
-
-    for word in words:
-        test = word if not current else f"{current} {word}"
-
-        if pdfmetrics.stringWidth(test, font_name, font_size) <= max_width:
-            current = test
-            continue
-
-        if current:
-            lines.append(current)
-
-        if pdfmetrics.stringWidth(word, font_name, font_size) <= max_width:
-            current = word
-            continue
-
-        # quebra por caracteres se a palavra sozinha for maior que a coluna
-        chunk = ""
-        for ch in word:
-            test_chunk = chunk + ch
-            if pdfmetrics.stringWidth(test_chunk, font_name, font_size) <= max_width:
-                chunk = test_chunk
-            else:
-                if chunk:
-                    lines.append(chunk)
-                chunk = ch
-        current = chunk
-
-    if current:
-        lines.append(current)
-
-    return lines
-
-
 def _draw_wrapped_cell(
     c,
     x: float,
@@ -613,6 +576,25 @@ def _render_report_body(
             c.restoreState()
         c.showPage()
 
+    def _draw_roll_name_footer(y0: float) -> float:
+        """Repete o nome do rolo no final do comprovante (pedido do
+        usuário) — além do cabeçalho, quem só olhar a última página/folha
+        solta do comprovante (ex.: depois de separar as páginas) também
+        consegue identificar de qual rolo ela é."""
+        if _pdf_need_new_page(y0, min_y=40, continuous=continuous):
+            _end_page()
+            _begin_page()
+            y0 = page_h - 40
+            y0 = _pdf_draw_header(c, roll_name, machine, mode, page_w, y0)
+        y0 -= 4
+        c.setLineWidth(1)
+        c.line(40, y0, page_w - 40, y0)
+        y0 -= 16
+        c.setFont("Helvetica-Bold", 10)
+        c.drawCentredString(page_w / 2, y0, f"Rolo: {roll_name}")
+        c.setFont("Helvetica", 10)
+        return y0 - 14
+
     y = page_h - 40
     _begin_page()
     y = _pdf_draw_header(c, roll_name, machine, mode, page_w, y)
@@ -621,11 +603,17 @@ def _render_report_body(
         y = _pdf_draw_summary_table(
             c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored, continuous=continuous
         )
+        y = _draw_roll_name_footer(y)
         _end_page()
         return y
 
     # completo
-    w_end = 80
+    # w_end alargada de 80 para 100: em "Helvetica" 10pt o EndTime completo
+    # ("11/11/2026 09:59:00") mede ~92pt — com 80pt ele invadia a coluna
+    # seguinte (Arquivo), sobrepondo texto. Achado ao investigar a mesma
+    # queixa de sobreposição no recurso "Prisma" (ver core/prisma_report.py)
+    # — bug pré-existente do Clássico, não introduzido por ele.
+    w_end = 100
     w_doc = 130
     w_fab = 60
     w_ped = 95
@@ -694,7 +682,7 @@ def _render_report_body(
             tipo_txt = job.tipo
             op_txt = job.operador
             size_txt = fmt_m(job.real_m, suffix=False)
-            obs_txt = (job.observacao or "").strip()
+            obs_txt = observacao_with_warning(job.observacao, job.print_status, job.print_status_detail)
 
             doc_lines = _wrap_text(doc_txt, w_doc - 6, font, fs_row)
             fab_lines = _wrap_text(fab_txt, w_fab - 6, font, fs_row)
@@ -770,9 +758,141 @@ def _render_report_body(
     y = _pdf_draw_summary_table(
         c, blocks, y, page_w, page_h, roll_name, machine, mode, mirrored, continuous=continuous
     )
+    y = _draw_roll_name_footer(y)
 
     _end_page()
     return y
+
+
+def _build_prisma_report_data(
+    roll_name: str,
+    machine: str,
+    mode: str,
+    blocks: List[Block],
+    pedidos: List[PedidoSummary] | None,
+    printer_name: str,
+) -> PrismaReportData:
+    """Converte o modelo de dados da Operação (Block/Job/PedidoSummary)
+    para o contrato genérico do renderizador Prisma compartilhado
+    (core.prisma_report) — ver diagnóstico em CHANGELOG: `report_style`
+    chegava até aqui mas nunca era usado para escolher um desenho
+    diferente do Clássico; esta função é o que faltava."""
+    pedidos = pedidos or []
+
+    prints_count = 0
+    reposicao_files_count = 0
+    reposicao_operators: set[str] = set()
+    fabric_order: "OrderedDict[str, list]" = OrderedDict()  # fabric -> [file_count, total_m]
+    rows: List[PrismaFileRow] = []
+    # Pré-visualização de vendedor (ver core.order_vendor_resolution.
+    # guess_vendor_name_for_pedido) — o pedido ainda não tem order_id aqui
+    # (exportar acontece antes de salvar o rolo), então isto NUNCA grava
+    # vínculo nenhum, só mostra quando há uma única correspondência exata.
+    # Cache por nome de pedido: vários itens do mesmo pedido não repetem a
+    # mesma busca no índice.
+    vendor_guess_cache: dict[str, str] = {}
+
+    def _vendor_for(pedido_name: str) -> str:
+        if pedido_name not in vendor_guess_cache:
+            vendor_guess_cache[pedido_name] = guess_vendor_name_for_pedido(pedido_name)
+        return vendor_guess_cache[pedido_name]
+
+    for block in blocks:
+        for job in sorted(block.Jobs, key=lambda j: j.end_time, reverse=True):
+            is_space = job.is_gap
+            if not is_space:
+                prints_count += 1
+                entry = fabric_order.setdefault(job.fabric, [0, 0.0])
+                entry[0] += 1
+                entry[1] += job.real_m
+                if job.tipo == "Reposição":
+                    reposicao_files_count += 1
+                    if job.operador:
+                        reposicao_operators.add(job.operador)
+
+            rows.append(PrismaFileRow(
+                end_time_label=job.end_time.strftime("%d/%m %H:%M:%S"),
+                pedido=job.pedido,
+                document=job.document,
+                fabric=job.fabric,
+                is_space=is_space,
+                tipo_label="" if is_space else job.tipo,
+                operador="" if is_space else job.operador,
+                vendor="" if is_space else _vendor_for(job.pedido),
+                observacao=observacao_with_warning(job.observacao, job.print_status, job.print_status_detail),
+                metros_label=fmt_m(job.real_m),
+            ))
+
+    fabric_cards = [
+        PrismaFabricRow(fabric=name, file_count=count, metros_label=fmt_m(total), is_space=False)
+        for name, (count, total) in fabric_order.items()
+    ]
+    # Uma linha por bloco/corrida, na mesma ordem e com os mesmos valores
+    # da tabela "Resumo (ordem do rolo)" do Clássico — nunca agrupado por
+    # nome de tecido através de corridas não contíguas (pedido explícito
+    # do usuário: a lista de tecidos/espaços do Prisma deve bater exatamente
+    # com a do Clássico, só com outra aparência).
+    fabrics_summary = [
+        PrismaFabricRow(
+            fabric=block.fabric,
+            file_count=block.job_count,
+            metros_label=fmt_m(block.total_m),
+            is_space=bool(block.Jobs) and block.Jobs[0].is_gap,
+            last_end_label=block.newest_end.strftime("%d/%m/%Y %H:%M:%S"),
+        )
+        for block in blocks
+    ]
+    pedidos_summary = [
+        PrismaPedidoRow(pedido=p.pedido, file_count=p.job_count, metros_label=fmt_m(p.total_m))
+        for p in pedidos
+    ]
+    normal_pedidos_count = sum(1 for p in pedidos if p.tipo == "Pedido")
+    reposicao_operator_label = next(iter(reposicao_operators)) if len(reposicao_operators) == 1 else ""
+
+    return PrismaReportData(
+        roll_id=roll_name,
+        is_test_roll=is_test_roll_name(roll_name),
+        printer_full_name=f"{printer_name} · {machine}" if printer_name else machine,
+        machine_code=machine,
+        operator=load_station_operator(),
+        generated_at_label=datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        mode=mode,
+        prints_count=prints_count,
+        pedidos_count=len(pedidos),
+        fabrics_count=len(fabric_order),
+        normal_pedidos_count=normal_pedidos_count,
+        reposicao_files_count=reposicao_files_count,
+        reposicao_operator_label=reposicao_operator_label,
+        fabric_cards=fabric_cards,
+        rows=rows,
+        pedidos_summary=pedidos_summary,
+        fabrics_summary=fabrics_summary,
+    )
+
+
+def _render_body(
+    c,
+    page_w: float,
+    page_h: float,
+    roll_name: str,
+    machine: str,
+    mode: str,
+    mirrored: bool,
+    blocks: List[Block],
+    pedidos: List[PedidoSummary] | None,
+    continuous: bool,
+    report_style: str,
+    printer_name: str = "",
+) -> float:
+    """Ponto único de decisão Clássico x Prisma — chamado tanto por
+    export_pdf quanto por export_pdf_continuous, pra nunca haver os dois
+    fluxos decidindo o estilo de jeitos diferentes."""
+    if report_style == REPORT_STYLE_PRISMA:
+        data = _build_prisma_report_data(roll_name, machine, mode, blocks, pedidos, printer_name)
+        return render_prisma_report_body(c, page_w, page_h, data, mirrored, continuous)
+    return _render_report_body(
+        c, page_w, page_h, roll_name, machine, mode, mirrored, blocks, pedidos, continuous=continuous
+    )
 
 
 def export_pdf(
@@ -783,6 +903,8 @@ def export_pdf(
     mode: str = "full",
     mirrored: bool = False,
     pedidos: List[PedidoSummary] | None = None,
+    report_style: str = "classic",
+    printer_name: str = "",
 ) -> None:
     if canvas is None or A4 is None:
         raise RuntimeError("reportlab não está instalado. Instale: pip install reportlab")
@@ -793,8 +915,9 @@ def export_pdf(
     page_w, page_h = A4
     c = canvas.Canvas(str(out_path), pagesize=A4)
 
-    _render_report_body(
-        c, page_w, page_h, roll_name, machine, mode, mirrored, blocks, pedidos, continuous=False
+    _render_body(
+        c, page_w, page_h, roll_name, machine, mode, mirrored, blocks, pedidos,
+        continuous=False, report_style=report_style, printer_name=printer_name,
     )
     c.save()
 
@@ -807,6 +930,8 @@ def export_pdf_continuous(
     mode: str = "full",
     mirrored: bool = False,
     pedidos: List[PedidoSummary] | None = None,
+    report_style: str = "classic",
+    printer_name: str = "",
 ) -> None:
     """Como export_pdf, mas numa única página contínua, sem quebras — sem
     o espaço de cabeçalho/margem repetido que uma quebra de página normal
@@ -836,8 +961,9 @@ def export_pdf_continuous(
     probe_h = 1000.0
     c_probe = canvas.Canvas(io.BytesIO())
     c_probe.setPageSize((page_w, probe_h))
-    y_final = _render_report_body(
-        c_probe, page_w, probe_h, roll_name, machine, mode, mirrored, blocks, pedidos, continuous=True
+    y_final = _render_body(
+        c_probe, page_w, probe_h, roll_name, machine, mode, mirrored, blocks, pedidos,
+        continuous=True, report_style=report_style, printer_name=printer_name,
     )
     content_drop = (probe_h - 40) - y_final
 
@@ -846,7 +972,8 @@ def export_pdf_continuous(
     final_h = content_drop + 60
     c = canvas.Canvas(str(out_path))
     c.setPageSize((page_w, final_h))
-    _render_report_body(
-        c, page_w, final_h, roll_name, machine, mode, mirrored, blocks, pedidos, continuous=True
+    _render_body(
+        c, page_w, final_h, roll_name, machine, mode, mirrored, blocks, pedidos,
+        continuous=True, report_style=report_style, printer_name=printer_name,
     )
     c.save()

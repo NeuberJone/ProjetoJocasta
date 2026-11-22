@@ -30,6 +30,7 @@ class FailureReportingTests(unittest.TestCase):
                 end_time=datetime(2026, 11, 5, 10, 0), document="arquivo.jpeg",
                 fabric="Dryfit", pedido="Pedido exemplo", height_mm=1000.0,
                 vpos_mm=0.0, real_m=1.0, src_file="arquivo.txt", tipo="Pedido", observacao="",
+                start_time=None,
             )
             app = SimpleNamespace(
                 blocks=[object()], machine="M1", Jobs=[job], pedidos=[],

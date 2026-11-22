@@ -17,12 +17,36 @@ o resultado desse lote (campo "错误码": 0 = sem erro) vale para todos os
 arquivos que entraram nele. Validado contra dados reais de produção (ver
 CHANGELOG): a atribuição por "próximo lote após o fim do processamento"
 bate 100% dos arquivos da M1 fornecidos como referência, com tamanhos de
-lote e atrasos (processamento -> envio) plausíveis.
+lote e atrasos (processamento -> envio) plausíveis. Reconfirmado depois
+com um lote bem maior de dados reais (163 logs diários, ~9 meses de
+produção, 10.140 lotes físicos reconhecidos): os 156 logs por-arquivo da
+M1 disponíveis nesse período bateram 100% com "✓ Impressão confirmada".
 
-Limitação conhecida: nos logs de referência disponíveis (3 dias de
-produção real) nunca apareceu um lote com código de erro diferente de 0,
-então o caminho de "erro na impressão" não foi validado contra um caso
-real — só documentado a partir do formato do campo.
+Limitação conhecida: em nenhum dos dois conjuntos de logs reais
+disponíveis (nem os 3 dias originais, nem os ~9 meses depois) apareceu um
+lote com código de erro diferente de 0, então o caminho de "erro na
+impressão" continua não validado contra um caso real — só documentado a
+partir do formato do campo.
+
+Bug real encontrado e corrigido (2026-11-12): o "作业ID" (id do lote) do
+log diário pode ficar NEGATIVO — visto em produção real no log do dia
+11/11/2026, logo depois da validação dos ~9 meses acima (que não tinha
+nenhum id negativo). As regexes de fila/resultado final só aceitavam
+dígitos sem sinal (`\\d+`) nesse campo; um id negativo fazia a linha
+inteira não bater com a regex, então TODOS os lotes daquele dia viravam
+"sem correspondência" mesmo com o arquivo certo presente — só a regex de
+tamanho de imagem (que não depende do id) continuava reconhecendo
+alguma coisa. Corrigido para `-?\\d+`; ver `tests/test_m1_check.py` para
+o teste de regressão com id negativo.
+
+Achado de revisão de código (2026-11-20): a regex de fila (`_RE_QUEUED`)
+aceitava "作业状态 :10" seguido de qualquer coisa, inclusive outro dígito —
+um código de status "100"/"101" (nunca visto nos dados reais disponíveis,
+mas não descartado pelo formato) bateria como se fosse "10" (fila) por
+coincidência de prefixo. Adicionado `(?!\\d)` depois do "10" pra exigir que
+o campo termine ali; não muda nada no comportamento validado contra os
+dados reais já conferidos (nenhum deles tem um código começando com "10"
+que não seja o próprio "10").
 """
 from __future__ import annotations
 
@@ -33,10 +57,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 _RE_DATE_IN_NAME = re.compile(r"(\d{4})_(\d{2})_(\d{2})")
-_RE_QUEUED = re.compile(r"\[(\d{2}:\d{2}:\d{2})\].*作业ID:\s*(\d+),\s*作业状态\s*:\s*10")
+_RE_QUEUED = re.compile(r"\[(\d{2}:\d{2}:\d{2})\].*作业ID:\s*(-?\d+),\s*作业状态\s*:\s*10(?!\d)")
 _RE_IMAGE_SIZE = re.compile(r"\[(\d{2}:\d{2}:\d{2})\].*图像大小\s*:\s*([\d.]+)mm\s*X\s*([\d.]+)mm")
 _RE_FINAL = re.compile(
-    r"\[(\d{2}:\d{2}:\d{2})\].*发送打印结果到RIP.*作业ID\s*:\s*(\d+),\s*错误码\s*:\s*(-?\d+)"
+    r"\[(\d{2}:\d{2}:\d{2})\].*发送打印结果到RIP.*作业ID\s*:\s*(-?\d+),\s*错误码\s*:\s*(-?\d+)"
 )
 
 STATUS_OK = "ok"
@@ -221,6 +245,35 @@ def _daily_jobs_for(folder: str, day: datetime) -> Tuple[List[DailyPrintJob], in
 
 def clear_cache() -> None:
     _cache.clear()
+
+
+def extract_speed_samples(path: Path) -> Tuple[List[Tuple[str, float, float]], int]:
+    """"Detectar velocidade de log(s)" (Nexor.py) só sabia ler o log
+    por-arquivo (Mimaki) — pedido do usuário: também aceitar o log diário
+    físico (M1/JetPrime, mesmo formato lido por `parse_daily_log`). Devolve
+    uma amostra por LOTE físico concluído sem erro: (rótulo, comprimento_m,
+    tempo_min). `tempo_min` é do instante em que o lote entrou na fila
+    (队列, "queued_time") até o resultado final ser reportado à RIP
+    ("final_time") — inclui tempo de fila, não só impressão pura, por isso
+    cada amostra aparece marcável/desmarcável na conferência de sempre,
+    igual aos logs por-arquivo (nunca aplica sozinho). Só lotes com
+    `error_code == 0` e `height_mm > 0` entram — lote com erro ou sem
+    medida de imagem não é amostra válida de velocidade.
+
+    O segundo valor devolvido é a contagem de linhas reconhecidas no
+    formato esperado (ver `parse_daily_log`) — 0 significa que o arquivo
+    não é um log diário físico no formato conhecido (nem no formato
+    por-arquivo, já descartado por quem chama antes de tentar aqui)."""
+    jobs, recognized = parse_daily_log(path)
+    samples: List[Tuple[str, float, float]] = []
+    for job in jobs:
+        if job.error_code != 0 or job.final_time is None or job.height_mm <= 0:
+            continue
+        elapsed_min = (job.final_time - job.queued_time).total_seconds() / 60.0
+        if elapsed_min <= 0:
+            continue
+        samples.append((f"lote {job.job_id} ({job.queued_time:%H:%M:%S})", job.height_mm / 1000.0, elapsed_min))
+    return samples, recognized
 
 
 def check_job(*, folder: str, end_time: datetime) -> M1CheckResult:

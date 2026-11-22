@@ -26,6 +26,12 @@ class Job:
     # "" quando não aplicável/não verificado, ou um status + detalhe legível.
     m1_status: str = ""
     m1_detail: str = ""
+    # Resultado da verificação de impressão incompleta (ver
+    # modules/operacao/print_check.py) — comparação direta dentro do
+    # próprio log .txt, vale pra M1/M2/M3, sem depender de log adicional.
+    # "" quando não aplicável/não verificado, ou um status + detalhe legível.
+    print_status: str = ""
+    print_status_detail: str = ""
     # Anotação livre do operador sobre esse item (ex.: "o papel manchou
     # aqui") — editável na tela e salva junto do rolo no banco.
     observacao: str = ""

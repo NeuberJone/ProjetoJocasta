@@ -23,7 +23,10 @@ def search_rolls(
     machine: str | None = None,
     name_like: str | None = None,
     order_like: str | None = None,
+    pedido_like: str | None = None,
     tipo: str | None = None,
+    vendor_key: str | None = None,
+    vendor_unidentified: bool = False,
 ):
     """
     Wrapper fino sobre list_rolls, com fallback para versões antigas
@@ -36,7 +39,10 @@ def search_rolls(
             export_mode=None,
             name_like=name_like,
             order_like=order_like,
+            pedido_like=pedido_like,
             tipo=tipo,
+            vendor_key=vendor_key,
+            vendor_unidentified=vendor_unidentified,
         )
     except TypeError:
         return list_rolls(  # type: ignore[misc]

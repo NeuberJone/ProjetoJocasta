@@ -21,15 +21,21 @@ from core.fabric_scraps import (
     save_scraps,
     set_scrap_used,
     totals_by_fabric_tipo,
-    unused_scraps_for_fabric,
 )
 from core.printers import Printer, find_printer_by_display_name, load_printers
 from core.config import (
     load_config as load_pxcore_config,
     module_config_path,
 )
-from core.export_config import load_export_cfg
+from core.export_config import REPORT_STYLE_PRISMA, load_export_cfg, report_filename_tag
+from core.prisma_report import (
+    PrismaQueueItemRow,
+    PrismaQueueReportData,
+    PrismaQueueRollRow,
+    render_prisma_queue_report_body,
+)
 from core.migrate import migrate_legacy_path
+from core.pdf_text import wrap_pdf_text as _pdf_wrap_text
 from core.logging_config import get_logger, log_exception
 from core.roll_naming import build_roll_name
 from core.paths import pdf_rolls_dir, print_jpg_dir, temp_module_dir
@@ -45,6 +51,21 @@ from core.ui import card, dialog_header, page_heading
 from modules.operacao.exporters import mirror_and_normal_to_jpg_scaled, pdf_all_pages_to_jpg_scaled
 from modules.operacao.parser import pedido_from_document
 from modules.configuracoes import load_planner_cfg
+from modules.planejador_queue import (
+    RollLimitConfig,
+    generate_queue_rows,
+    ordered_fabrics as pq_ordered_fabrics,
+    roll_limit_for as pq_roll_limit_for,
+)
+from modules.planejador_export import (
+    ROLE_MIRROR,
+    ROLE_NORMAL,
+    ROLE_TMP_MIRROR_PDF,
+    ROLE_TMP_NORMAL_PDF,
+    decide_scrap_revert,
+    main_fabric_of,
+    plan_export_steps,
+)
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -168,6 +189,7 @@ from core.fabrics import (  # noqa: E402
     fabric_roll_length,
     infer_fabric_from_filename,
     load_fabrics,
+    register_fabric_name,
     save_fabrics,
 )
 
@@ -234,41 +256,6 @@ def job_from_known_length(
 # -----------------------------
 # Export PDF / JPG espelhado (mesmo padrão do PXPrintLogs)
 # -----------------------------
-def _pdf_wrap_text(text: str, max_width: float, font_name: str, font_size: int) -> List[str]:
-    text = (text or "").strip()
-    if not text:
-        return [""]
-    if pdfmetrics is None:
-        return [text]
-
-    words = text.split()
-    lines: List[str] = []
-    current = ""
-    for word in words:
-        test = word if not current else f"{current} {word}"
-        if pdfmetrics.stringWidth(test, font_name, font_size) <= max_width:
-            current = test
-            continue
-        if current:
-            lines.append(current)
-        if pdfmetrics.stringWidth(word, font_name, font_size) <= max_width:
-            current = word
-            continue
-        chunk = ""
-        for ch in word:
-            test_chunk = chunk + ch
-            if pdfmetrics.stringWidth(test_chunk, font_name, font_size) <= max_width:
-                chunk = test_chunk
-            else:
-                if chunk:
-                    lines.append(chunk)
-                chunk = ch
-        current = chunk
-    if current:
-        lines.append(current)
-    return lines
-
-
 def _pdf_truncate(text: str, max_width: float, font_name: str, font_size: int) -> str:
     text = (text or "").strip()
     if not text or pdfmetrics is None:
@@ -375,6 +362,26 @@ def _roll_blocks(roll_rows: List["Job"]) -> List[Tuple[str, float, float, int]]:
     return blocks
 
 
+def _roll_summary_values(
+    rn: int, rr: List["Job"], scrap_labels: Dict[int, str],
+) -> Tuple[str, str, int, int, float, float]:
+    """Valores de uma linha do "Resumo por rolo" (tecido principal, pedaço
+    cortado, blocos, itens, total em metros, tempo) — extraído de
+    `_pdf_draw_roll_summary` pra ser reaproveitado também pelo adaptador
+    Prisma (`_build_prisma_queue_report_data`), sem duplicar a lógica."""
+    jobs_only = [x for x in rr if not x.is_gap]
+    roll_m = sum(x.length_m for x in rr)
+    roll_t = sum(x.time_min for x in rr)
+    blocks = _roll_blocks(rr)
+
+    fab_count: Dict[str, int] = {}
+    for x in jobs_only:
+        fab_count[x.fabric] = fab_count.get(x.fabric, 0) + 1
+    main_fab = max(fab_count.items(), key=lambda kv: kv[1])[0] if fab_count else "—"
+    scrap_txt = scrap_labels.get(rn, "")
+    return main_fab, scrap_txt, len(blocks), len(jobs_only), roll_m, roll_t
+
+
 def _pdf_draw_roll_summary(
     c, roll_order, by_roll, y, page_w, page_h, title, machine, mode, mirrored,
     scrap_labels: Optional[Dict[int, str]] = None,
@@ -420,18 +427,10 @@ def _pdf_draw_roll_summary(
 
     for rn in roll_order:
         rr = by_roll[rn]
-        jobs_only = [x for x in rr if not x.is_gap]
-        roll_m = sum(x.length_m for x in rr)
-        roll_t = sum(x.time_min for x in rr)
-        blocks = _roll_blocks(rr)
+        main_fab, scrap_raw, block_count, item_count, roll_m, roll_t = _roll_summary_values(rn, rr, scrap_labels)
         total_m += roll_m
         total_t += roll_t
-
-        fab_count: Dict[str, int] = {}
-        for x in jobs_only:
-            fab_count[x.fabric] = fab_count.get(x.fabric, 0) + 1
-        main_fab = max(fab_count.items(), key=lambda kv: kv[1])[0] if fab_count else "—"
-        scrap_txt = _pdf_truncate(scrap_labels.get(rn, ""), w_scrap - 6, font, fs)
+        scrap_txt = _pdf_truncate(scrap_raw, w_scrap - 6, font, fs)
 
         if _pdf_need_new_page(y, min_y=85):
             y = new_page(y)
@@ -440,8 +439,8 @@ def _pdf_draw_roll_summary(
         c.drawString(x, y, str(rn)); x += w_num
         c.drawString(x, y, main_fab); x += w_fab
         c.drawString(x, y, scrap_txt); x += w_scrap
-        c.drawCentredString(x + w_blocks / 2, y, str(len(blocks))); x += w_blocks
-        c.drawCentredString(x + w_items / 2, y, str(len(jobs_only))); x += w_items
+        c.drawCentredString(x + w_blocks / 2, y, str(block_count)); x += w_blocks
+        c.drawCentredString(x + w_items / 2, y, str(item_count)); x += w_items
         c.drawCentredString(x + w_total / 2, y, fmt_m(roll_m)); x += w_total
         c.drawCentredString(x + w_time / 2, y, fmt_min(roll_t))
         y -= 14
@@ -532,6 +531,54 @@ def _pdf_draw_items(c, roll_order, by_roll, y, page_w, page_h, title, machine, m
     return y
 
 
+def _build_prisma_queue_report_data(
+    roll_order: List[int],
+    by_roll: Dict[int, List["Job"]],
+    title: str,
+    machine: str,
+    mode: str,
+    scrap_labels: Optional[Dict[int, str]] = None,
+) -> PrismaQueueReportData:
+    """Converte a fila (mesmas roll_order/by_roll já usadas pelo desenho
+    Clássico) pro contrato Prisma compartilhado (core.prisma_report) —
+    pedido explícito do usuário: o Prisma deve mostrar as MESMAS
+    informações do comprovante comum da fila, não um recorte nem um
+    redesenho de conteúdo. Por isso usa exatamente os mesmos dados que
+    `_pdf_draw_items`/`_pdf_draw_roll_summary` já calculam (via
+    `_roll_summary_values`, compartilhado com o desenho Clássico)."""
+    scrap_labels = scrap_labels or {}
+    items: List[PrismaQueueItemRow] = []
+    roll_summary: List[PrismaQueueRollRow] = []
+    total_m = 0.0
+    total_t = 0.0
+
+    for rn in roll_order:
+        rr = by_roll[rn]
+        for x in rr:
+            if x.is_gap:
+                continue
+            items.append(PrismaQueueItemRow(
+                roll_no=rn, fabric=x.fabric, document=x.name,
+                metros_label=fmt_m(x.length_m), time_label=fmt_min(x.time_min),
+            ))
+
+        main_fab, scrap_raw, block_count, item_count, roll_m, roll_t = _roll_summary_values(rn, rr, scrap_labels)
+        total_m += roll_m
+        total_t += roll_t
+        roll_summary.append(PrismaQueueRollRow(
+            roll_no=rn, main_fabric=main_fab, scrap_label=scrap_raw,
+            block_count=block_count, item_count=item_count,
+            metros_label=fmt_m(roll_m), time_label=fmt_min(roll_t),
+        ))
+
+    return PrismaQueueReportData(
+        title=title, machine=machine, mode=mode,
+        generated_at_label=datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        items=items, roll_summary=roll_summary,
+        total_metros_label=fmt_m(total_m), total_time_label=fmt_min(total_t),
+    )
+
+
 def export_queue_pdf(
     out_path: "str | Path",
     rows: List["Job"],
@@ -540,6 +587,7 @@ def export_queue_pdf(
     mode: str = "full",
     mirrored: bool = False,
     scrap_labels: Optional[Dict[int, str]] = None,
+    report_style: str = "classic",
 ) -> None:
     if not _HAS_REPORTLAB or pdf_canvas is None or A4 is None:
         raise RuntimeError("reportlab não está instalado. Instale: pip install reportlab")
@@ -554,6 +602,12 @@ def export_queue_pdf(
 
     page_w, page_h = A4
     c = pdf_canvas.Canvas(str(out_path), pagesize=A4)
+
+    if report_style == REPORT_STYLE_PRISMA:
+        data = _build_prisma_queue_report_data(roll_order, by_roll, title, machine, mode, scrap_labels)
+        render_prisma_queue_report_body(c, page_w, page_h, data, mirrored, continuous=False)
+        c.save()
+        return
 
     def begin_page():
         if mirrored:
@@ -663,7 +717,6 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     # linha "— ESPAÇO —"), por posição sequencial entre os espaços visíveis
     # (gap_between/gap_endroll) — recalculado a cada "Gerar Fila".
     gap_overrides: Dict[int, float] = {}
-    gap_seq: int = 0
     edit_roll_id: Optional[int] = (preload or {}).get("edit_roll_id")
     last_view: str = "base"
     last_roll_summary_rows: List[Job] = []
@@ -682,6 +735,10 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     manual_fabric_order: List[str] = []
     var_auto_fabric_order = tk.BooleanVar(value=bool(mcfg.get("auto_fabric_order", True)))
+    # Dentro de cada bloco de tecido, mantém os itens do mesmo pedido juntos
+    # (ordem alfabética do pedido, tamanho decrescente dentro do pedido) em
+    # vez de ordenar só por tamanho — ligado por padrão.
+    var_group_by_pedido = tk.BooleanVar(value=True)
     var_use_scraps = tk.BooleanVar(value=False)
     # Sangria: ao planejar com pedaços cortados, considera cada pedaço com
     # alguns cm a mais do que a metragem cadastrada (tolerância de corte).
@@ -766,8 +823,12 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     )
     cb_fab.grid(row=1, column=2, sticky="ew", padx=(0, 4), pady=(0, 10))
     ttk.Button(
+        plan_box, text="⟳", width=3,
+        command=lambda: refresh_fabric_catalog(),
+    ).grid(row=1, column=3, sticky="w", pady=(0, 10))
+    ttk.Button(
         plan_box, text="Definir tecido", command=lambda: set_fabric_selected()
-    ).grid(row=1, column=3, sticky="w", padx=(0, 10), pady=(0, 10))
+    ).grid(row=1, column=4, sticky="w", padx=(0, 10), pady=(0, 10))
 
     more_btn = ttk.Menubutton(plan_box, text="Mais ações ▾")
     more_btn.grid(row=1, column=5, sticky="e", padx=(0, 10), pady=(0, 10))
@@ -786,31 +847,27 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         elif var_fabric_pick.get() not in fabric_options:
             var_fabric_pick.set("Dryfit" if "Dryfit" in fabric_options else fabric_options[0])
 
+    def refresh_fabric_catalog(select: Optional[str] = None) -> None:
+        """Recarrega o cadastro compartilhado do disco — o botão "⟳" ao lado
+        do combobox de Tecido, e os pontos de uso abaixo (abrir "Editar
+        item…", iniciar uma nova importação) chamam isso em vez de confiar
+        na cópia carregada uma única vez quando a tela foi montada, já que
+        um tecido pode ter sido cadastrado pela Operação (ou por este
+        Planejador, numa sessão/aba diferente) desde então."""
+        nonlocal fabrics_map
+        fabrics_map = load_fabrics()
+        refresh_fabric_options(select=select)
+
     def register_new_fabric(
         name: str,
         aliases: Optional[List[str]] = None,
         roll_length_m: Optional[float] = None,
     ) -> str:
-        """Cadastra (ou atualiza) um tecido — aliases e metragem do rolo — e persiste."""
-        can = name.strip()
-        if not can:
-            raise ValueError("Informe o nome do tecido.")
-
-        existing = next((k for k in fabrics_map.keys() if k.lower() == can.lower()), None)
-        canonical = existing or can
-
-        entry = dict(fabrics_map.get(canonical, {}))
-        current_aliases = fabric_aliases(entry)
-        merged_aliases = list(dict.fromkeys(current_aliases + (aliases or [])))
-
-        entry["aliases"] = merged_aliases
-        entry["roll_length_m"] = (
-            float(roll_length_m) if roll_length_m else fabric_roll_length(entry)
-        )
-        fabrics_map[canonical] = entry
-
-        save_fabrics(fabrics_map)
-        refresh_fabric_options(select=canonical)
+        """Cadastra (ou reaproveita) um tecido no cadastro COMPARTILHADO (ver
+        core.fabrics.register_fabric_name — usado também pela Operação),
+        persiste e atualiza a lista local."""
+        canonical = register_fabric_name(name, aliases=aliases, roll_length_m=roll_length_m)
+        refresh_fabric_catalog(select=canonical)
         return canonical
 
     # ---------------- Drag & drop (arrastar imagens para importar) ----------------
@@ -884,6 +941,12 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         variable=var_auto_fabric_order,
     ).grid(row=0, column=2, sticky="w", padx=(16, 0), pady=4)
 
+    ttk.Checkbutton(
+        params_box, text="Agrupar por pedido dentro do tecido",
+        variable=var_group_by_pedido,
+        command=lambda: generate_queue() if var_mode.get().strip().lower() == "tecido" else None,
+    ).grid(row=0, column=3, sticky="w", padx=(16, 0), pady=4)
+
     def _on_mode_changed(*_):
         # Recalcula a fila ao trocar de modo — sem isso, a tabela ficava com
         # o agrupamento/alças de arraste do modo anterior até o usuário
@@ -953,16 +1016,49 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
     workspace.add(queue_tab, text="Fila de impressão")
     workspace.add(rolls_tab, text="Resumo dos rolos")
     workspace.add(orders_tab, text="Pedidos")
+    workspace.bind(
+        "<<NotebookTabChanged>>",
+        lambda _e: refresh_files_tab() if workspace.select() == str(files_tab) else None,
+    )
     ttk.Label(files_tab, text="Arquivos importados", style="PageSubtitle.TLabel").pack(anchor="w")
     ttk.Label(
         files_tab,
         text="Mostra os arquivos na ordem em que foram importados, sem agrupar por tecido/rolo.",
         style="Muted.TLabel",
     ).pack(anchor="w", pady=(8, 12))
+
+    files_bar = ttk.Frame(files_tab)
+    files_bar.pack(fill="x")
     ttk.Button(
-        files_tab, text="Ver arquivos importados",
-        command=lambda: (show_base(), workspace.select(queue_tab)),
-    ).pack(anchor="w")
+        files_bar, text="Atualizar arquivos", command=lambda: refresh_files_tab(),
+    ).pack(side="left")
+    lbl_files_count = ttk.Label(files_bar, text="Arquivos: 0")
+    lbl_files_count.pack(side="left", padx=16)
+    lbl_files_total = ttk.Label(files_bar, text="Total: 0.00 m")
+    lbl_files_total.pack(side="left")
+
+    files_tree_frame = ttk.Frame(files_tab)
+    files_tree_frame.pack(fill="both", expand=True, pady=(10, 0))
+
+    cols_files = ("fabric", "dpi", "arquivo", "w", "h", "metros", "tempo", "obs")
+    tree_files = ttk.Treeview(files_tree_frame, columns=cols_files, show="headings")
+    sb_files = ttk.Scrollbar(files_tree_frame, orient="vertical", command=tree_files.yview)
+    tree_files.configure(yscrollcommand=sb_files.set)
+    tree_files.pack(side="left", fill="both", expand=True)
+    sb_files.pack(side="right", fill="y")
+
+    for col, txt, w, anchor in [
+        ("fabric", "Tecido", 120, "w"),
+        ("dpi", "DPI(item)", 70, "e"),
+        ("arquivo", "Arquivo", 420, "w"),
+        ("w", "Largura px", 100, "e"),
+        ("h", "Altura px", 100, "e"),
+        ("metros", "Comprimento", 120, "e"),
+        ("tempo", "Tempo", 120, "e"),
+        ("obs", "Observação", 180, "w"),
+    ]:
+        tree_files.heading(col, text=txt)
+        tree_files.column(col, width=w, anchor=anchor)
 
     table_bar = ttk.Frame(queue_tab)
     table_bar.pack(fill="x", pady=(10, 0))
@@ -971,9 +1067,15 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         table_bar, text="⤢ Abrir em janela", command=lambda: open_queue_window()
     ).pack(side="right")
 
+    queue_tree_frame = ttk.Frame(queue_tab)
+    queue_tree_frame.pack(fill="both", expand=True, pady=(4, 10))
+
     cols = ("drag", "roll", "fabric", "dpi", "arquivo", "w", "h", "metros", "tempo", "obs")
-    tree = ttk.Treeview(queue_tab, columns=cols, show="headings")
-    tree.pack(fill="both", expand=True, pady=(4, 10))
+    tree = ttk.Treeview(queue_tree_frame, columns=cols, show="headings")
+    sb_queue = ttk.Scrollbar(queue_tree_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=sb_queue.set)
+    tree.pack(side="left", fill="both", expand=True)
+    sb_queue.pack(side="right", fill="y")
 
     tree.heading("drag", text="")
     tree.heading("roll", text="Rolo")
@@ -1235,6 +1337,19 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         lbl_count.config(text=f"Itens: {len(rows)}")
         lbl_total.config(text=f"Total: {fmt_m(total_m)}")
         lbl_time.config(text=f"Tempo total: {fmt_min(total_time)}")
+
+    def refresh_files_tab():
+        tree_files.delete(*tree_files.get_children())
+
+        total_m = 0.0
+        for j in jobs:
+            if j.is_gap:
+                continue
+            total_m += j.length_m
+            tree_files.insert("", "end", values=build_queue_row(j)[1:])
+
+        lbl_files_count.config(text=f"Arquivos: {len(jobs)}")
+        lbl_files_total.config(text=f"Total: {fmt_m(total_m)}")
 
     def build_roll_summary_rows(rows: List[Job]) -> List[tuple]:
         out: List[tuple] = []
@@ -1567,6 +1682,11 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             messagebox.showerror("Configuração inválida", str(e))
             return
 
+        # Recarrega o cadastro compartilhado antes de classificar — um
+        # tecido pode ter sido cadastrado pela Operação (ou por este
+        # Planejador numa sessão anterior) desde que esta tela foi aberta.
+        refresh_fabric_catalog()
+
         errors = []
         for p in paths:
             path = Path(p)
@@ -1705,6 +1825,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 "auto_fabric_order": bool(var_auto_fabric_order.get()),
                 "manual_fabric_order": list(manual_fabric_order),
                 "use_scraps": bool(var_use_scraps.get()),
+                "group_by_pedido": bool(var_group_by_pedido.get()),
             },
             "jobs": [
                 {
@@ -1765,6 +1886,8 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
             manual_fabric_order = [str(x) for x in (cfg.get("manual_fabric_order") or [])]
         if "use_scraps" in cfg:
             var_use_scraps.set(bool(cfg["use_scraps"]))
+        if "group_by_pedido" in cfg:
+            var_group_by_pedido.set(bool(cfg["group_by_pedido"]))
 
         new_jobs: List[Job] = []
         for jd in raw["jobs"]:
@@ -1892,6 +2015,12 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         ttk.Button(btns, text="Salvar", command=on_save).pack(side="right", padx=(0, 8))
 
     def open_edit_dialog(job: Job):
+        # Recarrega o cadastro compartilhado antes de montar o combobox —
+        # ver refresh_fabric_catalog: um tecido pode ter sido cadastrado
+        # pela Operação (ou por este Planejador) desde que esta tela foi
+        # aberta.
+        refresh_fabric_catalog()
+
         dlg = tk.Toplevel(frame)
         dlg.title("Editar item")
         dlg.transient(frame.winfo_toplevel())
@@ -2417,336 +2546,97 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         ttk.Button(frm, text="OK", command=on_close).pack(anchor="e", pady=(10, 0))
 
     # ---------------- Queue planner ----------------
-    def roll_limit_for(fabric: str) -> float:
-        entry = fabrics_map.get(fabric)
-        if isinstance(entry, dict) and entry.get("roll_length_m"):
-            return fabric_roll_length(entry)
-        return safe_float(var_roll_other.get(), DEFAULT_ROLL_LENGTH_M)
-
-    def eligible_scraps_for_fabric(fabric: str) -> List[FabricScrap]:
-        """Pedaços não usados desse tecido que podem entrar no planejamento —
-        todos, ou só os marcados em 'Selecionar pedaços a usar…' quando o
-        usuário restringiu a seleção (ex.: tecido do mesmo nome vindo de
-        fabricantes/lotes diferentes que não podem se misturar num rolo)."""
-        items = unused_scraps_for_fabric(scraps, fabric)
-        if selected_scrap_keys is not None:
-            items = [s for s in items if s.key in selected_scrap_keys]
-        return items
-
-    def scrap_bleed_m() -> float:
-        """Sangria: metragem extra (em m) considerada em cada pedaço cortado
-        além da metragem cadastrada, quando 'Usar sangria' está ativo."""
-        if not var_scrap_bleed.get():
-            return 0.0
-        return max(0.0, safe_float(var_scrap_bleed_cm.get(), 5.0)) / 100.0
-
-    def scrap_effective_length(sc: FabricScrap) -> float:
-        """Metragem considerada no planejamento para esse pedaço — a cadastrada,
-        ou com a sangria somada quando 'Usar sangria' está ativo."""
-        return sc.length_m + scrap_bleed_m()
-
-    def limit_for_roll(fabric: str, roll_index: int) -> float:
-        """roll_index começa em 0. Com 'priorizar pedaços', os primeiros rolos do
-        tecido usam a metragem dos pedaços cortados (não usados e elegíveis,
-        com sangria se ativa) antes de cair para a metragem padrão de rolo
-        cheio do tecido."""
-        if var_use_scraps.get():
-            scrap_lens = [scrap_effective_length(s) for s in eligible_scraps_for_fabric(fabric)]
-            if roll_index < len(scrap_lens):
-                return scrap_lens[roll_index]
-        return roll_limit_for(fabric) or DEFAULT_ROLL_LENGTH_M
-
-    def scrap_match_for_roll(fabric: str, roll_index: int) -> Optional[FabricScrap]:
-        """Pedaço cortado usado nesse rolo (None se o rolo for um rolo cheio normal)."""
-        if not var_use_scraps.get():
-            return None
-        matching = eligible_scraps_for_fabric(fabric)
-        if roll_index < len(matching):
-            return matching[roll_index]
-        return None
-
-    def pack_fabric_items(
-        fabric: str, items: List[Job], gap_endroll: float, gap_files: float = 0.0
-    ) -> List[Tuple[int, List[Job]]]:
-        """
-        First-fit decreasing: maiores primeiro, mas cada item vai pro primeiro rolo
-        (pedaço cortado ou rolo cheio) em que ele realmente CABE. Um item maior que
-        um pedaço cortado não "ocupa" esse pedaço só por ser o primeiro da fila —
-        ele passa para o próximo rolo, deixando o pedaço livre para um item menor
-        que vier depois (mesmo que processado mais tarde nesta mesma função).
-
-        gap_files é o espaço reservado ENTRE arquivos dentro do mesmo rolo (bloco
-        do mesmo tecido) — conta na metragem do rolo, mas não é reservado antes do
-        primeiro item nem depois do último item do bloco.
-
-        Retorna [(índice_original_do_rolo, itens), ...] só com rolos não vazios —
-        o índice original é preservado para identificar corretamente qual pedaço
-        cortado (se algum) foi usado em cada rolo.
-        """
-        sorted_items = sorted(items, key=lambda j: j.length_m, reverse=True)
-        bins: List[List[Job]] = []
-        bin_used: List[float] = []
-        bin_limit: List[float] = []
-
-        def open_new_bin() -> int:
-            idx = len(bins)
-            bins.append([])
-            bin_used.append(0.0)
-            bin_limit.append(limit_for_roll(fabric, idx))
-            return idx
-
-        for item in sorted_items:
-            # Primeiro rolo já aberto em que o item CABE (considerando o que já
-            # está nele). Só abre um rolo novo se não couber em nenhum dos já
-            # abertos — nunca empilha num rolo "de sobra" junto com itens que
-            # não cabem juntos (isso misturava itens de rolos diferentes
-            # quando nenhum item cabia no limite configurado, ex.: gap de fim
-            # de rolo maior que a própria metragem do rolo).
-            idx = None
-            for i in range(len(bins)):
-                extra_gap = gap_files if bins[i] else 0.0
-                if (bin_used[i] + extra_gap + item.length_m + gap_endroll) <= bin_limit[i]:
-                    idx = i
-                    break
-
-            if idx is None:
-                idx = open_new_bin()
-
-            extra_gap = gap_files if bins[idx] else 0.0
-            bins[idx].append(item)
-            bin_used[idx] += extra_gap + item.length_m
-
-        # remove rolos reservados que nenhum item acabou ocupando, preservando o índice original
-        return [(i, b) for i, b in enumerate(bins) if b]
-
-    def add_gap(rows: List[Job], fabric: str, gap_m: float, speed: float, hidden: bool = False):
-        nonlocal gap_seq
-
-        gap_index: Optional[int] = None
-        use_m = gap_m
-        if not hidden:
-            gap_index = gap_seq
-            gap_seq += 1
-            if gap_index in gap_overrides:
-                use_m = gap_overrides[gap_index]
-
-        if use_m <= 0:
-            return
-
-        g = Job(
-            name="ESPAÇO",
-            path=None,
-            fabric=fabric,
-            w_px=0,
-            h_px=0,
-            dpi_override=None,
-            is_gap=True,
-            roll_no=0,
-            hidden=hidden,
-            gap_index=gap_index,
+    # Lógica pura (bin packing first-fit decreasing, limite de rolo por
+    # tecido/pedaço cortado, ordenação de tecidos) foi extraída para
+    # modules/planejador_queue.py, sem Tkinter — testável diretamente em
+    # tests/test_planejador_queue.py. Os wrappers abaixo só leem o estado
+    # atual da tela (variáveis Tk, pedaços cadastrados, ordem manual salva)
+    # e chamam as funções puras; generate_queue() (mais abaixo) continua
+    # chamando esses wrappers sem nenhuma mudança de comportamento.
+    def _roll_limit_cfg() -> RollLimitConfig:
+        return RollLimitConfig(
+            fabrics_map=fabrics_map,
+            roll_other_m=safe_float(var_roll_other.get(), DEFAULT_ROLL_LENGTH_M),
+            use_scraps=var_use_scraps.get(),
+            scraps=scraps,
+            selected_scrap_keys=selected_scrap_keys,
+            bleed_m=(
+                max(0.0, safe_float(var_scrap_bleed_cm.get(), 5.0)) / 100.0
+                if var_scrap_bleed.get() else 0.0
+            ),
         )
-        g.length_m = float(use_m)
-        g.time_min = float((g.length_m / speed) if speed > 0 else 0.0)  # gap não tem setup
-        rows.append(g)
 
-    def fabric_totals(base_list: List[Job]) -> Dict[str, float]:
-        tot: Dict[str, float] = {}
-        for j in base_list:
-            if j.is_gap:
-                continue
-            tot[j.fabric] = tot.get(j.fabric, 0.0) + j.length_m
-        return tot
+    def roll_limit_for(fabric: str) -> float:
+        return pq_roll_limit_for(fabric, _roll_limit_cfg())
 
     def ordered_fabrics(base_list: List[Job]) -> List[str]:
-        fabrics = sorted({j.fabric for j in base_list if not j.is_gap})
-        if not fabrics:
-            return []
-
-        if var_auto_fabric_order.get():
-            totals = fabric_totals(base_list)
-            return sorted(fabrics, key=lambda f: totals.get(f, 0.0), reverse=True)
-
         nonlocal manual_fabric_order
-        if not manual_fabric_order:
-            manual_fabric_order = list(fabrics)
-
-        existing = set(fabrics)
-        manual_fabric_order = [f for f in manual_fabric_order if f in existing]
-        for f in fabrics:
-            if f not in manual_fabric_order:
-                manual_fabric_order.append(f)
-        return list(manual_fabric_order)
+        order, manual_fabric_order = pq_ordered_fabrics(
+            base_list, auto_order=var_auto_fabric_order.get(), manual_order=manual_fabric_order
+        )
+        return order
 
     def generate_queue():
-        nonlocal view_rows, last_view, gap_seq
+        nonlocal view_rows, last_view
 
         roll_scrap_labels.clear()
         roll_scrap_keys.clear()
-        gap_seq = 0
 
         if not jobs:
             show_base()
             return
 
-        if edit_roll_id is not None:
+        base_list = list(jobs)
+        single_roll = edit_roll_id is not None
+
+        if single_roll:
             # Editando um rolo já registrado: é um único rolo contínuo (igual
             # ao PXPrintLogs) — sem reagrupar/separar por tecido nem bin
-            # packing. Os itens entram na ordem em que estão na lista, todos
-            # no mesmo rolo; novos itens acrescentados só continuam o rolo.
-            planned = [
-                Job(
-                    name=item.name, path=item.path, fabric=item.fabric,
-                    w_px=item.w_px, h_px=item.h_px, dpi_override=item.dpi_override,
-                    length_m=item.length_m, time_min=item.time_min,
-                    is_gap=False, roll_no=1,
-                )
-                for item in jobs
-            ]
-            view_rows = planned
-            last_view = "queue"
-            refresh_table(view_rows)
-            refresh_roll_summary(view_rows)
-            refresh_pedidos_summary(view_rows)
-            return
-
-        try:
-            _, _, speed, _ = get_config()
-        except Exception as e:
-            messagebox.showerror("Configuração inválida", str(e))
-            return
-
-        mode = var_mode.get().strip().lower()
-        gap_between = safe_float(var_gap_between.get(), 1.0)
-        gap_endroll = safe_float(var_gap_endroll.get(), 1.0)
-        gap_files = safe_float(var_gap_files.get(), 0.0)
-
-        base_list = list(jobs)
-        planned: List[Job] = []
-        global_roll_no = 0
-
-        def emit(item: Job, roll_no: int):
-            planned.append(Job(
-                name=item.name,
-                path=item.path,
-                fabric=item.fabric,
-                w_px=item.w_px,
-                h_px=item.h_px,
-                dpi_override=item.dpi_override,
-                length_m=item.length_m,
-                time_min=item.time_min,
-                is_gap=False,
-                roll_no=roll_no,
-            ))
-
-        if mode != "tecido":
-            # Mantém a ordem de importação; só quebra rolo quando o tecido muda
-            # ou quando o rolo atual enche (sem bin packing entre tecidos).
-            current_fabric: Optional[str] = None
-            fabric_roll_index = 0
-            used_in_roll = 0.0
-
-            for j in base_list:
-                fabric = j.fabric or "Outro"
-
-                if current_fabric is None:
-                    current_fabric = fabric
-                    global_roll_no = 1
-                    fabric_roll_index = 0
-                    used_in_roll = 0.0
-                elif fabric != current_fabric:
-                    add_gap(planned, current_fabric, gap_between, speed)
-                    current_fabric = fabric
-                    global_roll_no += 1
-                    fabric_roll_index = 0
-                    used_in_roll = 0.0
-
-                limit = limit_for_roll(fabric, fabric_roll_index)
-                guard = 0
-
-                # nunca encostar no limite (reserva gap_endroll e, se já houver item
-                # no bloco atual, gap_files). Só insere o espaço de fim de rolo se o
-                # rolo atual já tiver algo nele — um rolo vazio (ex.: pedaço cortado
-                # menor que o próprio item) é pulado sem gerar espaço extra.
-                while True:
-                    file_gap = gap_files if used_in_roll > 0 else 0.0
-                    if (used_in_roll + file_gap + j.length_m + gap_endroll) <= limit or guard >= 50:
-                        break
-                    guard += 1
-                    if used_in_roll > 0:
-                        add_gap(planned, current_fabric, gap_endroll, speed)
-                    global_roll_no += 1
-                    fabric_roll_index += 1
-                    used_in_roll = 0.0
-                    limit = limit_for_roll(fabric, fabric_roll_index)
-
-                if global_roll_no not in roll_scrap_labels:
-                    sc_match = scrap_match_for_roll(fabric, fabric_roll_index)
-                    if sc_match:
-                        roll_scrap_labels[global_roll_no] = f"{sc_match.name} ({fmt_m(sc_match.length_m)})"
-                        roll_scrap_keys[global_roll_no] = sc_match.key
-
-                # gap entre arquivos: nunca antes do primeiro item do bloco.
-                # Não aparece na lista — só soma na metragem do rolo/tecido.
-                file_gap = gap_files if used_in_roll > 0 else 0.0
-                if file_gap > 0:
-                    add_gap(planned, current_fabric, file_gap, speed, hidden=True)
-
-                emit(j, global_roll_no)
-                used_in_roll += file_gap + j.length_m
-
-            if current_fabric is not None and gap_endroll > 0:
-                add_gap(planned, current_fabric, gap_endroll, speed)
-
+            # packing, sem gaps, sem limite de metragem. Nada disso depende
+            # da configuração (DPI/eixo/velocidade/gaps) então, diferente do
+            # outro caminho, não valida nem lê a configuração aqui.
+            speed = 0.0
+            mode = ""
+            gap_between = gap_endroll = gap_files = 0.0
+            fabrics_order = None
         else:
-            # Modo tecido: agrupa por tecido e faz bin packing (first-fit decreasing)
-            # dentro de cada tecido, para que pedaços cortados pequenos sejam
-            # preenchidos por itens menores em vez de pulados por serem menores
-            # que o maior item da fila.
-            fabrics = ordered_fabrics(base_list)
+            try:
+                _, _, speed, _ = get_config()
+            except Exception as e:
+                messagebox.showerror("Configuração inválida", str(e))
+                return
 
-            by_fab: Dict[str, List[Job]] = {f: [] for f in fabrics}
-            for j in base_list:
-                if j.is_gap:
-                    continue
-                by_fab.setdefault(j.fabric, []).append(j)
+            mode = var_mode.get().strip().lower()
+            gap_between = safe_float(var_gap_between.get(), 1.0)
+            gap_endroll = safe_float(var_gap_endroll.get(), 1.0)
+            gap_files = safe_float(var_gap_files.get(), 0.0)
+            # A ordem dos tecidos (automática por metragem total, ou manual
+            # preservada entre gerações) é decidida aqui — não dentro de
+            # generate_queue_rows — porque também precisa atualizar
+            # manual_fabric_order (estado da tela, sobrevive a desligar
+            # "Ordenar automaticamente" depois).
+            fabrics_order = ordered_fabrics(base_list) if mode == "tecido" else None
 
-            last_fabric_with_items: Optional[str] = None
+        result = generate_queue_rows(
+            base_list,
+            job_cls=Job,
+            single_roll=single_roll,
+            mode=mode,
+            gap_between=gap_between,
+            gap_endroll=gap_endroll,
+            gap_files=gap_files,
+            speed=speed,
+            cfg=_roll_limit_cfg(),
+            group_by_pedido=var_group_by_pedido.get(),
+            gap_overrides=gap_overrides,
+            fabrics_order=fabrics_order,
+        )
 
-            for f in fabrics:
-                items = by_fab.get(f, [])
-                if not items:
-                    continue
+        for rn, sc_match in result.roll_scrap_matches.items():
+            roll_scrap_labels[rn] = f"{sc_match.name} ({fmt_m(sc_match.length_m)})"
+            roll_scrap_keys[rn] = sc_match.key
 
-                if last_fabric_with_items is not None:
-                    add_gap(planned, last_fabric_with_items, gap_between, speed)
-
-                bins = pack_fabric_items(f, items, gap_endroll, gap_files)
-
-                for seq_pos, (bin_index, bin_items) in enumerate(bins):
-                    global_roll_no += 1
-
-                    sc_match = scrap_match_for_roll(f, bin_index)
-                    if sc_match:
-                        roll_scrap_labels[global_roll_no] = f"{sc_match.name} ({fmt_m(sc_match.length_m)})"
-                        roll_scrap_keys[global_roll_no] = sc_match.key
-
-                    # gap entre arquivos: nunca antes do primeiro nem depois do
-                    # último item do bloco (rolo) — só entre itens consecutivos.
-                    # Não aparece na lista — só soma na metragem do rolo/tecido.
-                    for pos, item in enumerate(sorted(bin_items, key=lambda j: j.length_m, reverse=True)):
-                        if pos > 0 and gap_files > 0:
-                            add_gap(planned, f, gap_files, speed, hidden=True)
-                        emit(item, global_roll_no)
-
-                    if seq_pos < len(bins) - 1:
-                        add_gap(planned, f, gap_endroll, speed)
-
-                last_fabric_with_items = f
-
-            if last_fabric_with_items is not None and gap_endroll > 0:
-                add_gap(planned, last_fabric_with_items, gap_endroll, speed)
-
-        view_rows = planned
+        view_rows = result.planned
         last_view = "queue"
         refresh_table(view_rows)
         refresh_roll_summary(view_rows)
@@ -2827,6 +2717,20 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         if edit_roll_id is not None:
             total_m_check = sum(x.length_m for x in rows if not x.is_gap)
             fabric_check = next((x.fabric for x in rows if not x.is_gap), "")
+            # Achado de revisão de código: sem esta checagem, editar um rolo
+            # até sobrar só espaço/avanço (nenhum item real) chegava até
+            # main_fabric_of([]) mais abaixo, que levanta ValueError (max()
+            # de sequência vazia) DEPOIS dos arquivos de PDF/JPG já gravados
+            # em disco — diferente do fluxo normal de exportação, que já
+            # pula rolos sem item real (`if not jobs_only: continue`) antes
+            # de gerar qualquer arquivo.
+            if not fabric_check:
+                messagebox.showerror(
+                    "Atualizar rolo",
+                    "O rolo não pode ficar só com espaços — remova o(s) espaço(s) ou acrescente "
+                    "ao menos um item real antes de salvar.",
+                )
+                return
             limit_check = roll_limit_for(fabric_check) or DEFAULT_ROLL_LENGTH_M
             if total_m_check > limit_check:
                 messagebox.showerror(
@@ -2840,7 +2744,8 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
         machine = var_printer.get() or "?"
         mode = var_report_mode.get()
-        mode_tag = "FULL" if mode == "full" else "SUMMARY"
+        report_style = str(load_export_cfg().get("report_style", "classic"))
+        mode_tag = report_filename_tag(mode, report_style)
         try:
             batch = _get_batch_name()
         except Exception as e:
@@ -2858,7 +2763,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
         date_iso = dt.strftime("%Y-%m-%d")
         batch_safe = sanitize_filename(batch)
-        base_name = f"{date_iso}_{machine}_{batch_safe}_{mode_tag}"
+        base_name = f"{date_iso}_{machine}_{batch_safe}" + (f"_{mode_tag}" if mode_tag else "")
 
         normal_path = str(versioned_path(out_pdf_dir / f"{base_name}.pdf"))
         mirror_path = str(_resolve_mirror_jpg_path(out_jpg_dir, base_name, machine))
@@ -2883,59 +2788,43 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
         # espelhado.
         use_printer_folder = bool(printer_for_rotation and printer_for_rotation.jpg_output_dir.strip())
 
+        # A decisão de QUAIS arquivos gerar (PDF normal/espelhado, JPG, quais
+        # temporários apagar) e em que ordem, pra cada combinação de `which`
+        # e `use_printer_folder`, está em modules/planejador_export.py — sem
+        # Tkinter, testada diretamente ali. Aqui só resolvemos cada papel
+        # simbólico pro caminho de arquivo real e executamos.
+        steps = plan_export_steps(which, use_printer_folder=use_printer_folder)
+        if not steps:
+            return
+
+        role_paths = {
+            ROLE_NORMAL: normal_path,
+            ROLE_MIRROR: mirror_path,
+            ROLE_TMP_MIRROR_PDF: tmp_mirror_pdf,
+            ROLE_TMP_NORMAL_PDF: tmp_normal_pdf,
+        }
+
         try:
-            if which == "normal":
-                export_queue_pdf(
-                    normal_path, rows, title, machine,
-                    mode=mode, mirrored=False, scrap_labels=scrap_labels_snapshot,
-                )
-
-            elif which == "mirror":
-                export_queue_pdf(
-                    tmp_mirror_pdf, rows, title, machine,
-                    mode=mode, mirrored=True, scrap_labels=scrap_labels_snapshot,
-                )
-                if use_printer_folder:
+            for step in steps:
+                if step.kind == "pdf":
                     export_queue_pdf(
-                        tmp_normal_pdf, rows, title, machine,
-                        mode=mode, mirrored=False, scrap_labels=scrap_labels_snapshot,
+                        role_paths[step.dest], rows, title, machine,
+                        mode=mode, mirrored=step.mirrored, scrap_labels=scrap_labels_snapshot,
+                        report_style=report_style,
                     )
-                    mirror_and_normal_to_jpg_scaled(
-                        tmp_normal_pdf, tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
-                    )
-                    Path(tmp_normal_pdf).unlink(missing_ok=True)
-                else:
-                    pdf_all_pages_to_jpg_scaled(
-                        tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
-                    )
-                Path(tmp_mirror_pdf).unlink(missing_ok=True)
-
-            elif which == "both":
-                export_queue_pdf(
-                    normal_path, rows, title, machine,
-                    mode=mode, mirrored=False, scrap_labels=scrap_labels_snapshot,
-                )
-
-                export_queue_pdf(
-                    tmp_mirror_pdf, rows, title, machine,
-                    mode=mode, mirrored=True, scrap_labels=scrap_labels_snapshot,
-                )
-                if use_printer_folder:
-                    mirror_and_normal_to_jpg_scaled(
-                        normal_path, tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
-                    )
-                else:
-                    pdf_all_pages_to_jpg_scaled(
-                        tmp_mirror_pdf, mirror_path,
-                        target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
-                    )
-                Path(tmp_mirror_pdf).unlink(missing_ok=True)
-
-            else:
-                return
+                elif step.kind == "jpg":
+                    if len(step.sources) == 2:
+                        mirror_and_normal_to_jpg_scaled(
+                            role_paths[step.sources[0]], role_paths[step.sources[1]], role_paths[step.dest],
+                            target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
+                        )
+                    else:
+                        pdf_all_pages_to_jpg_scaled(
+                            role_paths[step.sources[0]], role_paths[step.dest],
+                            target_width_cm=target_cm, dpi=dpi, quality=95, rotation=rotation,
+                        )
+                elif step.kind == "cleanup":
+                    Path(role_paths[step.dest]).unlink(missing_ok=True)
 
         except Exception as e:
             try:
@@ -2958,23 +2847,17 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                 rr = by_roll[rn]
                 jobs_only = [x for x in rr if not x.is_gap]
 
-                fab_count: Dict[str, int] = {}
-                for x in jobs_only:
-                    fab_count[x.fabric] = fab_count.get(x.fabric, 0) + 1
-                main_fab = max(fab_count.items(), key=lambda kv: kv[1])[0]
+                main_fab = main_fabric_of(jobs_only)
 
                 order_rows, total_m = _build_order_rows(rr, export_time_iso)
 
                 old_scrap_key = get_roll_scrap_key(edit_roll_id)
-                new_scrap_key = old_scrap_key
-                scrap_reverted = False
-                if old_scrap_key:
-                    sc = next((s for s in scraps if s.key == old_scrap_key), None)
-                    if sc and total_m > scrap_effective_length(sc):
-                        scraps = set_scrap_used(scraps, old_scrap_key, False)
-                        save_scraps(scraps)
-                        new_scrap_key = ""
-                        scrap_reverted = True
+                new_scrap_key, scrap_reverted = decide_scrap_revert(
+                    old_scrap_key, scraps, total_m, _roll_limit_cfg()
+                )
+                if scrap_reverted:
+                    scraps = set_scrap_used(scraps, old_scrap_key, False)
+                    save_scraps(scraps)
 
                 roll_label = f"{batch} - Rolo {rn} - {main_fab}"
                 payload = {
@@ -3015,10 +2898,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
                     if not jobs_only:
                         continue
 
-                    fab_count: Dict[str, int] = {}
-                    for x in jobs_only:
-                        fab_count[x.fabric] = fab_count.get(x.fabric, 0) + 1
-                    main_fab = max(fab_count.items(), key=lambda kv: kv[1])[0]
+                    main_fab = main_fabric_of(jobs_only)
 
                     order_rows, _total_m = _build_order_rows(rr, export_time_iso)
 
@@ -3125,6 +3005,7 @@ def build_ui(parent: tk.Widget, *, preload: Optional[dict] = None):
 
     # init: já inicia em modo tecido com fila
     generate_queue()
+    refresh_files_tab()
 
     # Hooks expostos pro Nexor (menu lateral "Gerenciamento") poder abrir
     # estes diálogos diretamente, sem duplicar a lógica aqui.

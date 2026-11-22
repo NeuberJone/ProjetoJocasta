@@ -524,6 +524,8 @@ class Nexor(RootBase):
             configuracoes.build_operacao_section,
             configuracoes.build_planejador_section,
             configuracoes.build_registros_section,
+            configuracoes.build_backup_section,
+            configuracoes.build_vendedores_section,
         ):
             section_box = build(outer, self._on_module_settings_saved)
             section_box.pack(fill="x", pady=(12, 0))
@@ -754,10 +756,88 @@ class Nexor(RootBase):
         var_notes = tk.StringVar()
         ttk.Entry(form, textvariable=var_notes, width=28).grid(row=1, column=3, sticky="w", padx=6, pady=2)
 
-        ttk.Label(form, text="Pasta do JPG espelhado:").grid(row=2, column=0, sticky="w", pady=(2, 0))
+        def on_detect_speed() -> None:
+            paths = filedialog.askopenfilenames(
+                title="Selecionar log(s) .txt desta impressora",
+                filetypes=[("Log de impressão", "*.txt"), ("Todos os arquivos", "*.*")],
+            )
+            if not paths:
+                return
+
+            from modules.operacao.parser import parse_log_txt, read_log_general_fields
+            from modules.operacao.m1_check import extract_speed_samples
+
+            this_computer = var_computer_name.get().strip()
+            accepted: list[tuple[str, float, float, float]] = []
+            skipped: list[tuple[str, str]] = []
+
+            for p in paths:
+                name = Path(p).name
+                job = parse_log_txt(p)
+                if job is None:
+                    # Não é um log por-arquivo (Mimaki) reconhecido — tenta
+                    # como log diário físico (M1/JetPrime): um arquivo só
+                    # pode conter vários lotes, cada um vira uma amostra
+                    # própria na conferência (sem filtro de ComputerName,
+                    # que não existe nesse formato).
+                    samples, recognized = extract_speed_samples(Path(p))
+                    if recognized <= 0:
+                        skipped.append((name, "log inválido (sem EndTime ou formato não reconhecido)"))
+                    elif not samples:
+                        skipped.append((name, "log diário reconhecido, mas sem lote físico concluído sem erro"))
+                    else:
+                        for label, length_m, elapsed_min in samples:
+                            accepted.append((f"{name} — {label}", length_m, elapsed_min, length_m / elapsed_min))
+                    continue
+                if job.start_time is None:
+                    skipped.append((name, "sem horário inicial (StartTime) no log"))
+                    continue
+                elapsed_min = (job.end_time - job.start_time).total_seconds() / 60.0
+                if elapsed_min <= 0:
+                    skipped.append((name, "tempo decorrido inválido"))
+                    continue
+                if job.height_mm <= 0:
+                    skipped.append((name, "sem comprimento impresso (HeightMM) no log"))
+                    continue
+                if this_computer:
+                    cn = (read_log_general_fields(p).get("ComputerName") or "").strip()
+                    if cn and cn.lower() != this_computer.lower():
+                        skipped.append((name, f'log é do computador "{cn}", não de "{this_computer}"'))
+                        continue
+                length_m = job.height_mm / 1000.0
+                accepted.append((name, length_m, elapsed_min, length_m / elapsed_min))
+
+            if not accepted:
+                detail = "\n".join(f"- {n}: {r}" for n, r in skipped[:12])
+                messagebox.showwarning(
+                    "Detectar velocidade",
+                    "Nenhum log utilizável para calcular a velocidade.\n\n"
+                    + (detail or "Nenhum arquivo selecionado tinha os dados necessários."),
+                )
+                return
+
+            self._open_speed_review_dialog(
+                win, accepted, skipped, on_accept=lambda v: var_speed.set(f"{v:.2f}")
+            )
+
+        ttk.Button(form, text="Detectar velocidade de log(s)…", command=on_detect_speed).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(0, 2)
+        )
+        ttk.Label(
+            form,
+            text=(
+                "Calcula a velocidade real a partir de um ou mais logs .txt — log por-arquivo "
+                "(comprimento ÷ tempo entre início e fim) ou log diário físico, tipo M1/JetPrime "
+                "(uma amostra por lote concluído sem erro). Mostra uma conferência antes de "
+                "preencher o campo — nunca aplica sozinho."
+            ),
+            style="Muted.TLabel", wraplength=680, justify="left",
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        ttk.Label(form, text="Pasta do JPG espelhado:").grid(row=4, column=0, sticky="w", pady=(2, 0))
         var_jpg_dir = tk.StringVar()
         ttk.Entry(form, textvariable=var_jpg_dir, width=46).grid(
-            row=2, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0)
+            row=4, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0)
         )
 
         def on_browse_jpg_dir() -> None:
@@ -766,23 +846,23 @@ class Nexor(RootBase):
                 var_jpg_dir.set(folder)
 
         ttk.Button(form, text="Procurar…", command=on_browse_jpg_dir).grid(
-            row=2, column=3, sticky="w", padx=6, pady=(2, 0)
+            row=4, column=3, sticky="w", padx=6, pady=(2, 0)
         )
 
-        ttk.Label(form, text="Nome do arquivo do JPG:").grid(row=3, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(form, text="Nome do arquivo do JPG:").grid(row=5, column=0, sticky="w", pady=(2, 0))
         var_jpg_filename = tk.StringVar()
         ttk.Entry(form, textvariable=var_jpg_filename, width=28).grid(
-            row=3, column=1, sticky="w", padx=6, pady=(2, 0)
+            row=5, column=1, sticky="w", padx=6, pady=(2, 0)
         )
         ttk.Label(
             form,
             text="(opcionais — cada módulo decide se usa isso ou a pasta padrão)",
             style="Muted.TLabel",
-        ).grid(row=4, column=1, columnspan=3, sticky="w", padx=6)
+        ).grid(row=6, column=1, columnspan=3, sticky="w", padx=6)
 
-        ttk.Label(form, text="Orientação do JPG espelhado:").grid(row=5, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(form, text="Orientação do JPG espelhado:").grid(row=7, column=0, sticky="w", pady=(10, 0))
         rot_row = ttk.Frame(form)
-        rot_row.grid(row=5, column=1, columnspan=3, sticky="w", pady=(10, 0))
+        rot_row.grid(row=7, column=1, columnspan=3, sticky="w", pady=(10, 0))
         var_jpg_rotation = tk.IntVar(value=0)
         for text, value in (("0°", 0), ("90°", 90), ("180°", 180), ("270°", 270)):
             ttk.Radiobutton(rot_row, text=text, value=value, variable=var_jpg_rotation).pack(
@@ -795,11 +875,11 @@ class Nexor(RootBase):
         ttk.Checkbutton(
             form, text="Log adicional (cruza com outro log pra confirmar a impressão real)",
             variable=var_sec_enabled,
-        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ).grid(row=8, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
-        ttk.Label(form, text="Pasta do log adicional:").grid(row=7, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(form, text="Pasta do log adicional:").grid(row=9, column=0, sticky="w", pady=(2, 0))
         ent_sec_folder = ttk.Entry(form, textvariable=var_sec_folder, width=46)
-        ent_sec_folder.grid(row=7, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0))
+        ent_sec_folder.grid(row=9, column=1, columnspan=2, sticky="we", padx=6, pady=(2, 0))
 
         def on_browse_sec_folder() -> None:
             folder = filedialog.askdirectory(title="Pasta do log adicional (log diário da impressão real)")
@@ -807,7 +887,7 @@ class Nexor(RootBase):
                 var_sec_folder.set(folder)
 
         btn_sec_folder = ttk.Button(form, text="Procurar…", command=on_browse_sec_folder)
-        btn_sec_folder.grid(row=7, column=3, sticky="w", padx=6, pady=(2, 0))
+        btn_sec_folder.grid(row=9, column=3, sticky="w", padx=6, pady=(2, 0))
 
         def _update_sec_folder_state(*_a) -> None:
             state = "normal" if var_sec_enabled.get() else "disabled"
@@ -818,11 +898,11 @@ class Nexor(RootBase):
         _update_sec_folder_state()
 
         ttk.Label(form, text="Computador desta impressora:").grid(
-            row=8, column=0, sticky="w", pady=(10, 0)
+            row=10, column=0, sticky="w", pady=(10, 0)
         )
         var_computer_name = tk.StringVar()
         ttk.Entry(form, textvariable=var_computer_name, width=28).grid(
-            row=8, column=1, sticky="w", padx=6, pady=(10, 0)
+            row=10, column=1, sticky="w", padx=6, pady=(10, 0)
         )
 
         def on_detect_computer_name() -> None:
@@ -843,7 +923,7 @@ class Nexor(RootBase):
             var_computer_name.set(cn)
 
         ttk.Button(form, text="Detectar de um log…", command=on_detect_computer_name).grid(
-            row=8, column=2, columnspan=2, sticky="w", padx=6, pady=(10, 0)
+            row=10, column=2, columnspan=2, sticky="w", padx=6, pady=(10, 0)
         )
         ttk.Label(
             form,
@@ -854,14 +934,14 @@ class Nexor(RootBase):
                 "souber."
             ),
             style="Muted.TLabel", wraplength=680, justify="left",
-        ).grid(row=9, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         ttk.Label(form, text="Pasta dos logs desta impressora:").grid(
-            row=10, column=0, sticky="w", pady=(10, 0)
+            row=12, column=0, sticky="w", pady=(10, 0)
         )
         var_log_dir = tk.StringVar()
         ttk.Entry(form, textvariable=var_log_dir, width=46).grid(
-            row=10, column=1, columnspan=2, sticky="we", padx=6, pady=(10, 0)
+            row=12, column=1, columnspan=2, sticky="we", padx=6, pady=(10, 0)
         )
 
         def on_browse_log_dir() -> None:
@@ -870,7 +950,7 @@ class Nexor(RootBase):
                 var_log_dir.set(folder)
 
         ttk.Button(form, text="Procurar…", command=on_browse_log_dir).grid(
-            row=10, column=3, sticky="w", padx=6, pady=(10, 0)
+            row=12, column=3, sticky="w", padx=6, pady=(10, 0)
         )
         ttk.Label(
             form,
@@ -879,7 +959,7 @@ class Nexor(RootBase):
                 "\"Importar logs\" direto nessa pasta, bastando selecionar os arquivos."
             ),
             style="Muted.TLabel", wraplength=680, justify="left",
-        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ).grid(row=13, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         def refresh_tree(select_key: str | None = None) -> None:
             tree.delete(*tree.get_children())
@@ -994,6 +1074,108 @@ class Nexor(RootBase):
         ttk.Button(btns, text="Fechar", command=win.destroy).pack(side="right")
 
         refresh_tree()
+
+    def _open_speed_review_dialog(
+        self,
+        parent: tk.Misc,
+        accepted: list[tuple[str, float, float, float]],
+        skipped: list[tuple[str, str]],
+        on_accept,
+    ) -> None:
+        """accepted: [(nome, comprimento_m, tempo_min, velocidade_m_min), ...],
+        já filtrados (log válido, com StartTime, tempo/comprimento positivos e
+        computador compatível). skipped: [(nome, motivo), ...] — nunca entram
+        na média a menos que o usuário magicamente não os veja aqui; eles só
+        aparecem listados pra transparência. on_accept(valor_m_min) só é
+        chamado quando o usuário confirma — nunca aplica o valor sozinho."""
+        dlg = tk.Toplevel(parent)
+        dlg.title("Velocidade detectada dos logs")
+        dlg.transient(parent)
+        dlg.grab_set()
+        dlg.geometry("620x480")
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill="both", expand=True)
+        dialog_header(
+            frm, "Velocidade detectada",
+            "Desmarque algum log se o tempo ou comprimento parecer errado.",
+        ).pack(fill="x")
+
+        list_frame = ttk.Frame(frm)
+        list_frame.pack(fill="both", expand=True, pady=(10, 6))
+
+        canvas = tk.Canvas(list_frame, highlightthickness=0)
+        vsb = ttk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        inner = ttk.Frame(canvas)
+        inner_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_evt=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(evt) -> None:
+            canvas.itemconfig(inner_window, width=evt.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        check_rows: list[tuple[tk.BooleanVar, float, float]] = []
+        for name, length_m, elapsed_min, speed in accepted:
+            var = tk.BooleanVar(value=True)
+            check_rows.append((var, length_m, elapsed_min))
+            ttk.Checkbutton(
+                inner, variable=var,
+                text=f"{name} — {length_m:.2f} m em {elapsed_min:.1f} min — {speed:.2f} m/min",
+            ).pack(anchor="w", pady=2)
+
+        if skipped:
+            ttk.Separator(inner).pack(fill="x", pady=(8, 4))
+            ttk.Label(inner, text="Ignorados (não entram na conta):", style="Muted.TLabel").pack(anchor="w")
+            for name, reason in skipped:
+                ttk.Label(
+                    inner, text=f"  {name} — {reason}",
+                    style="Muted.TLabel", wraplength=540, justify="left",
+                ).pack(anchor="w")
+
+        lbl_suggestion = ttk.Label(frm, text="")
+        lbl_suggestion.pack(anchor="w", pady=(4, 10))
+
+        def _recompute(*_a) -> float:
+            marked = [(l, t) for v, l, t in check_rows if v.get()]
+            total_len = sum(l for l, _ in marked)
+            total_time = sum(t for _, t in marked)
+            if total_time <= 0:
+                lbl_suggestion.config(text="Nenhum log marcado.")
+                return 0.0
+            value = total_len / total_time
+            lbl_suggestion.config(
+                text=(
+                    f"Valor sugerido: {value:.2f} m/min "
+                    f"({len(marked)} log(s), {total_len:.2f} m em {total_time:.1f} min)"
+                )
+            )
+            return value
+
+        for var, _, _ in check_rows:
+            var.trace_add("write", _recompute)
+        _recompute()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+
+        def _use() -> None:
+            value = _recompute()
+            if value <= 0:
+                messagebox.showwarning("Velocidade detectada", "Marque ao menos um log.")
+                return
+            on_accept(value)
+            dlg.destroy()
+
+        ttk.Button(btns, text="Usar este valor", command=_use).pack(side="left")
+        ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side="left", padx=6)
 
 
 def main() -> None:

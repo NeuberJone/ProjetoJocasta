@@ -82,6 +82,30 @@ class RollOrderVersionsTests(unittest.TestCase):
         current_docs = {o["document"] for o in get_roll_orders(roll_id)}
         self.assertEqual(current_docs, {"doc1.jpg", "doc2.jpg"})
 
+    def test_start_time_survives_in_both_the_live_row_and_the_archived_version(self):
+        """Achado de revisão de código: get_roll_orders e o SELECT que
+        arquiva a versão anterior em update_roll_orders não incluíam
+        `start_time` na lista de colunas — a linha viva (reescrita pela
+        própria atualização) continuava correta, mas o snapshot arquivado
+        perdia essa coluna pra sempre, mesmo a informação existindo."""
+        order = _order("doc1.jpg")
+        order.start_time = "2026-11-05T09:58:00"
+        roll_id, _ = save_export_transactional(
+            machine="M1", roll_name="M1-0001", export_mode="normal", app_version="1.0.0",
+            orders=[order],
+        )
+
+        update_roll_orders(
+            roll_id, machine="M1", roll_name="M1-0001", export_mode="normal", app_version="1.0.0",
+            orders=[order, _order("doc2.jpg")],
+        )
+
+        live = {o["document"]: o["start_time"] for o in get_roll_orders(roll_id)}
+        self.assertEqual(live["doc1.jpg"], "2026-11-05T09:58:00")
+
+        archived = {o["document"]: o.get("start_time") for o in get_roll_order_version(roll_id, 0)}
+        self.assertEqual(archived["doc1.jpg"], "2026-11-05T09:58:00")
+
     def test_each_update_adds_a_new_version_instead_of_overwriting(self):
         roll_id, _ = save_export_transactional(
             machine="M1", roll_name="M1-0001", export_mode="normal", app_version="1.0.0",

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from core.migrate import migrate_legacy_path
 from core.json_store import ConfigurationWriteError, finite_number, read_json_config, require, validate_object, write_json_config
@@ -161,10 +161,51 @@ def _normalize_name(s: str) -> str:
     return s
 
 
+_RE_TRAILING_EXT = re.compile(r"\.[A-Za-z0-9]{2,5}$")
+# Mesma regra de modules/operacao/parser.py (duplicada de propósito, não
+# importada de lá — core/ não pode depender de modules/, ver docstring do
+# topo deste arquivo): parênteses no fim marcam observação/separação
+# ("(2)", "(Argentina)"), nunca fazem parte do nome do tecido.
+_RE_TRAILING_PAREN = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _strip_trailing_parens(raw: str) -> str:
+    while True:
+        stripped = _RE_TRAILING_PAREN.sub("", raw).strip()
+        if stripped == raw:
+            return raw
+        raw = stripped
+
+
 def infer_fabric_from_filename(filename: str, fabrics_map: Dict[str, FabricEntry]) -> str:
+    """Tecido a partir de um nome de arquivo — usado pela importação de
+    imagens do Planejador, onde (ao contrário do log de impressão real) não
+    há garantia de formato.
+
+    1) Se o nome seguir a mesma convenção "data - tecido - pedido" usada nos
+       logs de impressão (ver fabric_from_document em
+       modules/operacao/parser.py — mesma extração, por posição, duplicada
+       aqui pelo mesmo motivo de não importar de modules/), usa isso
+       diretamente — é inequívoco, não precisa adivinhar por token.
+    2) Senão (foto solta, sem essa estrutura), busca por token exato.
+    3) Por fim, um alias de mais de uma palavra (ex.: "Faixa de Capitão") só
+       casa por fronteira de palavra — nunca por simples "contém", que
+       poderia casar o meio de uma palavra sem relação nenhuma com o tecido.
+
+    Só reconhece um nome que já exista no cadastro (ou em algum alias dele);
+    do contrário, devolve "Outro" (nunca inventa/"adivinha" um tecido novo).
+    """
+    parts = [p.strip() for p in (filename or "").split(" - ")]
+    if len(parts) >= 3 and parts[1].strip():
+        candidate = _RE_TRAILING_EXT.sub("", parts[1].strip()).strip()
+        candidate = _strip_trailing_parens(candidate).strip()
+        if candidate:
+            canonical = canonical_fabric_name(candidate, fabrics_map)
+            if canonical:
+                return canonical
+
     s = _normalize_name(filename)
-    parts = re.split(r"[\s\-]+", s)
-    tokens = [p.strip() for p in parts if p.strip()]
+    tokens = [p.strip() for p in re.split(r"[\s\-]+", s) if p.strip()]
 
     alias_index: Dict[str, str] = {}
     for canonical, entry in fabrics_map.items():
@@ -177,12 +218,46 @@ def infer_fabric_from_filename(filename: str, fabrics_map: Dict[str, FabricEntry
         if t in alias_index:
             return alias_index[t]
 
-    # substring
+    # alias de mais de uma palavra, por fronteira de palavra (nunca substring solta)
     for alias, canonical in alias_index.items():
-        if alias and alias in s:
+        if alias and re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", s):
             return canonical
 
     return "Outro"
+
+
+def register_fabric_name(
+    name: str,
+    *,
+    aliases: Optional[List[str]] = None,
+    roll_length_m: Optional[float] = None,
+) -> str:
+    """Cadastra um tecido novo no cadastro COMPARTILHADO (ou, se já existir
+    por nome ou alias, só reaproveita a entrada existente) — usado tanto
+    pelo Planejador (botão "Novo tecido…") quanto pela Operação ("Editar
+    tecido", quando o nome digitado ainda não está cadastrado), pra que um
+    tecido criado em qualquer um dos dois módulos fique visível no outro.
+
+    Devolve o nome CANÔNICO (o já cadastrado, ou `name` quando é realmente
+    novo) — nunca duplica uma entrada só porque veio escrito com
+    maiúsculas/espaços diferentes (ex.: "Dryfit" e "dryfit" são o mesmo
+    tecido, ver canonical_fabric_name)."""
+    clean = (name or "").strip()
+    if not clean:
+        raise ValueError("Informe o nome do tecido.")
+
+    fabrics_map = load_fabrics()
+    canonical = canonical_fabric_name(clean, fabrics_map) or clean
+
+    entry = dict(fabrics_map.get(canonical, {}))
+    current_aliases = fabric_aliases(entry)
+    merged_aliases = list(dict.fromkeys(current_aliases + (aliases or [])))
+    entry["aliases"] = merged_aliases
+    entry["roll_length_m"] = float(roll_length_m) if roll_length_m else fabric_roll_length(entry)
+    fabrics_map[canonical] = entry
+
+    save_fabrics(fabrics_map)
+    return canonical
 
 
 def canonical_fabric_name(raw: str, fabrics_map: Dict[str, FabricEntry]) -> str:
